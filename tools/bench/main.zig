@@ -155,14 +155,19 @@ const CountingAllocator = struct {
     fn allocator(self: *CountingAllocator) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
     }
+    /// Atomic read-modify-writes, matching the Rust mirror's counting
+    /// `GlobalAlloc`, so neither side's instrumentation is cheaper.
     fn grow(self: *CountingAllocator, old: usize, new: usize) void {
-        self.live = self.live - old + new;
-        self.peak = @max(self.peak, self.live);
+        const live = if (new >= old)
+            @atomicRmw(usize, &self.live, .Add, new - old, .monotonic) + (new - old)
+        else
+            @atomicRmw(usize, &self.live, .Sub, old - new, .monotonic) - (old - new);
+        _ = @atomicRmw(usize, &self.peak, .Max, live, .monotonic);
     }
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
         const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
         const result = self.backing.rawAlloc(len, alignment, ret) orelse return null;
-        self.allocations += 1;
+        _ = @atomicRmw(usize, &self.allocations, .Add, 1, .monotonic);
         self.grow(0, len);
         return result;
     }
@@ -290,7 +295,8 @@ fn benchGrid(allocator: std.mem.Allocator) !void {
 fn benchBlockNested(allocator: std.mem.Allocator) !void {
     var tree = zafi.Tree.init(allocator);
     defer tree.deinit();
-    var parent = try tree.new_leaf(.{ .display = .block });
+    const top = try tree.new_leaf(.{ .display = .block });
+    var parent = top;
     for (0..50) |_| {
         const child = try tree.new_leaf(.{
             .display = .block,
@@ -307,7 +313,7 @@ fn benchBlockNested(allocator: std.mem.Allocator) !void {
     const root = try tree.new_with_children(.{
         .display = .block,
         .size = .{ .width = zafi.Dimension.length(500), .height = zafi.Dimension.auto },
-    }, &[_]zafi.NodeId{parent});
+    }, &[_]zafi.NodeId{top});
     try tree.compute_layout(root, .{ .width = .{ .definite = 500 }, .height = .max_content });
 }
 

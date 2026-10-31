@@ -167,7 +167,8 @@ fn grid() {
 
 fn block_nested() {
     let mut tree: TaffyTree<String> = TaffyTree::new();
-    let mut parent = tree.new_leaf(Style { display: Display::Block, ..Default::default() }).unwrap();
+    let top = tree.new_leaf(Style { display: Display::Block, ..Default::default() }).unwrap();
+    let mut parent = top;
     for _ in 0..50 {
         let child = tree
             .new_leaf(Style {
@@ -191,7 +192,7 @@ fn block_nested() {
                 size: Size { width: Dimension::length(500.0), height: Dimension::auto() },
                 ..Default::default()
             },
-            &[parent],
+            &[top],
         )
         .unwrap();
     tree.compute_layout(root, Size { width: AvailableSpace::Definite(500.0), height: AvailableSpace::MaxContent })
@@ -262,13 +263,15 @@ fn mixed() {
 // ---------------------------------------------------------------------------
 
 /// Immediate-mode pattern: one long-lived tree, cleared and rebuilt every frame.
-fn rebuild_setup() -> TaffyTree<String> {
-    TaffyTree::new()
+/// The child id buffer is reused across frames, as the Zig mirror does.
+fn rebuild_setup() -> (TaffyTree<String>, Vec<NodeId>) {
+    (TaffyTree::new(), Vec::with_capacity(1000))
 }
 
-fn rebuild_step(tree: &mut TaffyTree<String>) {
+fn rebuild_step(state: &mut (TaffyTree<String>, Vec<NodeId>)) {
+    let (tree, children) = state;
     tree.clear();
-    let mut children = Vec::with_capacity(1000);
+    children.clear();
     for _ in 0..1000 {
         children.push(
             tree.new_leaf(Style {
@@ -293,7 +296,7 @@ fn rebuild_step(tree: &mut TaffyTree<String>) {
                 size: Size { width: Dimension::length(2000.0), height: Dimension::length(100.0) },
                 ..Default::default()
             },
-            &children,
+            children,
         )
         .unwrap();
     tree.compute_layout(root, Size { width: AvailableSpace::Definite(2000.0), height: AvailableSpace::Definite(100.0) })
