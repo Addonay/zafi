@@ -277,6 +277,12 @@ const BlockItem = struct {
 
     /// The position style of the item
     position: style.Position,
+    /// The `direction` style of the item (resolves `self-start`/`self-end`)
+    direction: style.Direction,
+    /// `align-self` (`null` = auto); derives out-of-flow static positions
+    align_self: ?style.alignment.AlignSelf,
+    /// `justify-self` (`null` = auto: the container's `justify-items`)
+    justify_self: ?style.alignment.AlignSelf,
     /// The final offset of this item
     inset: geometry.Rect(style.dimension.LengthPercentageAuto),
     /// The margin of this item
@@ -488,6 +494,7 @@ fn compute_inner(comptime Tree: type, tree_ref: *Tree,
 
     const text_align = style_value.text_align;
     const align_content = style_value.align_content;
+    const justify_items = style_value.justify_items;
 
     // 1. Generate items
     //
@@ -580,6 +587,18 @@ tree_ref,
         const container_inner_height = container_outer_height - resolved_content_box_inset.vertical_axis_sum();
         const inflow_content_height = intrinsic_outer_height - resolved_content_box_inset.vertical_axis_sum();
         const free_space = container_inner_height - inflow_content_height;
+        const keyword = alignment.apply_alignment_fallback(free_space, 1, align_content_value);
+        const group_offset = alignment.compute_alignment_offset(free_space, 1, 0.0, keyword, false, true);
+        if (inflow_result.first_baseline) |baseline| {
+            inflow_result.first_baseline = baseline + group_offset;
+        }
+        for (items.list.items) |*item| {
+            if (item.final_layout) |*item_layout| {
+                item_layout.location.y += group_offset;
+            }
+            // The static positions of out-of-flow children move with the in-flow content
+            if (item.position.is_out_of_flow()) item.static_position.y += group_offset;
+        }
         var any_in_flow = false;
         for (items.list.items) |item| {
             if (item.final_layout != null) {
@@ -588,16 +607,6 @@ tree_ref,
             }
         }
         if (any_in_flow) {
-            const keyword = alignment.apply_alignment_fallback(free_space, 1, align_content_value);
-            const group_offset = alignment.compute_alignment_offset(free_space, 1, 0.0, keyword, false, true);
-            if (inflow_result.first_baseline) |baseline| {
-                inflow_result.first_baseline = baseline + group_offset;
-            }
-            for (items.list.items) |*item| {
-                if (item.final_layout) |*item_layout| {
-                    item_layout.location.y += group_offset;
-                }
-            }
 
             {
                 inflow_result.inflow_overflow_rect = RECT_ZERO;
@@ -686,11 +695,20 @@ tree_ref,
                 .node = item.node_id,
                 .order = item.order,
                 .position = item.position,
+                // The static-position rectangle of an out-of-flow child of a block
+                // container spans the content box inline and is a zero-height line
+                // at the child's hypothetical position in the block axis; its
+                // self-alignment aligns it within that rectangle.
+                // https://www.w3.org/TR/css-position-3/#staticpos-rect
                 .static_position = .{
-                    .x = layout.AxisStaticPosition.from_edge(
-                        item.static_position.x,
-                        if (direction.is_rtl()) .end else .start),
-                    .y = layout.AxisStaticPosition.from_edge(item.static_position.y, .start),
+                    .x = layout.AxisStaticPosition.from_alignment(
+                        alignment.resolve_self_relative(item.justify_self orelse justify_items, item.direction, direction, true),
+                        .{ .start = resolved_content_box_inset.left, .end = container_outer_width - resolved_content_box_inset.right },
+                        direction.is_rtl()),
+                    .y = layout.AxisStaticPosition.from_alignment(
+                        alignment.resolve_self_relative(item.align_self orelse style.alignment.AlignSelf.NORMAL, item.direction, direction, false),
+                        .{ .start = item.static_position.y, .end = item.static_position.y },
+                        false),
                 },
             });
         } else if (item.oof_candidates.items.len != 0) {
@@ -803,6 +821,9 @@ fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
             .contain = contain,
             .scrollbar_width = child_style.scrollbar_width,
             .position = position,
+            .direction = child_style.direction,
+            .align_self = child_style.align_self,
+            .justify_self = child_style.justify_self,
             .inset = child_style.inset,
             .margin = child_style.margin,
             .padding = padding,

@@ -42,20 +42,226 @@ pub fn resolve_static_offset(
     final_size: Size(f32),
     resolved_margin: Rect(f32)) Point(f32) {
     return .{
-        .x = resolveAxis(static_position.x, final_size.width, resolved_margin.left, resolved_margin.right),
-        .y = resolveAxis(static_position.y, final_size.height, resolved_margin.top, resolved_margin.bottom),
+        .x = resolve_static_offset_axis(static_position.x, final_size.width, .{ .start = resolved_margin.left, .end = resolved_margin.right }),
+        .y = resolve_static_offset_axis(static_position.y, final_size.height, .{ .start = resolved_margin.top, .end = resolved_margin.bottom }),
     };
 }
 
-fn resolveAxis(sp: layout.AxisStaticPosition, size: f32, margin_start: f32, margin_end: f32) f32 {
-    const overflows = sp.alignment.safety == .safe and size + margin_start + margin_end > sp.area.end - sp.area.start;
+/// Single-axis version of `resolve_static_offset`.
+fn resolve_static_offset_axis(sp: layout.AxisStaticPosition, size: f32, margin: geometry.Line(f32)) f32 {
+    const margin_box_size = size + margin.start + margin.end;
+    const overflows = sp.alignment.safety == .safe and margin_box_size > sp.area.end - sp.area.start;
     const keyword = if (overflows) sp.alignment.fallback else sp.alignment.keyword;
-    return switch (keyword) {
-        .start => sp.area.start + margin_start,
-        .end => sp.area.end - size - margin_end,
-        .center => (sp.area.start + sp.area.end) / 2.0 - size / 2.0 + (margin_start - margin_end) / 2.0,
+    return align_in_line(sp.area, margin_box_size, keyword) + margin.start;
+}
+
+/// Position a box of `size` within `container`, aligned to the given physical edge.
+inline fn align_in_line(container: geometry.Line(f32), size: f32, edge: layout.AxisStaticEdge) f32 {
+    return switch (edge) {
+        .start => container.start,
+        .end => container.end - size,
+        .center => (container.start + container.end - size) / 2.0,
     };
 }
+
+/// The self-alignment of an out-of-flow box in one axis, relative to the
+/// writing mode of its containing block (`start` is the logical start edge).
+const OofAlignment = enum {
+    /// `normal`: stretch-fit sizing for non-replaced, non-table boxes; start alignment
+    normal,
+    /// `stretch`: stretch-fit sizing; start alignment
+    stretch,
+    start,
+    center,
+    end,
+
+    /// From an `align-self`/`justify-self` value whose `auto`, `self-start` and
+    /// `self-end` have already been resolved.
+    fn from_resolved(value: alignment.AlignSelf) OofAlignment {
+        std.debug.assert(value.keyword != .self_start and value.keyword != .self_end);
+        return switch (value.keyword) {
+            .normal => .normal,
+            .stretch => .stretch,
+            .center => .center,
+            .end, .flex_end, .self_end => .end,
+            // The fallback alignment of `baseline` is `start`
+            .start, .flex_start, .self_start, .baseline => .start,
+        };
+    }
+
+    /// The physical edge the margin box aligns to once its size is known.
+    /// `normal` and `stretch` behave as `start`.
+    fn physical_edge(self: OofAlignment, reversed: bool) layout.AxisStaticEdge {
+        return switch (self) {
+            .center => .center,
+            .end => if (reversed) .start else .end,
+            .normal, .stretch, .start => if (reversed) .end else .start,
+        };
+    }
+};
+
+/// The inputs to the absolute positioning layout model
+/// (https://www.w3.org/TR/css-position-3/#abspos-layout) in one axis. All
+/// coordinates are physical and relative to the start of the containing
+/// block's inset-resolution area.
+const OofAxis = struct {
+    /// The size of the containing block in this axis
+    cb_size: f32,
+    /// Resolved insets (`null` = `auto`)
+    inset: geometry.Line(?f32),
+    /// Resolved margins (`null` = `auto`)
+    margin: geometry.Line(?f32),
+    /// Static position relative to the inset-resolution area
+    static_position: layout.AxisStaticPosition,
+    alignment: OofAlignment,
+    safety: alignment.AlignmentSafety,
+    /// Whether this is the containing block's inline axis
+    is_inline: bool,
+    /// Whether the logical start edge is the physical end edge (RTL inline axis)
+    reversed: bool,
+    /// Whether the containing block is a scroll container scrolling in this axis
+    is_scroll_axis: bool,
+
+    fn start_edge(self: *const OofAxis) layout.AxisStaticEdge {
+        return if (self.reversed) .end else .start;
+    }
+    fn end_edge(self: *const OofAxis) layout.AxisStaticEdge {
+        return if (self.reversed) .start else .end;
+    }
+
+    /// The inset-modified containing block (IMCB) in this axis
+    /// https://www.w3.org/TR/css-position-3/#resolving-insets
+    fn inset_modified_containing_block(self: *const OofAxis) geometry.Line(f32) {
+        var imcb: geometry.Line(f32) = undefined;
+        var weaker_edge: layout.AxisStaticEdge = undefined;
+        if (self.inset.start) |start| {
+            if (self.inset.end) |end| {
+                imcb = .{ .start = start, .end = self.cb_size - end };
+                weaker_edge = self.end_edge();
+            } else {
+                // A lone auto inset resolves to zero and is the weaker inset
+                imcb = .{ .start = start, .end = self.cb_size };
+                weaker_edge = .end;
+            }
+        } else if (self.inset.end) |end| {
+            imcb = .{ .start = 0, .end = self.cb_size - end };
+            weaker_edge = .start;
+        } else {
+            // Both insets auto: derive them from the static-position rectangle and
+            // the alignment within it
+            const sp = self.static_position;
+            imcb = switch (sp.alignment.keyword) {
+                .start => .{ .start = sp.area.start, .end = self.cb_size },
+                .end => .{ .start = 0, .end = sp.area.end },
+                .center => blk: {
+                    // Center on the static-position rectangle, bounded by the nearer
+                    // containing-block edge
+                    const center = (sp.area.start + sp.area.end) / 2.0;
+                    const start_distance = center;
+                    const end_distance = self.cb_size - center;
+                    break :blk if (@abs(start_distance) <= @abs(end_distance))
+                        .{ .start = 0, .end = 2.0 * start_distance }
+                    else
+                        .{ .start = self.cb_size - 2.0 * end_distance, .end = self.cb_size };
+                },
+            };
+            weaker_edge = self.end_edge();
+        }
+        // Overconstrained: reduce the weaker inset to bring the IMCB size up to zero
+        if (imcb.end < imcb.start) {
+            if (weaker_edge == .start) imcb.start = imcb.end else imcb.end = imcb.start;
+        }
+        return imcb;
+    }
+
+    fn inset_modified_containing_block_size(self: *const OofAxis) f32 {
+        const imcb = self.inset_modified_containing_block();
+        return imcb.end - imcb.start;
+    }
+
+    /// The stretch-fit border-box size: the IMCB minus non-auto margins
+    /// https://www.w3.org/TR/css-position-3/#abspos-auto-size
+    fn stretch_fit_size(self: *const OofAxis) f32 {
+        const non_auto_margin_sum = (self.margin.start orelse 0) + (self.margin.end orelse 0);
+        return @max(self.inset_modified_containing_block_size() - non_auto_margin_sum, 0);
+    }
+
+    /// Whether an `auto` size in this axis is the stretch-fit size (rather than fit-content)
+    fn is_stretch_sized(self: *const OofAxis, is_replaced: bool, is_table: bool) bool {
+        const no_auto_inset = self.inset.start != null and self.inset.end != null;
+        return no_auto_inset and switch (self.alignment) {
+            .stretch => true,
+            .normal => !is_replaced and !is_table,
+            else => false,
+        };
+    }
+
+    /// Resolve auto margins given the final size
+    /// https://www.w3.org/TR/css-position-3/#abspos-margins
+    fn resolve_margins(self: *const OofAxis, size: f32) geometry.Line(f32) {
+        const both_insets = self.inset.start != null and self.inset.end != null;
+        const imcb = self.inset_modified_containing_block();
+        const free_space = imcb.end - imcb.start - size;
+        if (self.margin.start != null and self.margin.end != null) return .{ .start = self.margin.start.?, .end = self.margin.end.? };
+        // If either inset is auto then auto margins resolve to zero
+        if (!both_insets) return .{ .start = self.margin.start orelse 0, .end = self.margin.end orelse 0 };
+        if (self.margin.start) |start| return .{ .start = start, .end = free_space - start };
+        if (self.margin.end) |end| return .{ .start = free_space - end, .end = end };
+        // In the inline axis, negative free space is absorbed entirely by the end margin
+        if (free_space < 0 and self.is_inline) {
+            return if (self.reversed) .{ .start = free_space, .end = 0 } else .{ .start = 0, .end = free_space };
+        }
+        return .{ .start = free_space / 2.0, .end = free_space / 2.0 };
+    }
+
+    /// The physical start of the border box given its final size and margins
+    /// https://www.w3.org/TR/css-position-3/#abspos-alignment
+    fn position(self: *const OofAxis, size: f32, margin: geometry.Line(f32)) f32 {
+        const imcb = self.inset_modified_containing_block();
+        if (self.inset.start == null and self.inset.end == null) {
+            // Aligned within the static-position rectangle
+            return resolve_static_offset_axis(self.static_position, size, margin);
+        }
+        // One auto inset: the margin box aligns to the stronger inset's edge
+        if (self.inset.end == null) return imcb.start + margin.start;
+        if (self.inset.start == null) return imcb.end - size - margin.end;
+
+        // Auto margins have already absorbed all of the free space
+        if (self.margin.start == null or self.margin.end == null) return imcb.start + margin.start;
+
+        const margin_box_size = size + margin.start + margin.end;
+        const imcb_size = imcb.end - imcb.start;
+        const edge = self.alignment.physical_edge(self.reversed);
+        const margin_box_start: f32 = switch (self.safety) {
+            .unsafe => align_in_line(imcb, margin_box_size, edge),
+            .safe => align_in_line(imcb, margin_box_size, if (margin_box_size > imcb_size) self.start_edge() else edge),
+            // Default overflow alignment for absolutely positioned boxes:
+            // https://www.w3.org/TR/css-align-3/#auto-safety-position
+            .default => blk: {
+                if (margin_box_size <= imcb_size or self.alignment == .normal) {
+                    // 1. Fits within the IMCB: align as specified
+                    break :blk align_in_line(imcb, margin_box_size, edge);
+                }
+                // The overflow limit rect: the bounding rect of the IMCB and the
+                // containing block, extended to infinity in a scroll container's
+                // scrollable direction
+                var limit = geometry.Line(f32){ .start = @min(imcb.start, 0), .end = @max(imcb.end, self.cb_size) };
+                if (self.is_scroll_axis) {
+                    if (self.reversed) limit.start = -std.math.inf(f32) else limit.end = std.math.inf(f32);
+                }
+                if (margin_box_size <= limit.end - limit.start) {
+                    // 2. Fits within the limit: cover the IMCB, aligned as specified as
+                    // far as possible without overflowing the limit
+                    const aligned = align_in_line(imcb, margin_box_size, edge);
+                    break :blk @max(@min(aligned, limit.end - margin_box_size), limit.start);
+                }
+                // 3. Start-align within the limit
+                break :blk align_in_line(limit, margin_box_size, self.start_edge());
+            },
+        };
+        return margin_box_start + margin.start;
+    }
+};
 
 /// Run the out-of-flow positioning pass for `node_id` after its layout
 /// algorithm has produced `output`: lay out the out-of-flow candidates in
@@ -123,7 +329,7 @@ pub fn compute_oof_layout_for_area(comptime Tree: type, tree_ref: *Tree,
     claims: style.ContainingBlockClaims) !OofLayoutResult {
     const TreeApi = LayoutTree(Tree);
     const owner_style = TreeApi.get_style(tree_ref, geometry_owner);
-    const is_scroll_container = owner_style.overflow.x.is_scroll_container() or owner_style.overflow.y.is_scroll_container();
+    const overflow = owner_style.overflow;
     const scratch = TreeApi.scratch_allocator(tree_ref);
 
     var hoisted = std.ArrayList(NodeId).empty;
@@ -138,7 +344,7 @@ tree_ref,
         area.offset,
         direction,
         claims,
-        is_scroll_container,
+        overflow,
         &hoisted,
         &unclaimed);
     return .{ .hoisted = hoisted, .unclaimed = unclaimed, .scrollable_overflow_rect = scrollable_overflow_rect, .allocator = scratch };
@@ -175,6 +381,7 @@ pub fn layout_oof_box(comptime Tree: type, tree_ref: *Tree,
     area_size_in: Size(f32),
     area_offset_in: Point(f32),
     direction: style.Direction,
+    container_overflow: Point(style.Overflow),
     grid_owner: ?NodeId,
     cache_probe: ?*bool) !OofBoxLayout {
     const TreeApi = LayoutTree(Tree);
@@ -223,7 +430,7 @@ pub fn layout_oof_box(comptime Tree: type, tree_ref: *Tree,
     const min_size_raw = math.optional_size_maybe_add(resolveAutoSize(child_style.min_size, area_size).maybe_apply_aspect_ratio(aspect_ratio), to_optional_size(box_sizing_adjustment));
     // A box's min size is at least its padding+border sum: `or(padding_border_sum)`
     // then `.maybe_max(padding_border_sum)`.
-    const min_size = Size(?f32){
+    var min_size = Size(?f32){
         .width = @max(min_size_raw.width orelse padding_border_sum.width, padding_border_sum.width),
         .height = @max(min_size_raw.height orelse padding_border_sum.height, padding_border_sum.height),
     };
@@ -231,13 +438,66 @@ pub fn layout_oof_box(comptime Tree: type, tree_ref: *Tree,
     var known_dimensions = math.optional_size_maybe_clamp(style_size, min_size, max_size);
 
     const is_replaced = child_style.is_compressible_replaced();
+    const is_table = child_style.is_table();
+    const item_direction = child_style.direction;
+    const justify_self = alignment_common.resolve_self_relative(child_style.justify_self orelse alignment.AlignSelf.NORMAL, item_direction, direction, true);
+    const align_self = alignment_common.resolve_self_relative(child_style.align_self orelse alignment.AlignSelf.NORMAL, item_direction, direction, false);
     const overflow = child_style.overflow;
     const scrollbar_width = child_style.scrollbar_width;
     const contain = child_style.contain;
 
+    // Static positions are relative to the containing block's border box: make
+    // them relative to the inset-resolution area
+    const static_position = Point(layout.AxisStaticPosition){
+        .x = .{
+            .area = .{ .start = candidate.static_position.x.area.start - area_offset.x, .end = candidate.static_position.x.area.end - area_offset.x },
+            .alignment = candidate.static_position.x.alignment,
+        },
+        .y = .{
+            .area = .{ .start = candidate.static_position.y.area.start - area_offset.y, .end = candidate.static_position.y.area.end - area_offset.y },
+            .alignment = candidate.static_position.y.alignment,
+        },
+    };
+
+    const horizontal = OofAxis{
+        .cb_size = area_width,
+        .inset = .{ .start = left, .end = right },
+        .margin = .{ .start = margin.left, .end = margin.right },
+        .static_position = static_position.x,
+        .alignment = OofAlignment.from_resolved(justify_self),
+        .safety = justify_self.safety,
+        .is_inline = true,
+        .reversed = direction.is_rtl(),
+        .is_scroll_axis = container_overflow.x.is_scroll_container(),
+    };
+    const vertical = OofAxis{
+        .cb_size = area_height,
+        .inset = .{ .start = top, .end = bottom },
+        .margin = .{ .start = margin.top, .end = margin.bottom },
+        .static_position = static_position.y,
+        .alignment = OofAlignment.from_resolved(align_self),
+        .safety = align_self.safety,
+        .is_inline = false,
+        .reversed = false,
+        .is_scroll_axis = container_overflow.y.is_scroll_container(),
+    };
+    const stretch_fit_size = Size(f32){ .width = horizontal.stretch_fit_size(), .height = vertical.stretch_fit_size() };
+    // The space available to the border box is its stretch-fit size. For a table
+    // it never exceeds the containing block minus margins
+    // (https://www.w3.org/TR/css-tables-3/#abspos).
+    var available_size = stretch_fit_size;
+    if (is_table) {
+        available_size.width = @min(available_size.width, @max(area_width - (margin.left orelse 0) - (margin.right orelse 0), 0));
+        available_size.height = @min(available_size.height, @max(area_height - (margin.top orelse 0) - (margin.bottom orelse 0), 0));
+    }
+    const oof_available_space = Size(AvailableSpace){
+        .width = .{ .definite = math.f32_maybe_clamp(available_size.width, min_size.width, max_size.width) },
+        .height = .{ .definite = math.f32_maybe_clamp(available_size.height, min_size.height, max_size.height) },
+    };
+
     // Resolve any sizing keywords (min-content, max-content, fit-content,
     // fit-content(...), stretch) in the size styles. An explicitly sized axis
-    // takes precedence over the inset-derived size below.
+    // takes precedence over the automatic size below.
     if (size_style.width.is_sizing_keyword() or size_style.height.is_sizing_keyword()) {
         try sizing_keyword.resolve_absolute_sizing_keywords(
             Tree,
@@ -252,37 +512,36 @@ tree_ref,
         known_dimensions = math.optional_size_maybe_clamp(known_dimensions.maybe_apply_aspect_ratio(aspect_ratio), min_size, max_size);
     }
 
-    // Fill in width from left/right and reapply aspect ratio if:
-    //   - Width is not already known
-    //   - Item has both left and right inset properties set
-    //   - Item is not a replaced element (an `auto` size of an absolutely
-    //     positioned replaced element resolves to its intrinsic size rather than
-    //     being stretched between the insets:
-    //     https://www.w3.org/TR/CSS22/visudet.html#abs-replaced-width)
-    if (!is_replaced and known_dimensions.width == null and left != null and right != null) {
-        const new_width_raw = math.f32_maybe_sub(area_width, margin.left) - (margin.right orelse 0) - left.? - right.?;
-        known_dimensions.width = @max(new_width_raw, 0);
-        known_dimensions = math.optional_size_maybe_clamp(known_dimensions.maybe_apply_aspect_ratio(aspect_ratio), min_size, max_size);
+    // Resolve automatic sizes (https://www.w3.org/TR/css-position-3/#abspos-auto-size).
+    //
+    // An auto size is the stretch-fit size if the self-alignment in that axis is
+    // `stretch` (or `normal` for a non-replaced, non-table box) and neither inset
+    // is auto; otherwise it is the fit-content size, measured below. Stretch-fit
+    // sizes resolve first so a size can transfer through the aspect ratio. The
+    // block axis is the ratio-dependent one, so a stretched inline size is
+    // transferred rather than also stretching the block size; explicit `stretch`
+    // in both axes stretches both and ignores the ratio.
+    const stretch_width = known_dimensions.width == null and horizontal.is_stretch_sized(is_replaced, is_table);
+    const stretch_height = known_dimensions.height == null and vertical.is_stretch_sized(is_replaced, is_table);
+    const both_explicit_stretch = horizontal.alignment == .stretch and vertical.alignment == .stretch;
+    const stretch_aspect_ratio: ?f32 = if (stretch_width and stretch_height and both_explicit_stretch) null else aspect_ratio;
+    if (stretch_width) {
+        if (is_table) {
+            // A table cannot be stretched smaller than its content: stretch-fit is a minimum
+            min_size.width = @max(min_size.width orelse 0, stretch_fit_size.width);
+        } else {
+            known_dimensions.width = stretch_fit_size.width;
+            known_dimensions = math.optional_size_maybe_clamp(known_dimensions.maybe_apply_aspect_ratio(stretch_aspect_ratio), min_size, max_size);
+        }
     }
-
-    // Fill in height from top/bottom and reapply aspect ratio if:
-    //   - Height is not already known
-    //   - Item has both top and bottom inset properties set
-    //   - Item is not a replaced element
-    //     (https://www.w3.org/TR/CSS22/visudet.html#abs-replaced-height)
-    if (!is_replaced and known_dimensions.height == null and top != null and bottom != null) {
-        const new_height_raw = math.f32_maybe_sub(area_height, margin.top) - (margin.bottom orelse 0) - top.? - bottom.?;
-        known_dimensions.height = @max(new_height_raw, 0);
-        known_dimensions = math.optional_size_maybe_clamp(known_dimensions.maybe_apply_aspect_ratio(aspect_ratio), min_size, max_size);
+    if (known_dimensions.height == null and stretch_height) {
+        if (is_table) {
+            min_size.height = @max(min_size.height orelse 0, stretch_fit_size.height);
+        } else {
+            known_dimensions.height = stretch_fit_size.height;
+            known_dimensions = math.optional_size_maybe_clamp(known_dimensions.maybe_apply_aspect_ratio(stretch_aspect_ratio), min_size, max_size);
+        }
     }
-
-    // The space available to the box's border box: the containing block minus
-    // the box's insets and margins (`auto` ones count as zero), clamped by its
-    // min/max sizes.
-    const oof_available_space = Size(AvailableSpace){
-        .width = .{ .definite = math.f32_maybe_clamp(@max(area_width - (left orelse 0) - (right orelse 0) - (margin.left orelse 0) - (margin.right orelse 0), 0), min_size.width, max_size.width) },
-        .height = .{ .definite = math.f32_maybe_clamp(@max(area_height - (top orelse 0) - (bottom orelse 0) - (margin.top orelse 0) - (margin.bottom orelse 0), 0), min_size.height, max_size.height) },
-    };
 
     var measured_size: Size(f32) = .{ .width = 0, .height = 0 };
     if (known_dimensions.width == null or known_dimensions.height == null) {
@@ -316,86 +575,20 @@ tree_ref,
     if (cache_probe) |probe| probe.* = (TreeApi.cache_get(tree_ref, candidate.node, &layout_input)) != null;
     var layout_output = try compute_child_layout_pass(Tree, tree_ref, candidate.node, layout_input);
 
-    const non_auto_margin = Rect(?f32){
-        .left = if (left != null) (margin.left orelse 0) else null,
-        .right = if (right != null) (margin.right orelse 0) else null,
-        .top = if (top != null) (margin.top orelse 0) else null,
-        .bottom = if (bottom != null) (margin.bottom orelse 0) else null,
-    };
-
-    // Expand auto margins to fill available space
-    // https://www.w3.org/TR/CSS21/visudet.html#abs-non-replaced-width
-    const auto_margin: Rect(f32) = blk: {
-        // Auto margins only absorb free space in an axis where both insets are
-        // non-auto. Otherwise they resolve to 0.
-        const free_space = Size(f32){
-            .width = if (left != null and right != null)
-                area_size.width - left.? - right.? - final_size.width - (non_auto_margin.left orelse 0) - (non_auto_margin.right orelse 0)
-            else
-                0,
-            .height = if (top != null and bottom != null)
-                area_size.height - top.? - bottom.? - final_size.height - (non_auto_margin.top orelse 0) - (non_auto_margin.bottom orelse 0)
-            else
-                0,
-        };
-
-        const auto_margin_count_width: u32 = @as(u32, @intFromBool(margin.left == null)) + @as(u32, @intFromBool(margin.right == null));
-        const auto_margin_count_height: u32 = @as(u32, @intFromBool(margin.top == null)) + @as(u32, @intFromBool(margin.bottom == null));
-        const auto_margin_size = Size(f32){
-            // If all three of 'left', 'width', and 'right' are 'auto': First set any
-            // 'auto' values for 'margin-left' and 'margin-right' to 0. ...
-            // If none of the three is 'auto': If both 'margin-left' and 'margin-right'
-            // are 'auto', solve the equation under the extra constraint that the two
-            // margins get equal values, unless this would make them negative, ...
-            .width = if (auto_margin_count_width == 2 and free_space.width <= 0)
-                0
-            else if (auto_margin_count_width > 0)
-                free_space.width / @as(f32, @floatFromInt(auto_margin_count_width))
-            else
-                0,
-            .height = if (auto_margin_count_height == 2 and free_space.height <= 0)
-                0
-            else if (auto_margin_count_height > 0)
-                free_space.height / @as(f32, @floatFromInt(auto_margin_count_height))
-            else
-                0,
-        };
-
-        break :blk Rect(f32){
-            .left = if (margin.left != null) 0 else auto_margin_size.width,
-            .right = if (margin.right != null) 0 else auto_margin_size.width,
-            .top = if (margin.top != null) 0 else auto_margin_size.height,
-            .bottom = if (margin.bottom != null) 0 else auto_margin_size.height,
-        };
-    };
-
+    // Resolve auto margins (https://www.w3.org/TR/css-position-3/#abspos-margins)
+    const horizontal_margin = horizontal.resolve_margins(final_size.width);
+    const vertical_margin = vertical.resolve_margins(final_size.height);
     const resolved_margin = Rect(f32){
-        .left = margin.left orelse auto_margin.left,
-        .right = margin.right orelse auto_margin.right,
-        .top = margin.top orelse auto_margin.top,
-        .bottom = margin.bottom orelse auto_margin.bottom,
+        .left = horizontal_margin.start,
+        .right = horizontal_margin.end,
+        .top = vertical_margin.start,
+        .bottom = vertical_margin.end,
     };
 
-    const static_offset = resolve_static_offset(candidate.static_position, final_size, resolved_margin);
-
-    const x_offset: f32 = if (left != null and right != null)
-        (if (direction.is_rtl()) area_size.width - final_size.width - right.? - resolved_margin.right else left.? + resolved_margin.left)
-    else if (left != null)
-        left.? + resolved_margin.left
-    else if (right != null)
-        area_size.width - final_size.width - right.? - resolved_margin.right
-    else
-        static_offset.x - area_offset.x;
-
-    const y_offset: ?f32 = if (top != null)
-        top.? + resolved_margin.top
-    else if (bottom != null)
-        area_size.height - final_size.height - bottom.? - resolved_margin.bottom
-    else
-        null;
+    // Align the margin box within the IMCB (https://www.w3.org/TR/css-position-3/#abspos-alignment)
     const location = Point(f32){
-        .x = x_offset + area_offset.x,
-        .y = if (y_offset) |value| value + area_offset.y else static_offset.y,
+        .x = horizontal.position(final_size.width, horizontal_margin) + area_offset.x,
+        .y = vertical.position(final_size.height, vertical_margin) + area_offset.y,
     };
 
     // Note: axis intentionally switched here as scrollbars take up space in the
@@ -452,11 +645,12 @@ pub fn perform_oof_layout(comptime Tree: type, tree_ref: *Tree,
     area_offset: Point(f32),
     direction: style.Direction,
     claims: style.ContainingBlockClaims,
-    is_scroll_container: bool,
+    container_overflow: Point(style.Overflow),
     hoisted: *std.ArrayList(NodeId),
     unclaimed: *layout.OofCandidates) !Rect(f32) {
     const TreeApi = LayoutTree(Tree);
     var absolute_overflow_rect = geometry.RECT_F32_ZERO;
+    const is_scroll_container = container_overflow.x.is_scroll_container() or container_overflow.y.is_scroll_container();
 
     if (candidates.items.len == 0) return absolute_overflow_rect;
 
@@ -482,7 +676,7 @@ pub fn perform_oof_layout(comptime Tree: type, tree_ref: *Tree,
         index += 1;
         try hoisted.append(scratch, candidate.node);
 
-        const box_layout = try layout_oof_box(Tree, tree_ref, candidate, area_size, area_offset, direction, node_id, null);
+        const box_layout = try layout_oof_box(Tree, tree_ref, candidate, area_size, area_offset, direction, container_overflow, node_id, null);
         const location = box_layout.layout.location;
         const final_size = box_layout.layout.size;
 
