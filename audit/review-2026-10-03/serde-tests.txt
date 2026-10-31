@@ -1,6 +1,0 @@
-Build Summary: 4/4 steps succeeded; 97/97 tests passed
-test success
-+- run test 97 pass (97 total) 1s MaxRSS:8M
-   +- compile test debug native success 2s MaxRSS:208M
-      +- options success
-

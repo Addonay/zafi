@@ -1,9 +1,0 @@
-RUST measure_count_after_first=1
-RUST child loc=(6,6) size=(10,11) order=0 pad=(2,3,4,5) border=(1,1,1,1) margin=(6,6,6,6) scrollbar=(0,0)
-RUST root margin=(0,0,0,0) scrollbar=(0,0) pad=(0,0,0,0) border=(0,0,0,0)
-RUST measure_count_after_second=1
-RUST dirty root after compute=Ok(false) dirty child=Ok(false)
-RUST root margin=(5,6,7,8) scrollbar=(15,15)
-RUST nested_measure_calls=5
-RUST compute_layout_without_global_measure size=(0,0)
-RUST abs size=(80,10) loc=(10,10) grandchild width=40

@@ -1,7 +1,0 @@
-Build Summary: 5/5 steps succeeded
-fixtures-bin success
-+- install fixtures success
-   +- compile exe fixtures safe native success 1m MaxRSS:806M
-      +- options success
-      +- options cached
-

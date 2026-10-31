@@ -44,7 +44,7 @@
 //! };
 //! ```
 //!
-//! Then `zlay.compute_block_layout(MyTree, my_tree, root, input, null)` and the
+//! Then `zafi.compute_block_layout(MyTree, my_tree, root, input, null)` and the
 //! other entry points accept it directly.
 //!
 //! Names ending in `_impl` are also accepted, which is convenient when the host

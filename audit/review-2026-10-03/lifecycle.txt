@@ -1,6 +1,0 @@
-1000-node persistent flex tree; layout only; median of 9 on CPU 2
-phase|rust_ns|zig_ns|ratio
-cached|67077|17700|0.264
-root_dirty|310376|370314|1.193
-one_child_dirty|360291|399034|1.108
-resize|349606|402963|1.153

@@ -1,7 +1,0 @@
-   text	   data	    bss	    dec	    hex	filename
- 986597	  25232	 264333	1276162	 137902	/tmp/zlay-bench-corrected-stripped
- 715948	  13656	   1418	 731022	  b278e	/tmp/zlay-rust-corrected-stripped
- 333347	  23992	 263357	 620696	  97898	/tmp/zlay-bench-small-stripped
-/tmp/zlay-bench-corrected-stripped 1015552
-/tmp/zlay-rust-corrected-stripped 733456
-/tmp/zlay-bench-small-stripped 361064

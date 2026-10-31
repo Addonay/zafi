@@ -1,4 +1,0 @@
-   Compiling slotmap v1.1.1
-   Compiling taffy v0.14.0 (/tmp/zlay-audit-pin/.references/taffy)
-   Compiling zlay-bench-rust v0.1.0 (/tmp/zlay-audit-pin/tools/bench/rust)
-    Finished `release` profile [optimized] target(s) in 26.28s

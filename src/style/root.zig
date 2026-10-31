@@ -44,7 +44,7 @@ pub const BoxGenerationMode = enum { normal, none };
 ///
 /// `Position.static` is the default value, matching CSS. (Taffy made
 /// `Position.relative` the default for backwards compatibility before CSS
-/// semantics were implemented; Zlay tracks current Taffy, so `static` is the
+/// semantics were implemented; Zafi tracks current Taffy, so `static` is the
 /// default here too.)
 pub const Position = enum {
     /// Taffy-compatible serde: PascalCase variant names.
@@ -538,7 +538,7 @@ pub const Style = struct {
     }
 
     /// Whether the box establishes an independent formatting context purely
-    /// because of its `display` value. `flow_root` is a Zlay extension (CSS
+    /// because of its `display` value. `flow_root` is a Zafi extension (CSS
     /// `display: flow-root`) rather than a Taffy concept.
     pub fn establishes_formatting_context_from_display(self: Style) bool {
         return self.display == .flow_root;

@@ -10,9 +10,9 @@
 
 // Namespaced so embedding this package as a dependency cannot collide
 // with a consumer module import of the same conventional name.
-const zlay_options = @import("zlay_options");
+const zafi_options = @import("zafi_options");
 
-pub const enabled = zlay_options.serde;
+pub const enabled = zafi_options.serde;
 
 /// Real implementations when enabled; an empty namespace when disabled.
 pub const impl = if (enabled) @import("serde_hooks.zig") else struct {};

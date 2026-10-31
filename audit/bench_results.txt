@@ -1,7 +1,0 @@
-bench|scenario|iters|ns_per_iter|arena_capacity_bytes
-bench|tree_creation_10k|20|15352223|132174922
-bench|flex_row_1000|20|488959|9094546
-bench|flex_wrap_500|20|211799|2597832
-bench|grid_50x50|10|4755334|18956510
-bench|block_nested_50|30|33764|743770
-bench|mixed_flex_grid_block|10|1032686|3763924
