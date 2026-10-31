@@ -586,6 +586,10 @@ pub const MinTrackSizingFunction = struct {
         if (input.is_fr() or input.is_fit_content()) return .auto;
         return .{ .value = input.value };
     }
+    /// `auto`, or a percentage (or calc) whose basis is indefinite.
+    pub fn behaves_as_auto(self: MinTrackSizingFunction, parent_size: ?f32) bool {
+        return self.value.is_auto() or (parent_size == null and self.value.uses_percentage());
+    }
     pub fn uses_percentage(self: MinTrackSizingFunction) bool {
         return self.value.uses_percentage();
     }

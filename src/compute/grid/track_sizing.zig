@@ -596,37 +596,28 @@ fn resolve_intrinsic_track_sizes(comptime Tree: type, tree_ref: *Tree,
                 const track = &axis_tracks[track_index];
 
                 // Handle base sizes
-                const new_base_size: f32 = switch (track.min_track_sizing_function.value.tag()) {
-                    .min_content => math.f32_max(track.base_size, item_sizer.minContentContribution(item, axis_tracks)),
-                    // If the container size is indefinite then percentage sized tracks
-                    // should be treated as min-content.
-                    .percent => if (axis_inner_node_size == null)
-                        math.f32_max(track.base_size, item_sizer.minContentContribution(item, axis_tracks))
-                    else
-                        track.base_size,
-                    .max_content => math.f32_max(track.base_size, item_sizer.maxContentContribution(item, axis_tracks)),
-                    .auto => blk: {
-                        const space = switch (axis_available_grid_space) {
-                            // QUIRK: only apply the limited min-content contribution rule
-                            // if the item is not a scroll container.
-                            .min_content, .max_content => if (!item.overflow.get(axis).is_scroll_container()) blk2: {
-                                const axis_minimum_size = item_sizer.minimumContribution(item, axis_tracks);
-                                const axis_min_content_size = item_sizer.minContentContribution(item, axis_tracks);
-                                const limit = track.max_track_sizing_function.definite_limit(axis_inner_node_size);
-                                break :blk2 math.f32_max(math.f32_maybe_min(axis_min_content_size, limit), axis_minimum_size);
-                            } else item_sizer.minimumContribution(item, axis_tracks),
-                            .definite => item_sizer.minimumContribution(item, axis_tracks),
-                        };
-                        break :blk math.f32_max(track.base_size, space);
-                    },
-                    .length => track.base_size,
-                    // Handle calc() like percentage
-                    .calc => if (axis_inner_node_size == null)
-                        math.f32_max(track.base_size, item_sizer.minContentContribution(item, axis_tracks))
-                    else
-                        track.base_size,
-                    else => track.base_size,
-                };
+                const new_base_size: f32 = if (track.min_track_sizing_function.value.is_min_content())
+                    math.f32_max(track.base_size, item_sizer.minContentContribution(item, axis_tracks))
+                else if (track.min_track_sizing_function.value.is_max_content())
+                    math.f32_max(track.base_size, item_sizer.maxContentContribution(item, axis_tracks))
+                // If the container size is indefinite and has not yet been resolved then
+                // percentage sized tracks are treated as auto (Taffy 8409f3f).
+                else if (track.min_track_sizing_function.behaves_as_auto(axis_inner_node_size)) blk: {
+                    const space = switch (axis_available_grid_space) {
+                        // QUIRK: only apply the limited min-content contribution rule
+                        // if the item is not a scroll container.
+                        .min_content, .max_content => if (!item.overflow.get(axis).is_scroll_container()) blk2: {
+                            const axis_minimum_size = item_sizer.minimumContribution(item, axis_tracks);
+                            const axis_min_content_size = item_sizer.minContentContribution(item, axis_tracks);
+                            const limit = track.max_track_sizing_function.definite_limit(axis_inner_node_size);
+                            break :blk2 math.f32_max(math.f32_maybe_min(axis_min_content_size, limit), axis_minimum_size);
+                        } else item_sizer.minimumContribution(item, axis_tracks),
+                        .definite => item_sizer.minimumContribution(item, axis_tracks),
+                    };
+                    break :blk math.f32_max(track.base_size, space);
+                }
+                // Not an intrinsic track sizing function
+                else track.base_size;
                 axis_tracks[track_index].base_size = new_base_size;
 
                 // Handle growth limits
