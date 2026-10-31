@@ -1233,8 +1233,10 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                 item_layout = try TreeApi.compute_child_layout(tree_ref, item.node_id, child_inputs);
             } else {
                 // Replaced elements may not have a known width (they are sized by their
-                // measure function rather than stretch-sized)
-                const width = known_dimensions.width orelse stretch_width;
+                // measure function rather than stretch-sized). The width is never smaller than
+                // the item's padding and border, which the content box inset of the child is
+                // built from.
+                const width = @max(known_dimensions.width orelse stretch_width, item.padding_border_sum.width);
 
                 // TODO: account for auto margins
                 const inset_left = item_non_auto_margin.left + content_box_inset.left;
