@@ -22,6 +22,8 @@ pub fn resolve_sizing_keyword(value: dimension.Dimension, stretch_size: ?f32, pe
         .fit_content_px => .{ .measure = .{ .definite = value.value.value() } },
         .fit_content_percent => if (percent_basis) |basis| .{ .measure = .{ .definite = basis * value.value.value() } } else null,
         .fit_content_keyword => if (stretch_size) |size| .{ .measure = .{ .definite = size } } else null,
+        // fit-content(calc()): the limit resolves through the default calc resolver (zero).
+        .fit_content_calc => if (percent_basis != null) .{ .measure = .{ .definite = 0 } } else null,
         .stretch => if (stretch_size) |size| .{ .exact = size } else null,
         else => null,
     };
@@ -29,7 +31,7 @@ pub fn resolve_sizing_keyword(value: dimension.Dimension, stretch_size: ?f32, pe
 
 pub fn is_intrinsic(value: dimension.Dimension) bool {
     return switch (value.value.tag()) {
-        .min_content, .max_content, .fit_content_keyword, .fit_content_px, .fit_content_percent, .stretch, .content => true,
+        .min_content, .max_content, .fit_content_keyword, .fit_content_px, .fit_content_percent, .fit_content_calc, .stretch, .content => true,
         else => false,
     };
 }

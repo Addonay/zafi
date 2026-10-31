@@ -587,7 +587,7 @@ pub const MinTrackSizingFunction = struct {
         return .{ .value = input.value };
     }
     pub fn uses_percentage(self: MinTrackSizingFunction) bool {
-        return self.value.tag() == .percent;
+        return self.value.uses_percentage();
     }
 
     pub fn definite_value(self: MinTrackSizingFunction, parent_size: ?f32) ?f32 {
@@ -661,7 +661,22 @@ pub const MaxTrackSizingFunction = struct {
         return switch (value.value.tag()) {
             .length => fit_content_length(value.value.value()),
             .percent => fit_content_percent(value.value.value()),
+            .calc => fit_content_calc(value.value.calc_value().?),
             else => .auto,
+        };
+    }
+    pub fn fit_content_calc(handle: *const anyopaque) MaxTrackSizingFunction {
+        return .{ .value = compact_length.CompactLength.fit_content_calc(handle) };
+    }
+    /// The resolved `fit-content()` limit, or null when it is not a
+    /// fit-content() function or its percentage basis is indefinite. calc()
+    /// limits resolve through the tree's default resolver (zero).
+    pub fn fit_content_limit(self: MaxTrackSizingFunction, parent_size: ?f32) ?f32 {
+        return switch (self.value.tag()) {
+            .fit_content_px => self.value.value(),
+            .fit_content_percent => if (parent_size) |size| self.value.value() * size else null,
+            .fit_content_calc => if (parent_size != null) 0 else null,
+            else => null,
         };
     }
     pub fn from_length_percentage(value: dimension.LengthPercentage) MaxTrackSizingFunction {
@@ -683,6 +698,7 @@ pub const MaxTrackSizingFunction = struct {
             .max_content => .max_content,
             .fit_content_px => fit_content_length(value.value.value()),
             .fit_content_percent => fit_content_percent(value.value.value()),
+            .fit_content_calc => .{ .value = value.value },
             .auto => .auto,
             else => .auto,
         };
@@ -734,7 +750,7 @@ pub const MaxTrackSizingFunction = struct {
         return self.is_max_content() or self.is_fit_content();
     }
     pub fn uses_percentage(self: MaxTrackSizingFunction) bool {
-        return self.value.tag() == .percent or self.value.tag() == .fit_content_percent;
+        return self.value.uses_percentage();
     }
 
     pub fn definite_value(self: MaxTrackSizingFunction, parent_size: ?f32) ?f32 {
@@ -829,7 +845,7 @@ pub const TrackSizingFunction = struct {
     }
 
     pub fn fit_content(value: dimension.LengthPercentage) TrackSizingFunction {
-        return .{ .min = .auto, .max = if (value.value.tag() == .length) .{ .value = compact_length.CompactLength.fit_content_length(value.value.numericValue()) } else .{ .value = compact_length.CompactLength.fit_content_percent(value.value.numericValue()) } };
+        return .{ .min = .auto, .max = MaxTrackSizingFunction.fit_content(value) };
     }
 
     pub fn from_dimension(value: dimension.Dimension) TrackSizingFunction {
