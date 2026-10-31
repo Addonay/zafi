@@ -289,6 +289,12 @@ const OofAxis = struct {
 pub fn compute_oof_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId, output: *layout.LayoutOutput) !void {
     const TreeApi = LayoutTree(Tree);
     const area = output.oof_positioning_area orelse return;
+    // Nothing to position (the common case): skip the pass, but still clear any
+    // hoisted list from an earlier layout (Taffy 393270e).
+    if (output.oof_candidates.items.len == 0) {
+        try TreeApi.clear_hoisted_children(tree_ref, node_id);
+        return;
+    }
 
     const node_style = TreeApi.get_style(tree_ref, node_id);
     const direction = node_style.direction;

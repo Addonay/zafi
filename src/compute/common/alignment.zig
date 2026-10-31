@@ -16,8 +16,11 @@ pub fn apply_alignment_fallback(free_space: f32, item_count: usize, alignment_va
     var keyword = alignment_value.keyword;
     var is_safe = alignment_value.safety == .safe;
     if (item_count <= 1 or free_space <= 0) switch (keyword) {
-        .stretch, .space_between => {
-            keyword = if (keyword == .stretch) .flex_start else .flex_start;
+        // Stretch falls back to flex-start keeping its own safety, so overflowing
+        // lines are not forced to `start` (Taffy 1009534).
+        .stretch => keyword = .flex_start,
+        .space_between => {
+            keyword = .flex_start;
             is_safe = true;
         },
         .space_around, .space_evenly => {
