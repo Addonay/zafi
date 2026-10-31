@@ -54,6 +54,8 @@ pub const BfcSlot = struct {
 
 /// A floated box
 pub const PlacedFloatedBox = struct {
+    /// The caller-defined id that the box was placed with
+    id: u64 = 0,
     /// The width of the box
     width: f32 = 0,
     /// The height of the box
@@ -254,9 +256,19 @@ pub const FloatContext = struct {
         self.last_placed_floats[slot].end = @max(self.last_placed_floats[slot].end, placement.end);
     }
 
-    /// Position a floated box with the context, returning the (x, y) coordinates
+    /// The (x, y) coordinates of a box previously placed in the context on the `direction` side
+    pub fn placed_position(self: *const FloatContext, placed: PlacedFloatedBox, direction: style.float.FloatDirection) geometry.Point(f32) {
+        return switch (direction) {
+            .left => .{ .x = placed.x_inset, .y = placed.y },
+            .right => .{ .x = self.available_width - placed.x_inset - placed.width, .y = placed.y },
+        };
+    }
+
+    /// Position a floated box with the context, returning the (x, y) coordinates.
+    /// `id` is stored with the placed box and is not otherwise interpreted.
     pub fn place_floated_box(
         self: *FloatContext,
+        id: u64,
         floated_box: geometry.Size(f32),
         min_y: f32,
         containing_block_insets: [2]f32,
@@ -266,7 +278,7 @@ pub const FloatContext = struct {
         self.has_any_float = true;
 
         const placed_floated_box =
-            self.place_floated_box_inner(floated_box, min_y, containing_block_insets, direction, clear);
+            self.place_floated_box_inner(id, floated_box, min_y, containing_block_insets, direction, clear);
 
         const slot = @backingInt(direction);
         const bottom = placed_floated_box.y + placed_floated_box.height;
@@ -274,17 +286,12 @@ pub const FloatContext = struct {
         const y = placed_floated_box.y;
         self.float_ceiling = if (self.float_ceiling) |ceiling| @max(ceiling, y) else y;
 
-        const x_inset = placed_floated_box.x_inset;
+        const pos = self.placed_position(placed_floated_box, direction);
         switch (direction) {
-            .left => {
-                self.left_boxes.append(self.allocator, placed_floated_box) catch @panic("Taffy float allocation failed");
-                return .{ .x = x_inset, .y = y };
-            },
-            .right => {
-                self.right_boxes.append(self.allocator, placed_floated_box) catch @panic("Taffy float allocation failed");
-                return .{ .x = self.available_width - x_inset - floated_box.width, .y = y };
-            },
+            .left => self.left_boxes.append(self.allocator, placed_floated_box) catch @panic("Taffy float allocation failed"),
+            .right => self.right_boxes.append(self.allocator, placed_floated_box) catch @panic("Taffy float allocation failed"),
         }
+        return pos;
     }
 
     const Placement = struct { start: ?usize, end: ?usize, placed_inset: f32 };
@@ -292,6 +299,7 @@ pub const FloatContext = struct {
     /// Inner implementation of float placement, split into a separate function so that it can early-return
     fn place_floated_box_inner(
         self: *FloatContext,
+        id: u64,
         floated_box: geometry.Size(f32),
         min_y: f32,
         containing_block_insets: [2]f32,
@@ -416,6 +424,7 @@ pub const FloatContext = struct {
         // context may not be placed to the outside of (e.g. via a negative margin).
         if (floated_box.height == 0.0) {
             return PlacedFloatedBox{
+                .id = id,
                 .width = floated_box.width,
                 .height = floated_box.height,
                 .y = start_y,
@@ -444,6 +453,7 @@ pub const FloatContext = struct {
             self.update_last_placed_float(direction, .{ .start = new_start_idx, .end = new_end_idx });
 
             return PlacedFloatedBox{
+                .id = id,
                 .width = floated_box.width,
                 .height = floated_box.height,
                 .y = new_start_y,
@@ -503,7 +513,7 @@ pub const FloatContext = struct {
         // Update last_placed_float
         self.update_last_placed_float(direction, .{ .start = resolved_start_idx, .end = end_idx_final + 1 });
 
-        return PlacedFloatedBox{ .width = floated_box.width, .height = floated_box.height, .y = start_y, .x_inset = placement.placed_inset };
+        return PlacedFloatedBox{ .id = id, .width = floated_box.width, .height = floated_box.height, .y = start_y, .x_inset = placement.placed_inset };
     }
 
     /// Get the end segment of the last float on side(s) specified by the clear parameter (if any)
@@ -726,16 +736,16 @@ test "float placement preserves clearance and side edges" {
     var context = FloatContext.init(testing.allocator);
     defer context.deinit();
     context.set_width(100);
-    const left = context.place_floated_box(.{ .width = 40, .height = 20 }, 0, .{ 0, 0 }, .left, .none);
+    const left = context.place_floated_box(1, .{ .width = 40, .height = 20 }, 0, .{ 0, 0 }, .left, .none);
     try testing.expectEqual(@as(f32, 0), left.x);
-    const right = context.place_floated_box(.{ .width = 40, .height = 20 }, 0, .{ 0, 0 }, .right, .none);
+    const right = context.place_floated_box(2, .{ .width = 40, .height = 20 }, 0, .{ 0, 0 }, .right, .none);
     try testing.expectEqual(@as(f32, 60), right.x);
     const slot = context.find_content_slot(0, .{ 0, 0 }, .none, null);
     try testing.expectEqual(@as(f32, 20), slot.width);
     try testing.expect(context.cleared_threshold(.both) != null);
     try testing.expectEqual(@as(?f32, 20), context.cleared_threshold(.both));
     // A second left float cannot fit beside the first at the same y, so it wraps below.
-    const wrapped = context.place_floated_box(.{ .width = 70, .height = 10 }, 0, .{ 0, 0 }, .left, .none);
+    const wrapped = context.place_floated_box(3, .{ .width = 70, .height = 10 }, 0, .{ 0, 0 }, .left, .none);
     try testing.expectEqual(@as(f32, 20), wrapped.y);
 }
 
@@ -744,7 +754,7 @@ test "float zero-height boxes still constrain clearance" {
     var context = FloatContext.init(testing.allocator);
     defer context.deinit();
     context.set_width(100);
-    _ = context.place_floated_box(.{ .width = 20, .height = 0 }, 5, .{ 0, 0 }, .left, .none);
+    _ = context.place_floated_box(0, .{ .width = 20, .height = 0 }, 5, .{ 0, 0 }, .left, .none);
     try testing.expect(!context.has_active_floats(5));
     try testing.expectEqual(@as(?f32, 5), context.cleared_threshold(.left));
 }
@@ -754,7 +764,7 @@ test "find_bfc_slot accounts for margins against float edges" {
     var context = FloatContext.init(testing.allocator);
     defer context.deinit();
     context.set_width(100);
-    _ = context.place_floated_box(.{ .width = 30, .height = 50 }, 0, .{ 0, 0 }, .left, .none);
+    _ = context.place_floated_box(0, .{ .width = 30, .height = 50 }, 0, .{ 0, 0 }, .left, .none);
     const slot = context.find_bfc_slot(0, .{ 0, 0 }, .{ 5, 5 }, .ltr, .none, null);
     try testing.expectEqual(@as(f32, 30), slot.x);
     // The trailing margin may overflow the containing block edge when fitting, but is
