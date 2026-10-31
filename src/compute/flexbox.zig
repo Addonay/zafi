@@ -357,6 +357,12 @@ tree_ref,
         parent_size,
         inputs.available_space);
 
+    // A container with no children has no flex items or lines, so its size follows directly
+    // from its own style and the available space.
+    if (try TreeApi.child_count(tree_ref, node_id) == 0) {
+        return compute_empty_container_layout(Tree, tree_ref, node_id, inputs, &constants);
+    }
+
     // 9. Flex Layout Algorithm
 
     // 9.1. Initial Setup
@@ -408,12 +414,7 @@ tree_ref,
     // If only the container's main size has been requested then we are done, as
     // nothing below changes it. This avoids measuring the cross size of every item.
     if (inputs.run_mode == .compute_size) {
-        const main_axis_is_requested_axis = switch (inputs.axis) {
-            .horizontal => constants.dir.is_row(),
-            .vertical => constants.dir.is_column(),
-            .both => false,
-        };
-        if (main_axis_is_requested_axis) {
+        if (constants.dir.main_axis_is_requested_axis(layout.requested_axis_into_absolute(inputs.axis))) {
             var size = geometry.F32Size{ .width = 0, .height = 0 };
             size.set_main(constants.dir, constants.container_size.main(constants.dir));
             return layout.LayoutOutput.from_outer_size(size);
@@ -492,13 +493,6 @@ tree_ref,
     var candidates: layout.OofCandidates = .empty;
     try collect_oof_candidates(Tree, tree_ref, node_id, &constants, flex_lines, &candidates);
 
-    const absolute_position_inset = constants.border.add(Rect(f32){
-        .left = if (constants.layout_direction.is_rtl()) constants.scrollbar_gutter.x else 0.0,
-        .right = if (constants.layout_direction.is_rtl()) 0.0 else constants.scrollbar_gutter.x,
-        .top = 0.0,
-        .bottom = constants.scrollbar_gutter.y,
-    });
-
     if (has_hidden_children) {
         const len = try TreeApi.child_count(tree_ref, node_id);
         var hidden_order: usize = 0;
@@ -549,6 +543,22 @@ tree_ref,
         }
     } else null;
 
+    return flex_container_output(&constants, inflow_overflow_rect, candidates, first_vertical_baseline);
+}
+
+/// Build the layout output of a flex container from the results of its final layout pass.
+fn flex_container_output(
+    constants: *const AlgoConstants,
+    inflow_overflow_rect: Rect(f32),
+    candidates: layout.OofCandidates,
+    first_vertical_baseline: ?f32) layout.LayoutOutput {
+    const absolute_position_inset = constants.border.add(Rect(f32){
+        .left = if (constants.layout_direction.is_rtl()) constants.scrollbar_gutter.x else 0.0,
+        .right = if (constants.layout_direction.is_rtl()) 0.0 else constants.scrollbar_gutter.x,
+        .top = 0.0,
+        .bottom = constants.scrollbar_gutter.y,
+    });
+
     return .{
         .size = constants.container_size,
         .scrollable_overflow_rect = inflow_overflow_rect,
@@ -559,6 +569,46 @@ tree_ref,
             .offset = .{ .x = absolute_position_inset.left, .y = absolute_position_inset.top },
         },
     };
+}
+
+/// Compute the layout of a flex container with no children. This is the remainder of
+/// `compute_preliminary` with zero flex items and zero flex lines, without generating either.
+fn compute_empty_container_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId, inputs: layout.LayoutInput, constants: *AlgoConstants) !layout.LayoutOutput {
+    const known_dimensions = inputs.known_dimensions;
+    const available_space = determine_available_space(known_dimensions, inputs.available_space, constants);
+    const no_lines: []FlexLine = &.{};
+
+    if (constants.node_inner_size.main(constants.dir)) |inner_main_size| {
+        const outer_main_size = inner_main_size + constants.content_box_inset.main_axis_sum(constants.dir);
+        constants.inner_container_size.set_main(constants.dir, inner_main_size);
+        constants.container_size.set_main(constants.dir, outer_main_size);
+    } else {
+        // Sets constants.container_size and constants.outer_container_size
+        try determine_container_main_size(Tree, tree_ref, available_space, no_lines, constants);
+        constants.node_inner_size.set_main(constants.dir, constants.inner_container_size.main(constants.dir));
+        constants.node_outer_size.set_main(constants.dir, constants.container_size.main(constants.dir));
+    }
+
+    // If only the container's main size has been requested then we are done.
+    if (inputs.run_mode == .compute_size and
+        constants.dir.main_axis_is_requested_axis(layout.requested_axis_into_absolute(inputs.axis)))
+    {
+        var size = geometry.F32Size{ .width = 0, .height = 0 };
+        size.set_main(constants.dir, constants.container_size.main(constants.dir));
+        return layout.LayoutOutput.from_outer_size(size);
+    }
+
+    _ = determine_container_cross_size(no_lines, known_dimensions, constants);
+    if (inputs.run_mode == .compute_size) {
+        return layout.LayoutOutput.from_outer_size(constants.container_size);
+    }
+
+    // With no items there is no inflow overflow and no out-of-flow candidates to collect from them.
+    const inflow_overflow_rect = finalize_inflow_overflow(constants, geometry.RECT_F32_ZERO);
+    var candidates: layout.OofCandidates = .empty;
+    try collect_oof_candidates(Tree, tree_ref, node_id, constants, no_lines, &candidates);
+
+    return flex_container_output(constants, inflow_overflow_rect, candidates, null);
 }
 
 /// Emit out-of-flow (`position: absolute` / `position: fixed`) children as
@@ -2720,18 +2770,24 @@ tree_ref,
         }
     }
 
+    return finalize_inflow_overflow(constants, overflow_rect);
+}
+
+/// Extend the inflow overflow rect of a flex container by its own padding and border when it is a
+/// scroll container.
+fn finalize_inflow_overflow(constants: *const AlgoConstants, overflow_rect: Rect(f32)) Rect(f32) {
+    var rect = overflow_rect;
     // A scroll container's own padding at the end of the content is part of its scrollable
     // overflow region, so it is included in the overflow rect. Boxes that are not scroll
     // containers do not extend their overflow region by their own padding.
     if (constants.is_scroll_container) {
-        overflow_rect.right += if (constants.layout_direction.is_rtl())
+        rect.right += if (constants.layout_direction.is_rtl())
             constants.content_box_inset.left - constants.border.left - constants.scrollbar_gutter.x
         else
             constants.content_box_inset.right - constants.border.right - constants.scrollbar_gutter.x;
-        overflow_rect.bottom += constants.content_box_inset.bottom - constants.border.bottom - constants.scrollbar_gutter.y;
+        rect.bottom += constants.content_box_inset.bottom - constants.border.bottom - constants.scrollbar_gutter.y;
     }
-
-    return overflow_rect;
+    return rect;
 }
 
 /// Resolve the sizing keywords (`min-content`, `max-content`, `fit-content`, `fit-content(...)`,
