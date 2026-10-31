@@ -205,7 +205,7 @@ pub const OofPositioningArea = struct {
 
 pub const LayoutOutput = struct {
     size: geometry.Size(f32),
-    scrollable_overflow_rect: geometry.Rect(f32) = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
+    scrollable_overflow_rect: ScrollableOverflow = .ZERO,
     baselines: Baselines = .none,
     top_margin: CollapsibleMarginSet = .zero,
     bottom_margin: CollapsibleMarginSet = .zero,
@@ -252,7 +252,7 @@ pub const Layout = struct {
     location: geometry.Point(f32) = .{ .x = 0, .y = 0 },
     size: geometry.Size(f32) = .{ .width = 0, .height = 0 },
     content_size: geometry.Size(f32) = .{ .width = 0, .height = 0 },
-    scrollable_overflow_rect: geometry.Rect(f32) = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
+    scrollable_overflow_rect: ScrollableOverflow = .ZERO,
     scrollbar_size: geometry.Size(f32) = .{ .width = 0, .height = 0 },
     border: geometry.Rect(f32) = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
     padding: geometry.Rect(f32) = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
@@ -286,12 +286,80 @@ pub const Layout = struct {
         return self.location.y + self.border.top + self.padding.top;
     }
 
+    /// The magnitude of the reachable horizontal scroll range. A reversed axis
+    /// scrolls over `-scroll_width()..0`.
     pub fn scroll_width(self: Layout) f32 {
-        return @max(0, self.scrollable_overflow_rect.right + @min(self.scrollbar_size.width, self.size.width) - self.size.width + self.border.left + self.border.right);
+        if (self.scrollable_overflow_rect.is_reversed().x) return -self.scrollable_overflow_rect.left();
+        return @max(0, self.scrollable_overflow_rect.right() + @min(self.scrollbar_size.width, self.size.width) - self.size.width + self.border.left + self.border.right);
     }
 
+    /// The magnitude of the reachable vertical scroll range. A reversed axis
+    /// scrolls over `-scroll_height()..0`.
     pub fn scroll_height(self: Layout) f32 {
-        return @max(0, self.scrollable_overflow_rect.bottom + @min(self.scrollbar_size.height, self.size.height) - self.size.height + self.border.top + self.border.bottom);
+        if (self.scrollable_overflow_rect.is_reversed().y) return -self.scrollable_overflow_rect.top();
+        return @max(0, self.scrollable_overflow_rect.bottom() + @min(self.scrollbar_size.height, self.size.height) - self.size.height + self.border.top + self.border.bottom);
+    }
+};
+
+/// Scrollable overflow plus the physical directions in which scrolling starts
+/// at the end edge (Taffy's packed `ScrollableOverflow`).
+///
+/// The rectangle uses physical x/y coordinates relative to the client area's
+/// top-left edge. To get border-box coordinates add `border.left`/`border.top`,
+/// plus the horizontal scrollbar gutter in RTL (the vertical scrollbar is on the
+/// left); RTL does not mirror these coordinates. A scroll container clips
+/// unreachable overflow: on normal axes the start is zero, on reversed axes the
+/// end is at most the client extent. Non-scroll containers keep all overflow
+/// (for propagation and hit testing) and have no flags.
+///
+/// Rectangles contain the origin (left/top <= 0, right/bottom >= 0), and the
+/// sign bits of the stored right/bottom encode reversal (even for zero
+/// extents), so the struct stays 16 bytes. Use `rect()` before doing geometry.
+pub const ScrollableOverflow = struct {
+    packed_rect: geometry.Rect(f32) = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
+
+    pub const ZERO: ScrollableOverflow = .{};
+
+    /// Pack an origin-containing rectangle and its scroll-origin directions.
+    pub fn new(r: geometry.Rect(f32), reversed: geometry.Point(bool)) ScrollableOverflow {
+        std.debug.assert(r.left <= 0 and r.top <= 0 and r.right >= 0 and r.bottom >= 0);
+        return .{ .packed_rect = .{
+            .left = r.left,
+            .top = r.top,
+            .right = std.math.copysign(r.right, @as(f32, if (reversed.x) -1 else 1)),
+            .bottom = std.math.copysign(r.bottom, @as(f32, if (reversed.y) -1 else 1)),
+        } };
+    }
+
+    /// The physical overflow rectangle with the packed signs restored.
+    pub inline fn rect(self: ScrollableOverflow) geometry.Rect(f32) {
+        return .{ .left = self.packed_rect.left, .right = @abs(self.packed_rect.right), .top = self.packed_rect.top, .bottom = @abs(self.packed_rect.bottom) };
+    }
+    pub inline fn left(self: ScrollableOverflow) f32 {
+        return self.packed_rect.left;
+    }
+    pub inline fn right(self: ScrollableOverflow) f32 {
+        return @abs(self.packed_rect.right);
+    }
+    pub inline fn top(self: ScrollableOverflow) f32 {
+        return self.packed_rect.top;
+    }
+    pub inline fn bottom(self: ScrollableOverflow) f32 {
+        return @abs(self.packed_rect.bottom);
+    }
+    /// Whether the physical x/y scroll origins are at the right/bottom edges.
+    pub inline fn is_reversed(self: ScrollableOverflow) geometry.Point(bool) {
+        return .{ .x = std.math.signbit(self.packed_rect.right), .y = std.math.signbit(self.packed_rect.bottom) };
+    }
+    /// Swap the physical axes, preserving origin directions and signed zeroes.
+    pub fn transpose(self: ScrollableOverflow) ScrollableOverflow {
+        return .{ .packed_rect = self.packed_rect.transpose() };
+    }
+    /// Bitwise equality (distinguishes signed zeroes, i.e. reversal flags).
+    pub fn eql(self: ScrollableOverflow, other: ScrollableOverflow) bool {
+        const a: [4]u32 = @bitCast([4]f32{ self.packed_rect.left, self.packed_rect.right, self.packed_rect.top, self.packed_rect.bottom });
+        const b: [4]u32 = @bitCast([4]f32{ other.packed_rect.left, other.packed_rect.right, other.packed_rect.top, other.packed_rect.bottom });
+        return std.mem.eql(u32, &a, &b);
     }
 };
 
@@ -308,7 +376,7 @@ test "collapsible margins follow positive plus most negative" {
 test "layout contracts expose hidden input and scroll extents" {
     const testing = @import("std").testing;
     try testing.expectEqual(RunMode.perform_hidden_layout, LayoutInput.HIDDEN.run_mode);
-    var layout = Layout{ .size = .{ .width = 100, .height = 80 }, .scrollable_overflow_rect = .{ .left = 0, .right = 140, .top = 0, .bottom = 100 } };
+    var layout = Layout{ .size = .{ .width = 100, .height = 80 }, .scrollable_overflow_rect = ScrollableOverflow.new(.{ .left = 0, .right = 140, .top = 0, .bottom = 100 }, .{ .x = false, .y = false }) };
     layout.scrollbar_size = .{ .width = 10, .height = 10 };
     try testing.expectEqual(@as(f32, 50), layout.scroll_width());
     try testing.expectEqual(@as(f32, 30), layout.scroll_height());

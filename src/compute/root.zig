@@ -252,6 +252,7 @@ pub fn compute_root_layout(comptime Tree: type, tree_ref: *Tree, root: NodeId, a
             direction,
             .all,
             overflow,
+            .{ .x = direction.is_rtl(), .y = false },
             &hoisted,
             &unclaimed);
         std.debug.assert(unclaimed.items.len == 0);
@@ -427,10 +428,23 @@ pub fn round_layout_inner(comptime Tree: type, tree_ref: *Tree, node_id: NodeId,
     rounded.padding.right = taffyRound(absolute_x + unrounded.size.width) - taffyRound(absolute_x + unrounded.size.width - unrounded.padding.right);
     rounded.padding.top = taffyRound(absolute_y + unrounded.padding.top) - taffyRound(absolute_y);
     rounded.padding.bottom = taffyRound(absolute_y + unrounded.size.height) - taffyRound(absolute_y + unrounded.size.height - unrounded.padding.bottom);
-    rounded.scrollable_overflow_rect.left = taffyRound(absolute_x + unrounded.scrollable_overflow_rect.left) - taffyRound(absolute_x);
-    rounded.scrollable_overflow_rect.right = taffyRound(absolute_x + unrounded.scrollable_overflow_rect.right) - taffyRound(absolute_x);
-    rounded.scrollable_overflow_rect.top = taffyRound(absolute_y + unrounded.scrollable_overflow_rect.top) - taffyRound(absolute_y);
-    rounded.scrollable_overflow_rect.bottom = taffyRound(absolute_y + unrounded.scrollable_overflow_rect.bottom) - taffyRound(absolute_y);
+    {
+        // Round each edge in absolute coordinates; a zero result keeps its edge's
+        // sign so left/top stay -0.0 (re-packing restores right/bottom reversal).
+        const r = unrounded.scrollable_overflow_rect.rect();
+        const roundEdge = struct {
+            fn call(offset: f32, edge: f32) f32 {
+                const value = taffyRound(offset + edge) - taffyRound(offset);
+                return if (value == 0) std.math.copysign(value, edge) else value;
+            }
+        }.call;
+        rounded.scrollable_overflow_rect = layout.ScrollableOverflow.new(.{
+            .left = roundEdge(absolute_x, r.left),
+            .right = roundEdge(absolute_x, r.right),
+            .top = roundEdge(absolute_y, r.top),
+            .bottom = roundEdge(absolute_y, r.bottom),
+        }, unrounded.scrollable_overflow_rect.is_reversed());
+    }
     rounded.scrollbar_size.width = taffyRound(unrounded.scrollbar_size.width);
     rounded.scrollbar_size.height = taffyRound(unrounded.scrollbar_size.height);
     try TreeApi.set_final_layout(tree_ref, node_id, rounded);
