@@ -107,6 +107,9 @@ pub const NodeData = struct {
     /// positioned descendants reach a containing block further up.
     cached_oof_candidates: []layout.OofCandidate = &.{},
     alive: bool = true,
+    /// The cached layout depends on an inherited float context (see
+    /// `LayoutTree.cache_float_coupled`).
+    cache_float_coupled: bool = false,
     /// Per-node measure context (Taffy's `NodeContext`). `has_context` mirrors
     /// Taffy's flag so a null context can still be a stored context.
     has_context: bool = false,
@@ -254,6 +257,7 @@ pub const NodeStore = struct {
         node_data.parent = null;
         node_data.cache = .{};
         node_data.cached_oof_candidates = &.{};
+        node_data.cache_float_coupled = false;
         node_data.alive = true;
         node_data.has_context = false;
         node_data.context = null;
@@ -766,6 +770,15 @@ pub const Tree = struct {
             output.oof_candidates = candidates;
         }
         return output;
+    }
+
+    pub fn cache_float_coupled(self: *Tree, id: NodeId) bool {
+        const node_data = self.get_node(id) orelse return true;
+        return node_data.cache_float_coupled;
+    }
+
+    pub fn set_cache_float_coupled(self: *Tree, id: NodeId, value: bool) void {
+        if (self.get_node_mut(id)) |node_data| node_data.cache_float_coupled = value;
     }
 
     /// Fails with `OutOfMemory` (failing the layout) when the final layout's
