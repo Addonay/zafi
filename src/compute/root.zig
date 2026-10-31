@@ -6,6 +6,7 @@
 //! requests made by the algorithms go through `compute_cached_layout`.
 
 const std = @import("std");
+const calc_scope = @import("common/calc_scope.zig");
 
 pub const block = @import("block.zig");
 pub const common = @import("common/root.zig");
@@ -180,6 +181,8 @@ pub fn compute_root_layout(comptime Tree: type, tree_ref: *Tree, root: NodeId, a
     const TreeApi = LayoutTree(Tree);
     TreeApi.begin_layout_pass(tree_ref);
     defer TreeApi.end_layout_pass(tree_ref);
+    const previous_calc = calc_scope.bind(Tree, tree_ref);
+    defer calc_scope.restore(previous_calc);
 
     const root_style = TreeApi.get_style(tree_ref, root);
     const direction = root_style.direction;

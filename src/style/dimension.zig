@@ -1,6 +1,7 @@
 //! Direct semantic port of Taffy's `style/dimension.rs`.
 
 const AvailableSpace = @import("available_space.zig").AvailableSpace;
+const calc_resolver = @import("calc.zig");
 const compact_length = @import("compact_length.zig");
 const std = @import("std");
 
@@ -51,6 +52,7 @@ pub const LengthPercentage = struct {
     }
 
     pub fn resolve(self: LengthPercentage, basis: f32) f32 {
+        if (self.value.tag() == .calc) return calc_resolver.resolve(self.value.calc_value(), basis);
         return switch (self.value.tag()) {
             .length => self.value.value(),
             .percent => self.value.value() * basis,
@@ -62,6 +64,8 @@ pub const LengthPercentage = struct {
     }
 
     pub fn resolve_to_option(self: LengthPercentage, basis: ?f32) ?f32 {
+        // Like Taffy, a calc value needs a definite basis.
+        if (self.value.tag() == .calc) return if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null;
         return switch (self.value.tag()) {
             .length => self.value.value(),
             .percent => if (basis) |b| self.value.value() * b else null,
@@ -126,6 +130,7 @@ pub const LengthPercentageAuto = struct {
     }
 
     pub fn resolve(self: LengthPercentageAuto, basis: f32) ?f32 {
+        if (self.value.tag() == .calc) return calc_resolver.resolve(self.value.calc_value(), basis);
         return switch (self.value.tag()) {
             .auto => null,
             .length => self.value.value(),
@@ -136,6 +141,8 @@ pub const LengthPercentageAuto = struct {
     }
 
     pub fn resolve_to_option(self: LengthPercentageAuto, basis: ?f32) ?f32 {
+        // Like Taffy, a calc value needs a definite basis.
+        if (self.value.tag() == .calc) return if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null;
         return switch (self.value.tag()) {
             .auto => null,
             .length => self.value.value(),
@@ -240,6 +247,7 @@ pub const Dimension = struct {
     }
 
     pub fn resolve(self: Dimension, basis: ?f32) ?f32 {
+        if (self.value.tag() == .calc) return if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null;
         return switch (self.value.tag()) {
             .length => self.value.value(),
             .percent => if (basis) |b| self.value.value() * b else null,
@@ -420,15 +428,29 @@ test "dimension keeps keyword values distinct" {
     try testing.expectEqual(@as(?f32, 12), Dimension.length(12).into_option());
 }
 
-test "calc values resolve to zero through the default resolver" {
+test "calc values resolve through the active resolver (zero by default, null without a basis)" {
     const testing = @import("std").testing;
     const handle: *const anyopaque = @ptrFromInt(8);
+    // No resolver: zero against a definite basis; like Taffy, no value without one.
     try testing.expectEqual(@as(?f32, 0), Dimension.calc(handle).resolve(100));
-    try testing.expectEqual(@as(?f32, 0), Dimension.calc(handle).resolve(null));
+    try testing.expectEqual(@as(?f32, null), Dimension.calc(handle).resolve(null));
     try testing.expectEqual(@as(f32, 0), LengthPercentage.calc(handle).resolve(100));
-    try testing.expectEqual(@as(?f32, 0), LengthPercentage.calc(handle).resolve_to_option(null));
-    try testing.expectEqual(@as(?f32, 0), LengthPercentageAuto.calc(handle).resolve_to_option(null));
+    try testing.expectEqual(@as(?f32, null), LengthPercentage.calc(handle).resolve_to_option(null));
+    try testing.expectEqual(@as(?f32, null), LengthPercentageAuto.calc(handle).resolve_to_option(null));
     try testing.expectEqual(@as(?f32, 0), LengthPercentageAuto.calc(handle).resolve(20));
+
+    // A resolver computing `basis / 2 + 10` for this handle.
+    const Half = struct {
+        fn f(_: *const anyopaque, value: *const anyopaque, basis: f32) f32 {
+            return if (value == @as(*const anyopaque, @ptrFromInt(8))) basis / 2 + 10 else -1;
+        }
+    };
+    const previous = calc_resolver.current;
+    defer calc_resolver.current = previous;
+    calc_resolver.current = .{ .ctx = handle, .func = Half.f };
+    try testing.expectEqual(@as(?f32, 60), Dimension.calc(handle).resolve(100));
+    try testing.expectEqual(@as(f32, 20), LengthPercentage.calc(handle).resolve(20));
+    try testing.expectEqual(@as(?f32, 15), LengthPercentageAuto.calc(handle).resolve_to_option(10));
 }
 
 test "dimension CSS spellings preserve percentage and fit-content values" {

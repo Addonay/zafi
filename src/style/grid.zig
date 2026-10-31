@@ -7,6 +7,7 @@
 
 const geometry = @import("../geometry.zig");
 const dimension = @import("dimension.zig");
+const calc_resolver = @import("calc.zig");
 const compact_length = @import("compact_length.zig");
 const std = @import("std");
 
@@ -600,7 +601,7 @@ pub const MinTrackSizingFunction = struct {
             .percent => if (parent_size) |basis| basis * self.value.value() else null,
             // Tree's default calc resolver returns 0 and still requires a
             // definite parent size to be considered definite.
-            .calc => if (parent_size != null) 0 else null,
+            .calc => if (parent_size) |size| calc_resolver.resolve(self.value.calc_value(), size) else null,
             else => null,
         };
     }
@@ -679,7 +680,7 @@ pub const MaxTrackSizingFunction = struct {
         return switch (self.value.tag()) {
             .fit_content_px => self.value.value(),
             .fit_content_percent => if (parent_size) |size| self.value.value() * size else null,
-            .fit_content_calc => if (parent_size != null) 0 else null,
+            .fit_content_calc => if (parent_size) |size| calc_resolver.resolve(self.value.calc_value(), size) else null,
             else => null,
         };
     }
@@ -761,7 +762,7 @@ pub const MaxTrackSizingFunction = struct {
         return switch (self.value.tag()) {
             .length => self.value.value(),
             .percent => if (parent_size) |basis| basis * self.value.value() else null,
-            .calc => if (parent_size != null) 0 else null,
+            .calc => if (parent_size) |size| calc_resolver.resolve(self.value.calc_value(), size) else null,
             else => null,
         };
     }

@@ -6,6 +6,7 @@
 //! the same measure APIs used by Taffy's `LayoutPartialTreeExt`.
 
 const std = @import("std");
+const calc_resolver = @import("../../../style/calc.zig");
 const geometry = @import("../../../geometry.zig");
 const style = @import("../../../style/root.zig");
 const AvailableSpace = @import("../../../style/available_space.zig").AvailableSpace;
@@ -611,6 +612,7 @@ fn resolve_lpa(value: style.dimension.LengthPercentageAuto, basis: ?f32) ?f32 {
         .auto => null,
         .length => value.value.value(),
         .percent => if (basis) |b| b * value.value.value() else null,
+        .calc => if (basis) |b| calc_resolver.resolve(value.value.calc_value(), b) else null,
         else => null,
     };
 }
