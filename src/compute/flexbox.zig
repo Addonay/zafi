@@ -138,6 +138,15 @@ pub const FlexItem = struct {
             !self.margin_is_auto.cross_start(dir) and
             !self.margin_is_auto.cross_end(dir);
     }
+
+    /// Returns true if the item is stretched in the cross axis: neither of its cross-axis margins
+    /// are `auto`, and its cross size is `stretch` or it is `align-self: stretch` with an `auto` cross size.
+    pub fn is_stretched(self: FlexItem, dir: flex.FlexDirection) bool {
+        const cross_size = self.size_style.cross(dir);
+        return !self.margin_is_auto.cross_start(dir) and
+            !self.margin_is_auto.cross_end(dir) and
+            (cross_size.is_stretch() or (is_stretch_alignment(self.align_self) and cross_size.is_auto()));
+    }
 };
 
 /// A line of [`FlexItem`] used for intermediate computation
@@ -420,7 +429,7 @@ tree_ref,
 
     // 7. Determine the hypothetical cross size of each item.
     for (flex_lines) |*line| {
-        try determine_hypothetical_cross_size(Tree, tree_ref, line, &constants, available_space);
+        try determine_hypothetical_cross_size(Tree, tree_ref, line, &constants, known_dimensions, available_space);
     }
 
     // Calculate child baselines. This function is internally smart and only computes child baselines
@@ -1935,9 +1944,18 @@ inline fn resolve_flexible_lengths(line: *FlexLine, constants: *const AlgoConsta
 inline fn determine_hypothetical_cross_size(comptime Tree: type, tree_ref: *Tree,
     line: *FlexLine,
     constants: *const AlgoConstants,
+    known_dimensions: Size(?f32),
     available_space: Size(AvailableSpace)) !void {
     const TreeApi = LayoutTree(Tree);
+    const line_cross_size_is_known = !constants.is_wrap and known_dimensions.cross(constants.dir) != null;
     for (line.items) |*child| {
+        // An item stretched to a line of known cross size takes its cross size from that line, which is
+        // determined later, so it is not measured here. Items that participate in baseline alignment are
+        // still measured, as their baseline depends on their cross size.
+        if (line_cross_size_is_known and child.is_stretched(constants.dir) and !child.participates_in_baseline_alignment(constants.dir)) {
+            continue;
+        }
+
         const padding_border_sum = child.padding.cross_axis_sum(constants.dir) + child.border.cross_axis_sum(constants.dir);
 
         // The available space passed to the child excludes the child's margins
