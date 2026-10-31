@@ -2545,23 +2545,23 @@ fn calculate_flex_item(comptime Tree: type, tree_ref: *Tree,
         item.margin.cross_start(direction) +
         cross_relative_inset;
 
+    // Scroll containers' baselines are determined from their content as if scrolled to the initial
+    // position, but are additionally clamped to their border box.
+    // See https://github.com/w3c/csswg-drafts/issues/7660
+    const inner_baseline = blk: {
+        const baseline = layout_output.baselines.first orelse size.height;
+        if (item.overflow.y.is_scroll_container()) {
+            break :blk @max(@min(baseline, size.height), 0.0);
+        }
+        break :blk baseline;
+    };
+
     if (direction.is_row()) {
         const baseline_offset_cross =
             total_offset_cross + item.offset_cross + effective_line_offset_cross + item.margin.cross_start(direction);
-        // Scroll containers' baselines are determined from their content as if scrolled to the initial
-        // position, but are additionally clamped to their border box.
-        // See https://github.com/w3c/csswg-drafts/issues/7660
-        const inner_baseline = blk: {
-            const baseline = layout_output.baselines.first orelse size.height;
-            if (item.overflow.y.is_scroll_container()) {
-                break :blk @max(@min(baseline, size.height), 0.0);
-            }
-            break :blk baseline;
-        };
         item.baseline = baseline_offset_cross + inner_baseline;
     } else {
         const baseline_offset_main = total_offset_main.* + item.offset_main + item.margin.main_start(direction);
-        const inner_baseline = layout_output.baselines.first orelse size.height;
         item.baseline = baseline_offset_main + inner_baseline;
     }
 
