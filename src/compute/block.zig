@@ -497,9 +497,16 @@ fn compute_inner(comptime Tree: type, tree_ref: *Tree,
     const establishes_new_bfc = is_scroll_container or style_value.align_content.keyword != .normal or style_value.contain.establishes_independent_formatting_context() or style_value.establishes_formatting_context_from_display();
 
     // Determine margin collapsing behaviour
-    const own_margins_collapse_with_children = geometry.Line(bool){
+    //
+    // Whether a child's margins could collapse through each of this box's block-axis edges: the
+    // box does not establish a new BFC and has neither border nor padding on that side.
+    const children_margins_adjoin_own_edges = geometry.Line(bool){
         .start = vertical_margins_are_collapsible.start and !establishes_new_bfc and !style_value.position.is_out_of_flow() and padding.top == 0.0 and border.top == 0.0,
-        .end = vertical_margins_are_collapsible.end and !establishes_new_bfc and !style_value.position.is_out_of_flow() and padding.bottom == 0.0 and border.bottom == 0.0 and size.height == null,
+        .end = vertical_margins_are_collapsible.end and !establishes_new_bfc and !style_value.position.is_out_of_flow() and padding.bottom == 0.0 and border.bottom == 0.0,
+    };
+    const own_margins_collapse_with_children = geometry.Line(bool){
+        .start = children_margins_adjoin_own_edges.start,
+        .end = children_margins_adjoin_own_edges.end and size.height == null,
     };
     const has_styles_preventing_being_collapsed_through = !style_value.is_block() or block_ctx.is_bfc_root() or establishes_new_bfc or style_value.position.is_out_of_flow() or padding.top > 0.0 or padding.bottom > 0.0 or border.top > 0.0 or border.bottom > 0.0;
 
@@ -572,6 +579,7 @@ tree_ref,
         justify_items,
         direction,
         own_margins_collapse_with_children,
+        children_margins_adjoin_own_edges,
         is_scroll_container,
         store_layouts,
         block_ctx);
@@ -854,8 +862,12 @@ fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
 /// Resolve the `stretch` sizing keyword for an item's height style. In the block axis the
 /// intrinsic sizing keywords are all equal to the content size, which is what an auto height
 /// already resolves to, so only `stretch` requires explicit resolution.
-fn resolve_stretch_height(height_style: style.dimension.Dimension, container_inner_height: ?f32, item_y_margin_sum: f32) ?f32 {
-    const stretch_size = if (container_inner_height) |height| height - item_y_margin_sum else null;
+/// Margins that are treated as zero (because they collapse through the container's edge) are
+/// not subtracted from the container's height.
+fn resolve_stretch_height(height_style: style.dimension.Dimension, container_inner_height: ?f32, item_margin: geometry.Rect(f32), margins_treated_as_zero: geometry.Line(bool)) ?f32 {
+    const margin_top = if (margins_treated_as_zero.start) 0.0 else item_margin.top;
+    const margin_bottom = if (margins_treated_as_zero.end) 0.0 else item_margin.bottom;
+    const stretch_size = if (container_inner_height) |height| height - margin_top - margin_bottom else null;
     return switch (sizing_keyword.resolve_sizing_keyword(height_style, stretch_size, container_inner_height) orelse return null) {
         .exact => |height| height,
         .measure => null,
@@ -931,6 +943,7 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
     justify_items: style.alignment.AlignItems,
     direction: style.Direction,
     own_margins_collapse_with_children: geometry.Line(bool),
+    children_margins_adjoin_own_edges: geometry.Line(bool),
     is_scroll_container: bool,
     store_layouts: bool,
     block_ctx: *BlockContext) BlockError!InFlowResult {
@@ -1019,7 +1032,9 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             const item_known_height = resolve_stretch_height(
                 item.size_style.height,
                 container_percentage_resolution_height,
-                item_non_auto_margin.vertical_axis_sum());
+                item_non_auto_margin,
+                // The margins of a float never collapse
+                .{ .start = false, .end = false });
             var item_layout = try TreeApi.perform_child_layout(tree_ref, 
                 item.node_id,
                 geometry.Size(?f32){ .width = item_known_width, .height = item_known_height },
@@ -1195,7 +1210,8 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                 resolve_stretch_height(
                     item.size_style.height,
                     container_percentage_resolution_height,
-                    item_non_auto_margin.vertical_axis_sum())
+                    item_non_auto_margin,
+                    children_margins_adjoin_own_edges)
             else
                 null;
 
