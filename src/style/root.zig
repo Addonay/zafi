@@ -340,13 +340,13 @@ pub const FlexboxContainerStyle = struct {
     pub fn gap(self: FlexboxContainerStyle) geometry.Size(dimension.LengthPercentage) {
         return self.value.gap;
     }
-    pub fn align_content(self: FlexboxContainerStyle) ?alignment.AlignContent {
+    pub fn align_content(self: FlexboxContainerStyle) alignment.AlignContent {
         return self.value.align_content;
     }
-    pub fn align_items(self: FlexboxContainerStyle) ?alignment.AlignItems {
+    pub fn align_items(self: FlexboxContainerStyle) alignment.AlignItems {
         return self.value.align_items;
     }
-    pub fn justify_content(self: FlexboxContainerStyle) ?alignment.JustifyContent {
+    pub fn justify_content(self: FlexboxContainerStyle) alignment.JustifyContent {
         return self.value.justify_content;
     }
 };
@@ -408,20 +408,21 @@ pub const GridContainerStyle = struct {
     pub fn gap(self: GridContainerStyle) geometry.Size(dimension.LengthPercentage) {
         return self.value.gap;
     }
-    pub fn align_content(self: GridContainerStyle) ?alignment.AlignContent {
+    pub fn align_content(self: GridContainerStyle) alignment.AlignContent {
         return self.value.align_content;
     }
-    pub fn justify_content(self: GridContainerStyle) ?alignment.JustifyContent {
+    pub fn justify_content(self: GridContainerStyle) alignment.JustifyContent {
         return self.value.justify_content;
     }
-    pub fn align_items(self: GridContainerStyle) ?alignment.AlignItems {
+    pub fn align_items(self: GridContainerStyle) alignment.AlignItems {
         return self.value.align_items;
     }
-    pub fn justify_items(self: GridContainerStyle) ?alignment.JustifyItems {
+    pub fn justify_items(self: GridContainerStyle) alignment.JustifyItems {
         return self.value.justify_items;
     }
     pub fn grid_align_content(self: GridContainerStyle, axis: geometry.AbstractAxis) alignment.AlignContent {
-        return if (axis == .inline_axis) self.value.justify_content orelse .stretch else self.value.align_content orelse .stretch;
+        const value = if (axis == .inline_axis) self.value.justify_content else self.value.align_content;
+        return if (value.keyword == .normal) .STRETCH else value;
     }
 };
 
@@ -455,7 +456,7 @@ pub const BlockContainerStyle = struct {
     pub fn text_align(self: BlockContainerStyle) block.TextAlign {
         return self.value.text_align;
     }
-    pub fn align_content(self: BlockContainerStyle) ?alignment.AlignContent {
+    pub fn align_content(self: BlockContainerStyle) alignment.AlignContent {
         return self.value.align_content;
     }
 };
@@ -502,12 +503,14 @@ pub const Style = struct {
     margin: geometry.Rect(dimension.LengthPercentageAuto) = .{ .left = dimension.LengthPercentageAuto.zero(), .right = dimension.LengthPercentageAuto.zero(), .top = dimension.LengthPercentageAuto.zero(), .bottom = dimension.LengthPercentageAuto.zero() },
     padding: geometry.Rect(dimension.LengthPercentage) = .{ .left = dimension.LengthPercentage.zero(), .right = dimension.LengthPercentage.zero(), .top = dimension.LengthPercentage.zero(), .bottom = dimension.LengthPercentage.zero() },
     border: geometry.Rect(dimension.LengthPercentage) = .{ .left = dimension.LengthPercentage.zero(), .right = dimension.LengthPercentage.zero(), .top = dimension.LengthPercentage.zero(), .bottom = dimension.LengthPercentage.zero() },
-    align_items: ?alignment.AlignItems = null,
+    align_items: alignment.AlignItems = .NORMAL,
+    /// `null` is `auto`: use the container's `align-items`.
     align_self: ?alignment.AlignSelf = null,
-    justify_items: ?alignment.JustifyItems = null,
+    justify_items: alignment.JustifyItems = .NORMAL,
+    /// `null` is `auto`: use the container's `justify-items`.
     justify_self: ?alignment.JustifySelf = null,
-    align_content: ?alignment.AlignContent = null,
-    justify_content: ?alignment.JustifyContent = null,
+    align_content: alignment.AlignContent = .NORMAL,
+    justify_content: alignment.JustifyContent = .NORMAL,
     gap: geometry.Size(dimension.LengthPercentage) = .{ .width = dimension.LengthPercentage.zero(), .height = dimension.LengthPercentage.zero() },
     text_align: block.TextAlign = .auto,
     flex_direction: flex.FlexDirection = .row,

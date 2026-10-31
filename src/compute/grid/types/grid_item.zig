@@ -568,8 +568,9 @@ pub const GridItem = struct {
     }
 };
 
+/// `stretch` or `normal` (which stretches non-replaced grid items).
 fn align_is_stretch(alignment_value: style.alignment.AlignItems) bool {
-    return alignment_value.keyword == .stretch and alignment_value.safety == .unsafe;
+    return alignment_value.is_stretch_or_normal();
 }
 
 fn resolve_dimension_size(value: geometry.Size(style.dimension.Dimension), basis: geometry.Size(?f32)) geometry.Size(?f32) {

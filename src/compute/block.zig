@@ -332,7 +332,7 @@ pub fn compute_block_layout(comptime Tree: type, tree_ref: *Tree,
     // css-align-3 §5.1.1: a non-`normal` `align-content` makes a block container establish an
     // independent formatting context. Layout and paint containment also establish one.
     const establishes_new_bfc =
-        is_scroll_container or style_value.align_content != null or contain.establishes_independent_formatting_context();
+        is_scroll_container or style_value.align_content.keyword != .normal or contain.establishes_independent_formatting_context();
     const aspect_ratio = style_value.aspect_ratio;
     const padding = resolveOrZeroRect(style_value.padding, parent_size.width);
     const border = resolveOrZeroRect(style_value.border, parent_size.width);
@@ -477,7 +477,7 @@ fn compute_inner(comptime Tree: type, tree_ref: *Tree,
 
     const overflow = style_value.overflow;
     const is_scroll_container = overflow.x.is_scroll_container() or overflow.y.is_scroll_container();
-    const establishes_new_bfc = is_scroll_container or style_value.align_content != null or style_value.contain.establishes_independent_formatting_context() or style_value.establishes_formatting_context_from_display();
+    const establishes_new_bfc = is_scroll_container or style_value.align_content.keyword != .normal or style_value.contain.establishes_independent_formatting_context() or style_value.establishes_formatting_context_from_display();
 
     // Determine margin collapsing behaviour
     const own_margins_collapse_with_children = geometry.Line(bool){
@@ -539,7 +539,7 @@ fn compute_inner(comptime Tree: type, tree_ref: *Tree,
     // Child layouts are only committed to the tree (and read back by the `align-content` pass)
     // during a final layout pass. In a `ComputeSize` pass without an `align-content` shift they
     // are dead stores, so skip building them.
-    const store_layouts = run_mode != .compute_size or align_content != null;
+    const store_layouts = run_mode != .compute_size or align_content.keyword != .normal;
     var inflow_result = try perform_final_layout_on_in_flow_children(
         Tree,
 tree_ref,
@@ -575,7 +575,8 @@ tree_ref,
         own_margins_collapse_with_children.end and !height_constrained_by_min_height;
 
     // Apply `align-content` to in-flow non-floated items if requested.
-    if (align_content) |align_content_value| {
+    if (align_content.keyword != .normal) {
+        const align_content_value = align_content;
         const container_inner_height = container_outer_height - resolved_content_box_inset.vertical_axis_sum();
         const inflow_content_height = intrinsic_outer_height - resolved_content_box_inset.vertical_axis_sum();
         const free_space = container_inner_height - inflow_content_height;

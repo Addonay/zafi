@@ -118,7 +118,7 @@ pub const AxisStaticAlign = struct {
 
     /// Create an `AxisStaticAlign` from a keyword with no safe fallback.
     pub fn from_keyword(keyword: AxisStaticEdge) AxisStaticAlign {
-        return .{ .keyword = keyword, .safety = .unsafe, .fallback = keyword };
+        return .{ .keyword = keyword, .safety = .default, .fallback = keyword };
     }
 };
 

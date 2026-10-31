@@ -125,7 +125,7 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
     node: NodeId,
     order: u32,
     grid_area: geometry.Rect(f32),
-    container_alignment_styles: geometry.InBothAbsAxis(?AlignItems),
+    container_alignment_styles: geometry.InBothAbsAxis(AlignItems),
     baseline_shim: f32,
     direction: Direction,
     container_border_box_width: f32,
@@ -143,12 +143,9 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
     const aspect_ratio = item_style.aspect_ratio;
     // Resolve writing-mode-relative self-start/self-end keywords against the item's own direction.
     const item_direction = item_style.direction;
-    const justify_self = if (item_style.justify_self) |item_alignment| resolve_self_relative(item_alignment, item_direction, direction, true) else null;
-    const align_self = if (item_style.align_self) |item_alignment| resolve_self_relative(item_alignment, item_direction, direction, false) else null;
-    const resolved_container_alignment = geometry.InBothAbsAxis(?AlignItems){
-        .horizontal = if (container_alignment_styles.horizontal) |item_alignment| resolve_self_relative(item_alignment, item_direction, direction, true) else null,
-        .vertical = if (container_alignment_styles.vertical) |item_alignment| resolve_self_relative(item_alignment, item_direction, direction, false) else null,
-    };
+    // `auto` (null) self-alignment takes the container's `*-items` value.
+    const justify_self = resolve_self_relative(item_style.justify_self orelse container_alignment_styles.horizontal, item_direction, direction, true);
+    const align_self = resolve_self_relative(item_style.align_self orelse container_alignment_styles.vertical, item_direction, direction, false);
 
     const position = item_style.position;
     const inset_horizontal = geometry.Line(?f32){
@@ -183,10 +180,15 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
     // Resolve default alignment styles if they are set on neither the parent or the node itself.
     // Note: if the child has a preferred aspect ratio but neither width or height are set, then
     // the width is stretched and the height is calculated from the width.
-    const horizontal_alignment = justify_self orelse resolved_container_alignment.horizontal orelse
-        (if (inherent_size.width != null or size_style.width.is_sizing_keyword()) AlignSelf.START else AlignSelf.STRETCH);
-    const vertical_alignment = align_self orelse resolved_container_alignment.vertical orelse
-        (if (inherent_size.height != null or size_style.height.is_sizing_keyword() or aspect_ratio != null) AlignSelf.START else AlignSelf.STRETCH);
+    // `normal` behaves as `start` for items with a definite (or keyword) size, `stretch` otherwise.
+    const horizontal_alignment = if (justify_self.keyword == .normal)
+        (if (inherent_size.width != null or size_style.width.is_sizing_keyword()) AlignSelf.START else AlignSelf.STRETCH)
+    else
+        justify_self;
+    const vertical_alignment = if (align_self.keyword == .normal)
+        (if (inherent_size.height != null or size_style.height.is_sizing_keyword() or aspect_ratio != null) AlignSelf.START else AlignSelf.STRETCH)
+    else
+        align_self;
     const alignment_styles = geometry.InBothAbsAxis(AlignSelf){ .horizontal = horizontal_alignment, .vertical = vertical_alignment };
 
     // Note: This is not a bug. It is part of the CSS spec that both horizontal and vertical
@@ -339,7 +341,7 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
 
     const horizontal_result = align_item_within_area(
         .{ .start = grid_area.left, .end = grid_area.right },
-        justify_self orelse alignment_styles.horizontal,
+        alignment_styles.horizontal,
         width.?,
         position,
         inset_horizontal,
@@ -348,7 +350,7 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
         direction);
     const vertical_result = align_item_within_area(
         .{ .start = grid_area.top, .end = grid_area.bottom },
-        align_self orelse alignment_styles.vertical,
+        alignment_styles.vertical,
         height.?,
         position,
         inset_vertical,
@@ -406,7 +408,7 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
 }
 
 fn is_stretch(value: AlignItems) bool {
-    return value.keyword == .stretch and value.safety == .unsafe;
+    return value.keyword == .stretch and value.safety == .default;
 }
 
 /// Taffy `AlignItems::resolve_self_relative`. Local copy because the shared
@@ -467,7 +469,7 @@ pub fn align_item_within_area(
         else
             grid_area_size - resolved_size - resolved_margin.end,
         .center => (grid_area_size - resolved_size + resolved_margin.start - resolved_margin.end) / 2,
-        .self_start, .self_end => unreachable,
+        .normal, .self_start, .self_end => unreachable,
     };
 
     const offset_within_area: f32 = if (position.is_out_of_flow()) blk: {
