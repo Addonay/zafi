@@ -29,6 +29,13 @@
 //!     pub fn cache_get(self: *MyTree, id: NodeId, input: *const LayoutInput) Error!?LayoutOutput { ... }
 //!     pub fn cache_store(self: *MyTree, id: NodeId, input: *const LayoutInput, out: LayoutOutput) Error!void { ... }
 //!
+//!     Caching contract: `out.oof_candidates` lives in pass-scoped scratch memory.
+//!     If `cache_store` caches a `perform_layout` result it must keep its own
+//!     copy of those candidates, and `cache_get` must return them again (as a
+//!     fresh scratch-allocated list) on a hit: they are how absolutely
+//!     positioned descendants reach a containing block further up the tree.
+//!     `Cache` stores sizes and metadata only; see `Tree.cache_store`.
+//!
 //!     pub fn set_unrounded_layout(self: *MyTree, id: NodeId, value: Layout) Error!void { ... }
 //!     pub fn unrounded_layout(self: *const MyTree, id: NodeId) Error!Layout { ... }
 //!     pub fn set_final_layout(self: *MyTree, id: NodeId, value: Layout) Error!void { ... }

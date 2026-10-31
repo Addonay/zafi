@@ -102,6 +102,10 @@ pub const NodeData = struct {
     children: std.ArrayList(NodeId),
     parent: ?NodeId = null,
     cache: cache.Cache = .{},
+    /// The out-of-flow candidates of the cached final layout, owned by the
+    /// tree. A cache hit must surface them again: they are how absolutely
+    /// positioned descendants reach a containing block further up.
+    cached_oof_candidates: []layout.OofCandidate = &.{},
     alive: bool = true,
     /// Per-node measure context (Taffy's `NodeContext`). `has_context` mirrors
     /// Taffy's flag so a null context can still be a stored context.
@@ -119,6 +123,8 @@ pub const NodeData = struct {
 
     fn deinit(self: *NodeData, allocator: std.mem.Allocator) void {
         freeDetailedInfo(self, allocator);
+        allocator.free(self.cached_oof_candidates);
+        self.cached_oof_candidates = &.{};
         self.hoisted_children.deinit(allocator);
         self.children.deinit(allocator);
     }
@@ -247,6 +253,7 @@ pub const NodeStore = struct {
         node_data.children = .empty;
         node_data.parent = null;
         node_data.cache = .{};
+        node_data.cached_oof_candidates = &.{};
         node_data.alive = true;
         node_data.has_context = false;
         node_data.context = null;
@@ -751,11 +758,28 @@ pub const Tree = struct {
 
     pub fn cache_get(self: *Tree, id: NodeId, input: *const layout.LayoutInput) ?layout.LayoutOutput {
         const node_data = self.get_node_mut(id) orelse return null;
-        return node_data.cache.get(input.*);
+        var output = node_data.cache.get(input.*) orelse return null;
+        if (input.run_mode == .perform_layout and node_data.cached_oof_candidates.len != 0) {
+            // Hand out a pass-scoped copy: callers translate the list in place.
+            var candidates: layout.OofCandidates = .empty;
+            candidates.appendSlice(self.scratch_allocator(), node_data.cached_oof_candidates) catch return null;
+            output.oof_candidates = candidates;
+        }
+        return output;
     }
 
     pub fn cache_store(self: *Tree, id: NodeId, input: *const layout.LayoutInput, output: layout.LayoutOutput) void {
-        if (self.get_node_mut(id)) |node_data| node_data.cache.store(input.*, output);
+        const node_data = self.get_node_mut(id) orelse return;
+        if (input.run_mode == .perform_layout) {
+            // Keep the final layout's candidates alongside it, or not cache it at all.
+            const owned = self.allocator.dupe(layout.OofCandidate, output.oof_candidates.items) catch {
+                _ = node_data.cache.clear();
+                return;
+            };
+            self.allocator.free(node_data.cached_oof_candidates);
+            node_data.cached_oof_candidates = owned;
+        }
+        node_data.cache.store(input.*, output);
     }
 
     /// Clear this node's cached layout **and** invalidate every ancestor.
