@@ -112,6 +112,13 @@ const zafi = b.dependency("zafi", .{ .target = target, .optimize = optimize, .se
 
 The wire format matches Taffy's Rust `serde` output.
 
+## Known limitations
+
+- `calc()` values resolve to 0, as with Taffy's default tree: the
+  `LayoutTree.calc` hook is not consulted by the layout algorithms yet.
+- Text, images and other content are measured by the host (see above); there is
+  no built-in text shaping, inline formatting or table layout.
+
 ## Testing
 
 ```sh
