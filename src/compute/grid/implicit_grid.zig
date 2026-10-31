@@ -12,6 +12,7 @@ const NodeId = @import("../../tree/node.zig").NodeId;
 const LayoutTree = @import("../../tree/interfaces.zig").LayoutTree;
 const coordinates = @import("types/coordinates.zig");
 const grid_track_counts = @import("types/grid_track_counts.zig");
+const placement_mod = @import("placement.zig");
 
 const OriginZeroLine = coordinates.OriginZeroLine;
 const MAX_OZ_LINE: i16 = 10_000;
@@ -28,13 +29,14 @@ pub const GridSizeEstimate = struct {
 /// However, the estimate for the positive implicit track count is a lower
 /// bound as auto-placement can affect this in ways which are impossible to
 /// predict until the auto-placement algorithm is run.
-pub fn compute_grid_size_estimate(comptime Tree: type,
+/// Estimate the implicit grid size from the items' resolved placements (named
+/// lines already resolved, origin-zero coordinates; Taffy 4f18a82).
+pub fn compute_grid_size_estimate(
     explicit_col_count: u16,
     explicit_row_count: u16,
-    child_ids: []const NodeId,
-    tree_ref: *const Tree,
+    placements: []const placement_mod.AxisPlacement,
 ) GridSizeEstimate {
-    const known = get_known_child_positions(Tree, child_ids, tree_ref, explicit_col_count, explicit_row_count);
+    const known = get_known_child_positions(placements);
 
     var negative_implicit_inline_tracks = known.col_min.implied_negative_implicit_tracks();
     const explicit_inline_tracks = explicit_col_count;
@@ -75,13 +77,7 @@ const KnownChildPositions = struct {
 
 /// Iterate over children, producing an estimate of the min and max grid lines
 /// (in origin-zero coordinates) along with the span of each item (in tracks).
-fn get_known_child_positions(comptime Tree: type,
-    child_ids: []const NodeId,
-    tree_ref: *const Tree,
-    explicit_col_count: u16,
-    explicit_row_count: u16,
-) KnownChildPositions {
-    const TreeApi = LayoutTree(Tree);
+fn get_known_child_positions(placements: []const placement_mod.AxisPlacement) KnownChildPositions {
     var col_min = OriginZeroLine{ .value = 0 };
     var col_max = OriginZeroLine{ .value = 0 };
     var col_max_span: u16 = 0;
@@ -89,13 +85,9 @@ fn get_known_child_positions(comptime Tree: type,
     var row_max = OriginZeroLine{ .value = 0 };
     var row_max_span: u16 = 0;
 
-    for (child_ids) |child_id| {
-        const child_style = TreeApi.get_style(tree_ref, child_id);
-        const col_line = child_style.grid_column;
-        const row_line = child_style.grid_row;
-
-        const child_col = child_min_line_max_line_span(col_line, explicit_col_count);
-        const child_row = child_min_line_max_line_span(row_line, explicit_row_count);
+    for (placements) |item_placement| {
+        const child_col = child_min_line_max_line_span(item_placement.horizontal);
+        const child_row = child_min_line_max_line_span(item_placement.vertical);
 
         col_min = .{ .value = @min(col_min.value, child_col.min.value) };
         col_max = .{ .value = @max(col_max.value, child_col.max.value) };
@@ -123,10 +115,7 @@ const ChildMinMaxLineSpan = struct {
 
 /// Conservative estimate of the greatest and smallest grid lines used by a
 /// single grid item. Values are returned in origin-zero coordinates.
-fn child_min_line_max_line_span(line: geometry.Line(grid.GridPlacement), explicit_track_count: u16) ChildMinMaxLineSpan {
-    // Convert line into origin-zero coordinates before attempting to analyze.
-    // Named lines are ignored here as they are accounted for separately.
-    const oz_line = grid.line_into_origin_zero(line, explicit_track_count);
+fn child_min_line_max_line_span(oz_line: geometry.Line(grid.GridPlacement)) ChildMinMaxLineSpan {
     const start = oz_line.start;
     const end = oz_line.end;
 
@@ -172,12 +161,12 @@ fn clamp_i32_to_i16(value: i32) i16 {
 test "child min max line span handles spans and negatives" {
     const testing = @import("std").testing;
     // (line 5, span 6) with 6 explicit tracks
-    const result = child_min_line_max_line_span(.{ .start = .{ .line = 5 }, .end = .{ .span = 6 } }, 6);
+    const result = child_min_line_max_line_span(grid.line_into_origin_zero(.{ .start = .{ .line = 5 }, .end = .{ .span = 6 } }, 6));
     try testing.expectEqual(@as(i16, 4), result.min.value);
     try testing.expectEqual(@as(i16, 10), result.max.value);
     try testing.expectEqual(@as(u16, 1), result.span);
 
-    const negative = child_min_line_max_line_span(.{ .start = .{ .line = -5 }, .end = .{ .span = 3 } }, 6);
+    const negative = child_min_line_max_line_span(grid.line_into_origin_zero(.{ .start = .{ .line = -5 }, .end = .{ .span = 3 } }, 6));
     try testing.expectEqual(@as(i16, 2), negative.min.value);
     try testing.expectEqual(@as(i16, 5), negative.max.value);
     try testing.expectEqual(@as(u16, 1), negative.span);

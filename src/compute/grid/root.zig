@@ -472,13 +472,16 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
     name_resolver.set_explicit_column_count(explicit_col_count);
     name_resolver.set_explicit_row_count(explicit_row_count);
 
-    // 3. Implicit Grid: Estimate Track Counts
-    var in_flow_child_ids = std.ArrayList(NodeId).empty;
-    defer in_flow_child_ids.deinit(scratch);
-    try in_flow_child_ids.ensureTotalCapacity(scratch, in_flow_children.items.len);
-    for (in_flow_children.items) |entry| try in_flow_child_ids.append(scratch, entry.node);
+    // Resolve each item's named lines once, before the grid size estimate, so
+    // implicit tracks implied by named lines are estimated too (Taffy 4f18a82).
+    const item_placements = try scratch.alloc(placement.AxisPlacement, in_flow_children.items.len);
+    defer scratch.free(item_placements);
+    for (in_flow_children.items, item_placements) |entry, *item_placement| {
+        item_placement.* = placement.resolve_child_placement(&name_resolver, TreeApi.get_style(tree_ref, entry.node), explicit_col_count, explicit_row_count);
+    }
 
-    const estimate = implicit_grid.compute_grid_size_estimate(Tree, explicit_col_count, explicit_row_count, in_flow_child_ids.items, tree_ref);
+    // 3. Implicit Grid: Estimate Track Counts
+    const estimate = implicit_grid.compute_grid_size_estimate(explicit_col_count, explicit_row_count, item_placements);
 
     // 4. Grid Item Placement
     var items = std.ArrayList(GridItem).empty;
@@ -496,7 +499,7 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         node_style.grid_auto_flow,
         align_items,
         justify_items,
-        &name_resolver);
+        item_placements);
 
     // Extract track counts from previous step (auto-placement can expand the number of tracks)
     const final_col_counts = cell_occupancy_matrix.track_counts(.horizontal);
