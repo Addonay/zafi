@@ -538,6 +538,10 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         }
     }
 
+    // One lazily-allocated sort buffer for every track sizing run of this layout
+    var sort_scratch = track_sizing.SortScratch.init(scratch);
+    defer sort_scratch.deinit();
+
     // Run track sizing algorithm for Inline axis
     track_sizing.track_sizing_algorithm(
         Tree,
@@ -553,7 +557,8 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         rows.items,
         items.items,
         estimate_track_max_definite(Tree),
-        has_baseline_aligned_item);
+        has_baseline_aligned_item,
+            &sort_scratch);
     var initial_column_sum: f32 = 0;
     for (columns.items) |track| initial_column_sum += track.base_size;
     if (inner_node_size.width == null) inner_node_size.width = initial_column_sum;
@@ -588,7 +593,7 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         items.items,
         estimate_track_base_size(Tree),
         false, // TODO: Support baseline alignment in the vertical axis
-    );
+            &sort_scratch);
     var initial_row_sum: f32 = 0;
     for (rows.items) |track| initial_row_sum += track.base_size;
 
@@ -712,7 +717,8 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
             rows.items,
             items.items,
             estimate_track_base_size(Tree),
-            has_baseline_aligned_item);
+            has_baseline_aligned_item,
+            &sort_scratch);
 
         // The column widths may have changed, so the items' intrinsic height
         // contributions need recomputing (unless row sizing is re-run anyway, in
@@ -755,7 +761,7 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
             items.items,
             estimate_track_base_size(Tree),
             false, // TODO: Support baseline alignment in the vertical axis
-        );
+            &sort_scratch);
     }
 
     if ((intrinsic_column_contribution_changed and !has_percentage_column) or

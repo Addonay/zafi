@@ -232,15 +232,11 @@ pub fn track_sizing_algorithm(comptime Tree: type, tree_ref: *Tree,
     items: []GridItem,
     get_track_size_estimate: TrackSizeEstimateFn(Tree),
     has_baseline_aligned_item: bool,
+    sort_scratch: *SortScratch,
 ) void {
-    const TreeApi = LayoutTree(Tree);
-
     // 11.4 Initialise Track sizes
     const percentage_basis = inner_node_size.get(axis) orelse axis_min_size;
     initialize_track_sizes(axis_tracks, percentage_basis);
-
-    // One scratch allocation pair for the item sorts in this pass.
-    const sort_scratch = SortScratch.init(TreeApi.scratch_allocator(tree_ref), items.len);
 
     // 11.5.1 Shim item baselines
     if (has_baseline_aligned_item) {
@@ -402,29 +398,46 @@ fn lessThanEntry(_: void, a: ItemSortEntry, b: ItemSortEntry) bool {
     return a.index < b.index;
 }
 
-/// Reusable scratch for the item sorts, sized once per `track_sizing_algorithm`
-/// call and shared by both sorts in that call. The layout arena does not
-/// reclaim on free, so allocating per sort call would grow the arena once per
-/// call rather than once per pass.
-const SortScratch = struct {
-    entries: []ItemSortEntry,
-    reordered: []GridItem,
+/// Reusable scratch for the item sorts. One instance serves every
+/// `track_sizing_algorithm` run of a grid layout, and it is only allocated the
+/// first time a sort actually reorders items: since items are partitioned
+/// rather than sorted (Taffy 2c81b8e) most grids never need it. (Allocating it
+/// per run cost two n-item buffers per run, which the layout arena could not
+/// reclaim until the end of the pass.)
+pub const SortScratch = struct {
+    allocator: std.mem.Allocator,
+    entries: []ItemSortEntry = &.{},
+    reordered: []GridItem = &.{},
 
-    fn init(allocator: std.mem.Allocator, n: usize) SortScratch {
-        return .{
-            .entries = allocator.alloc(ItemSortEntry, n) catch &.{},
-            .reordered = allocator.alloc(GridItem, n) catch &.{},
-        };
+    pub fn init(allocator: std.mem.Allocator) SortScratch {
+        return .{ .allocator = allocator };
     }
 
-    fn fits(self: SortScratch, n: usize) bool {
-        return self.entries.len >= n and self.reordered.len >= n;
+    pub fn deinit(self: *SortScratch) void {
+        // Reverse allocation order lets the layout arena reclaim both buffers.
+        self.allocator.free(self.reordered);
+        self.allocator.free(self.entries);
+        self.* = .{ .allocator = self.allocator };
+    }
+
+    /// Make room for `n` items; false if allocation failed (callers fall back
+    /// to an allocation-free sort).
+    fn ensure(self: *SortScratch, n: usize) bool {
+        if (self.entries.len >= n and self.reordered.len >= n) return true;
+        self.deinit();
+        self.entries = self.allocator.alloc(ItemSortEntry, n) catch return false;
+        self.reordered = self.allocator.alloc(GridItem, n) catch {
+            self.allocator.free(self.entries);
+            self.entries = &.{};
+            return false;
+        };
+        return true;
     }
 };
 
-fn sortItemsByKey(items: []GridItem, scratch: SortScratch, axis: AbstractAxis, comptime kind: SortKind) void {
+fn sortItemsByKey(items: []GridItem, scratch: *SortScratch, axis: AbstractAxis, comptime kind: SortKind) void {
     if (items.len < 2) return;
-    if (!scratch.fits(items.len)) {
+    if (!scratch.ensure(items.len)) {
         // No scratch available: the direct sort needs none, so use it.
         std.mem.sort(GridItem, items, axis, switch (kind) {
             .other_axis_start => lessThanByOtherAxisStart,
@@ -441,7 +454,7 @@ fn sortItemsByKey(items: []GridItem, scratch: SortScratch, axis: AbstractAxis, c
     @memcpy(items, reordered);
 }
 
-fn sortItemsByOtherAxisStart(items: []GridItem, axis: AbstractAxis, scratch: SortScratch) void {
+fn sortItemsByOtherAxisStart(items: []GridItem, axis: AbstractAxis, scratch: *SortScratch) void {
     sortItemsByKey(items, scratch, axis, .other_axis_start);
 }
 
@@ -449,7 +462,7 @@ fn sortItemsByOtherAxisStart(items: []GridItem, axis: AbstractAxis, scratch: Sor
 /// form one batch at the end; the rest only need ordering by span if any of
 /// them spans more than one track (Taffy 2c81b8e: order within a batch does not
 /// affect the result). The common all-span-1, no-flex grid is left untouched.
-fn sortItemsByCrossFlexSpanStart(items: []GridItem, axis: AbstractAxis, scratch: SortScratch) void {
+fn sortItemsByCrossFlexSpanStart(items: []GridItem, axis: AbstractAxis, scratch: *SortScratch) void {
     var needs_sort = false;
     var seen_flex = false;
     var flex_out_of_place = false;
@@ -483,7 +496,7 @@ inline fn initialize_track_sizes(axis_tracks: []GridTrack, axis_inner_node_size:
 
 /// 11.5.1 Shim baseline-aligned items so their intrinsic size contributions
 /// reflect their baseline alignment.
-fn resolve_item_baselines(comptime Tree: type, tree_ref: *Tree, axis: AbstractAxis, items: []GridItem, inner_node_size: geometry.Size(?f32), sort_scratch: SortScratch) void {
+fn resolve_item_baselines(comptime Tree: type, tree_ref: *Tree, axis: AbstractAxis, items: []GridItem, inner_node_size: geometry.Size(?f32), sort_scratch: *SortScratch) void {
     const TreeApi = LayoutTree(Tree);
     // Sort items by track in the other axis start position so that we can iterate
     // items in groups which are in the same track in the other axis.
@@ -574,7 +587,7 @@ fn resolve_intrinsic_track_sizes(comptime Tree: type, tree_ref: *Tree,
     axis_available_grid_space: AvailableSpace,
     inner_node_size: geometry.Size(?f32),
     get_track_size_estimate: TrackSizeEstimateFn(Tree),
-    sort_scratch: SortScratch,
+    sort_scratch: *SortScratch,
 ) void {
 
     // Step 1 shim baseline-aligned items already done in `resolve_item_baselines`.
