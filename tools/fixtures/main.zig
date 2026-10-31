@@ -494,7 +494,7 @@ fn compareNode(
         .grid => |pointer| @ptrCast(@alignCast(pointer)),
     };
     if (expected.resolved_rows != null and actual_grid != null) {
-        const actual_rows = actual_grid.?.grid_template_rows();
+        const actual_rows = actual_grid.?.grid_template_rows(alloc, 1) catch "";
         if (!trackListsMatch(alloc, expected.resolved_rows.?, actual_rows)) {
             failures += 1;
             if (failures <= 8) {
@@ -503,7 +503,7 @@ fn compareNode(
         }
     }
     if (expected.resolved_columns != null and actual_grid != null) {
-        const actual_columns = actual_grid.?.grid_template_columns();
+        const actual_columns = actual_grid.?.grid_template_columns(alloc, 1) catch "";
         if (!trackListsMatch(alloc, expected.resolved_columns.?, actual_columns)) {
             failures += 1;
             if (failures <= 8) {

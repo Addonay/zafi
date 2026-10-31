@@ -219,8 +219,14 @@ const OofAxis = struct {
     fn position(self: *const OofAxis, size: f32, margin: geometry.Line(f32)) f32 {
         const imcb = self.inset_modified_containing_block();
         if (self.inset.start == null and self.inset.end == null) {
-            // Aligned within the static-position rectangle
-            return resolve_static_offset_axis(self.static_position, size, margin);
+            // Static alignment, with `safe` overflow judged against the IMCB (Taffy 5f6ec1d)
+            const sp = self.static_position;
+            const margin_box_size = size + margin.start + margin.end;
+            const offset = if (sp.alignment.safety == .safe and margin_box_size > imcb.end - imcb.start)
+                align_in_line(imcb, margin_box_size, self.start_edge())
+            else
+                align_in_line(sp.area, margin_box_size, sp.alignment.keyword);
+            return offset + margin.start;
         }
         // One auto inset: the margin box aligns to the stronger inset's edge
         if (self.inset.end == null) return imcb.start + margin.start;

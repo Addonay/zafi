@@ -56,6 +56,12 @@ pub const DetailedGridTracksInfo = struct {
     positive_implicit_tracks: u16 = 0,
     empty_axis_line: ?f32 = null,
     line_names: []const []const []const u8 = &.{},
+    /// Sorted, disjoint index ranges (into `positions`) of collapsed `auto-fit`
+    /// tracks, whose adjacent gutters overlap when resolving absolute grid-area
+    /// edges. Empty unless a track collapsed.
+    collapsed_tracks: []const TrackRange = &.{},
+
+    pub const TrackRange = struct { start: usize, end: usize };
 
     pub fn names_for_line(self: DetailedGridTracksInfo, index: usize) []const []const u8 {
         if (index < self.negative_implicit_tracks) return &.{};
@@ -67,20 +73,46 @@ pub const DetailedGridTracksInfo = struct {
         return self.names_for_line(index);
     }
 
-    pub fn positions_from_grid_track_layout(allocator: std.mem.Allocator, tracks: []const GridTrack) ![]geometry.Line(f32) {
-        var positions = std.ArrayList(geometry.Line(f32)).empty;
+    /// Each track's start/end relative to the border box, plus the index ranges
+    /// of runs of collapsed `auto-fit` tracks (which still appear, zero-sized).
+    pub fn positions_from_grid_track_layout(allocator: std.mem.Allocator, tracks: []const GridTrack) !struct { positions: []geometry.Line(f32), collapsed: []TrackRange } {
+        var positions = try std.ArrayList(geometry.Line(f32)).initCapacity(allocator, tracks.len / 2 + 1);
+        var collapsed = std.ArrayList(TrackRange).empty;
         for (tracks) |track| {
-            // Collapsed auto-fit tracks still appear in the resolved list as
-            // zero-sized tracks, so they are not filtered out here.
-            if (track.kind == .track) {
-                try positions.append(allocator, .{ .start = track.offset, .end = track.offset + track.base_size });
+            if (track.kind != .track) continue;
+            if (track.is_collapsed) {
+                const index = positions.items.len;
+                if (collapsed.items.len > 0 and collapsed.items[collapsed.items.len - 1].end == index) {
+                    collapsed.items[collapsed.items.len - 1].end += 1;
+                } else {
+                    try collapsed.append(allocator, .{ .start = index, .end = index + 1 });
+                }
             }
+            try positions.append(allocator, .{ .start = track.offset, .end = track.offset + track.base_size });
         }
-        return positions.toOwnedSlice(allocator);
+        return .{ .positions = try positions.toOwnedSlice(allocator), .collapsed = try collapsed.toOwnedSlice(allocator) };
+    }
+
+    /// A track edge, excluding gutters that overlap across a collapsed track run:
+    /// a start edge follows the shared gutter, an end edge precedes it.
+    fn absolute_track_edge(self: DetailedGridTracksInfo, index: usize, is_start: bool, is_reversed: bool) f32 {
+        var track = self.positions[index];
+        for (self.collapsed_tracks) |range| {
+            if (range.end <= index) continue;
+            if (range.start <= index) {
+                const adjacent: ?usize = if (is_start) range.end else if (range.start > 0) range.start - 1 else null;
+                if (adjacent) |adj| {
+                    if (adj < self.positions.len) track = self.positions[adj];
+                }
+            }
+            break;
+        }
+        return if (is_start != is_reversed) track.start else track.end;
     }
 
     pub fn from_grid_tracks_and_track_count(allocator: std.mem.Allocator, counts: TrackCounts, tracks: []const GridTrack, line_names: []const []const []const u8) !DetailedGridTracksInfo {
-        const positions = try positions_from_grid_track_layout(allocator, tracks);
+        const layout_positions = try positions_from_grid_track_layout(allocator, tracks);
+        const positions = layout_positions.positions;
         var sizes = try allocator.alloc(f32, positions.len);
         for (positions, 0..) |position, index| sizes[index] = position.end - position.start;
         return .{
@@ -91,6 +123,7 @@ pub const DetailedGridTracksInfo = struct {
             .positive_implicit_tracks = counts.positive_implicit,
             .empty_axis_line = if (positions.len == 0 and tracks.len > 0) tracks[0].offset else null,
             .line_names = line_names,
+            .collapsed_tracks = layout_positions.collapsed,
         };
     }
 
@@ -121,7 +154,7 @@ pub const DetailedGridTracksInfo = struct {
 
         const start_position = if (start_track) |line_index|
             (if (line_index < self.positions.len)
-                (if (is_reversed) self.positions[line_index].end else self.positions[line_index].start)
+                self.absolute_track_edge(line_index, true, is_reversed)
             else if (self.positions.len > 0)
                 (if (is_reversed) self.positions[self.positions.len - 1].start else self.positions[self.positions.len - 1].end)
             else
@@ -137,17 +170,24 @@ pub const DetailedGridTracksInfo = struct {
             }
             const prev = line_index - 1;
             break :blk if (prev < self.positions.len)
-                (if (is_reversed) self.positions[prev].start else self.positions[prev].end)
+                self.absolute_track_edge(prev, false, is_reversed)
             else if (self.positions.len > 0)
                 (if (is_reversed) self.positions[0].end else self.positions[0].start)
             else
                 (self.empty_axis_line orelse (if (is_reversed) padding_start else padding_end));
         } else if (is_reversed) padding_start else padding_end;
 
-        return .{ .start = @min(start_position, end_position), .end = @max(start_position, end_position) };
+        // An area whose lines all fall within a collapsed run is zero-sized and
+        // anchored at its logical start edge (as in Chrome).
+        return if (is_reversed)
+            .{ .start = @min(start_position, end_position), .end = start_position }
+        else
+            .{ .start = start_position, .end = @max(start_position, end_position) };
     }
 
-    pub fn write_track_list(self: DetailedGridTracksInfo, writer: anytype) !void {
+    /// Serialize as a `grid-template-*` track list. Sizes are divided by `zoom`
+    /// (the CSS zoom factor, 1 for none) as browsers report them (Taffy 679d054).
+    pub fn write_track_list(self: DetailedGridTracksInfo, writer: anytype, zoom: f32) !void {
         if (self.positions.len == 0) return writer.writeAll("none");
         for (self.positions, 0..) |position, index| {
             const names = self.names_for_line(index);
@@ -160,7 +200,7 @@ pub const DetailedGridTracksInfo = struct {
                 try writer.writeAll("] ");
             }
             var number_buffer: [64]u8 = undefined;
-            const size_text = std.fmt.bufPrint(&number_buffer, "{d}px", .{position.end - position.start}) catch "0px";
+            const size_text = std.fmt.bufPrint(&number_buffer, "{d}px", .{(position.end - position.start) / zoom}) catch "0px";
             try writer.writeAll(size_text);
             if (index + 1 < self.positions.len) try writer.writeAll(" ");
         }
@@ -175,11 +215,13 @@ pub const DetailedGridTracksInfo = struct {
         }
     }
 
-    pub fn to_track_list_string(self: DetailedGridTracksInfo) []const u8 {
+    /// The track list as a string owned by the caller (free with `allocator`).
+    pub fn to_track_list_string(self: DetailedGridTracksInfo, allocator: std.mem.Allocator, zoom: f32) ![]u8 {
         var output = std.ArrayList(u8).empty;
-        var sink = ArrayListSink{ .list = &output, .allocator = std.heap.page_allocator };
-        self.write_track_list(&sink) catch @panic("Taffy detailed grid string allocation failed");
-        return output.toOwnedSlice(std.heap.page_allocator) catch @panic("Taffy detailed grid string allocation failed");
+        errdefer output.deinit(allocator);
+        var sink = ArrayListSink{ .list = &output, .allocator = allocator };
+        try self.write_track_list(&sink, zoom);
+        return output.toOwnedSlice(allocator);
     }
 };
 
@@ -209,17 +251,19 @@ pub const DetailedGridInfo = struct {
     /// boxes after the layout pass's scratch arena is gone.
     line_names: ?named.OwnedLineIndex = null,
 
-    pub fn write_grid_template_rows(self: DetailedGridInfo, writer: anytype) !void {
-        return self.rows.write_track_list(writer);
+    pub fn write_grid_template_rows(self: DetailedGridInfo, writer: anytype, zoom: f32) !void {
+        return self.rows.write_track_list(writer, zoom);
     }
-    pub fn write_grid_template_columns(self: DetailedGridInfo, writer: anytype) !void {
-        return self.columns.write_track_list(writer);
+    pub fn write_grid_template_columns(self: DetailedGridInfo, writer: anytype, zoom: f32) !void {
+        return self.columns.write_track_list(writer, zoom);
     }
-    pub fn grid_template_rows(self: DetailedGridInfo) []const u8 {
-        return self.rows.to_track_list_string();
+    /// Caller owns the returned string.
+    pub fn grid_template_rows(self: DetailedGridInfo, allocator: std.mem.Allocator, zoom: f32) ![]u8 {
+        return self.rows.to_track_list_string(allocator, zoom);
     }
-    pub fn grid_template_columns(self: DetailedGridInfo) []const u8 {
-        return self.columns.to_track_list_string();
+    /// Caller owns the returned string.
+    pub fn grid_template_columns(self: DetailedGridInfo, allocator: std.mem.Allocator, zoom: f32) ![]u8 {
+        return self.columns.to_track_list_string(allocator, zoom);
     }
 
     pub fn item_grid_area(self: DetailedGridInfo, index: usize) ?struct { location: geometry.Point(f32), size: geometry.Size(f32) } {
@@ -434,13 +478,16 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
     name_resolver.set_explicit_column_count(explicit_col_count);
     name_resolver.set_explicit_row_count(explicit_row_count);
 
-    // 3. Implicit Grid: Estimate Track Counts
-    var in_flow_child_ids = std.ArrayList(NodeId).empty;
-    defer in_flow_child_ids.deinit(scratch);
-    try in_flow_child_ids.ensureTotalCapacity(scratch, in_flow_children.items.len);
-    for (in_flow_children.items) |entry| try in_flow_child_ids.append(scratch, entry.node);
+    // Resolve each item's named lines once, before the grid size estimate, so
+    // implicit tracks implied by named lines are estimated too (Taffy 4f18a82).
+    const item_placements = try scratch.alloc(placement.AxisPlacement, in_flow_children.items.len);
+    defer scratch.free(item_placements);
+    for (in_flow_children.items, item_placements) |entry, *item_placement| {
+        item_placement.* = placement.resolve_child_placement(&name_resolver, TreeApi.get_style(tree_ref, entry.node), explicit_col_count, explicit_row_count);
+    }
 
-    const estimate = implicit_grid.compute_grid_size_estimate(Tree, explicit_col_count, explicit_row_count, in_flow_child_ids.items, tree_ref);
+    // 3. Implicit Grid: Estimate Track Counts
+    const estimate = implicit_grid.compute_grid_size_estimate(explicit_col_count, explicit_row_count, item_placements);
 
     // 4. Grid Item Placement
     var items = std.ArrayList(GridItem).empty;
@@ -458,7 +505,7 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         node_style.grid_auto_flow,
         align_items,
         justify_items,
-        &name_resolver);
+        item_placements);
 
     // Extract track counts from previous step (auto-placement can expand the number of tracks)
     const final_col_counts = cell_occupancy_matrix.track_counts(.horizontal);
