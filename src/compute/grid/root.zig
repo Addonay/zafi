@@ -56,6 +56,12 @@ pub const DetailedGridTracksInfo = struct {
     positive_implicit_tracks: u16 = 0,
     empty_axis_line: ?f32 = null,
     line_names: []const []const []const u8 = &.{},
+    /// Sorted, disjoint index ranges (into `positions`) of collapsed `auto-fit`
+    /// tracks, whose adjacent gutters overlap when resolving absolute grid-area
+    /// edges. Empty unless a track collapsed.
+    collapsed_tracks: []const TrackRange = &.{},
+
+    pub const TrackRange = struct { start: usize, end: usize };
 
     pub fn names_for_line(self: DetailedGridTracksInfo, index: usize) []const []const u8 {
         if (index < self.negative_implicit_tracks) return &.{};
@@ -67,20 +73,46 @@ pub const DetailedGridTracksInfo = struct {
         return self.names_for_line(index);
     }
 
-    pub fn positions_from_grid_track_layout(allocator: std.mem.Allocator, tracks: []const GridTrack) ![]geometry.Line(f32) {
-        var positions = std.ArrayList(geometry.Line(f32)).empty;
+    /// Each track's start/end relative to the border box, plus the index ranges
+    /// of runs of collapsed `auto-fit` tracks (which still appear, zero-sized).
+    pub fn positions_from_grid_track_layout(allocator: std.mem.Allocator, tracks: []const GridTrack) !struct { positions: []geometry.Line(f32), collapsed: []TrackRange } {
+        var positions = try std.ArrayList(geometry.Line(f32)).initCapacity(allocator, tracks.len / 2 + 1);
+        var collapsed = std.ArrayList(TrackRange).empty;
         for (tracks) |track| {
-            // Collapsed auto-fit tracks still appear in the resolved list as
-            // zero-sized tracks, so they are not filtered out here.
-            if (track.kind == .track) {
-                try positions.append(allocator, .{ .start = track.offset, .end = track.offset + track.base_size });
+            if (track.kind != .track) continue;
+            if (track.is_collapsed) {
+                const index = positions.items.len;
+                if (collapsed.items.len > 0 and collapsed.items[collapsed.items.len - 1].end == index) {
+                    collapsed.items[collapsed.items.len - 1].end += 1;
+                } else {
+                    try collapsed.append(allocator, .{ .start = index, .end = index + 1 });
+                }
             }
+            try positions.append(allocator, .{ .start = track.offset, .end = track.offset + track.base_size });
         }
-        return positions.toOwnedSlice(allocator);
+        return .{ .positions = try positions.toOwnedSlice(allocator), .collapsed = try collapsed.toOwnedSlice(allocator) };
+    }
+
+    /// A track edge, excluding gutters that overlap across a collapsed track run:
+    /// a start edge follows the shared gutter, an end edge precedes it.
+    fn absolute_track_edge(self: DetailedGridTracksInfo, index: usize, is_start: bool, is_reversed: bool) f32 {
+        var track = self.positions[index];
+        for (self.collapsed_tracks) |range| {
+            if (range.end <= index) continue;
+            if (range.start <= index) {
+                const adjacent: ?usize = if (is_start) range.end else if (range.start > 0) range.start - 1 else null;
+                if (adjacent) |adj| {
+                    if (adj < self.positions.len) track = self.positions[adj];
+                }
+            }
+            break;
+        }
+        return if (is_start != is_reversed) track.start else track.end;
     }
 
     pub fn from_grid_tracks_and_track_count(allocator: std.mem.Allocator, counts: TrackCounts, tracks: []const GridTrack, line_names: []const []const []const u8) !DetailedGridTracksInfo {
-        const positions = try positions_from_grid_track_layout(allocator, tracks);
+        const layout_positions = try positions_from_grid_track_layout(allocator, tracks);
+        const positions = layout_positions.positions;
         var sizes = try allocator.alloc(f32, positions.len);
         for (positions, 0..) |position, index| sizes[index] = position.end - position.start;
         return .{
@@ -91,6 +123,7 @@ pub const DetailedGridTracksInfo = struct {
             .positive_implicit_tracks = counts.positive_implicit,
             .empty_axis_line = if (positions.len == 0 and tracks.len > 0) tracks[0].offset else null,
             .line_names = line_names,
+            .collapsed_tracks = layout_positions.collapsed,
         };
     }
 
@@ -121,7 +154,7 @@ pub const DetailedGridTracksInfo = struct {
 
         const start_position = if (start_track) |line_index|
             (if (line_index < self.positions.len)
-                (if (is_reversed) self.positions[line_index].end else self.positions[line_index].start)
+                self.absolute_track_edge(line_index, true, is_reversed)
             else if (self.positions.len > 0)
                 (if (is_reversed) self.positions[self.positions.len - 1].start else self.positions[self.positions.len - 1].end)
             else
@@ -137,14 +170,19 @@ pub const DetailedGridTracksInfo = struct {
             }
             const prev = line_index - 1;
             break :blk if (prev < self.positions.len)
-                (if (is_reversed) self.positions[prev].start else self.positions[prev].end)
+                self.absolute_track_edge(prev, false, is_reversed)
             else if (self.positions.len > 0)
                 (if (is_reversed) self.positions[0].end else self.positions[0].start)
             else
                 (self.empty_axis_line orelse (if (is_reversed) padding_start else padding_end));
         } else if (is_reversed) padding_start else padding_end;
 
-        return .{ .start = @min(start_position, end_position), .end = @max(start_position, end_position) };
+        // An area whose lines all fall within a collapsed run is zero-sized and
+        // anchored at its logical start edge (as in Chrome).
+        return if (is_reversed)
+            .{ .start = @min(start_position, end_position), .end = start_position }
+        else
+            .{ .start = start_position, .end = @max(start_position, end_position) };
     }
 
     pub fn write_track_list(self: DetailedGridTracksInfo, writer: anytype) !void {
