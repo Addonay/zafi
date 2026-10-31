@@ -29,6 +29,18 @@ const scenarios = [_]Scenario{
     .{ .name = "mixed_flex_grid_block", .iters = 10, .run = benchMixed },
 };
 
+/// A scenario whose state (the tree) lives across iterations.
+const Stateful = struct {
+    name: []const u8,
+    iters: usize,
+    run: *const fn (io: std.Io, allocator: std.mem.Allocator, iters: usize) anyerror!u64,
+};
+
+const stateful_scenarios = [_]Stateful{
+    .{ .name = "rebuild_flex_1000", .iters = 50, .run = benchRebuild },
+    .{ .name = "relayout_grid_50x50", .iters = 50, .run = benchRelayout },
+};
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -49,6 +61,86 @@ pub fn main(init: std.process.Init) !void {
         }
         try measure(io, scenario);
     }
+    for (stateful_scenarios) |scenario| {
+        if (filter) |needle| {
+            if (std.mem.indexOf(u8, scenario.name, needle) == null) continue;
+        }
+        var counting = CountingAllocator{ .backing = if (@import("builtin").link_libc) std.heap.c_allocator else std.heap.smp_allocator };
+        const total_ns = try scenario.run(io, counting.allocator(), scenario.iters);
+        if (counting.live != 0) std.debug.print("warning: {s} leaked {d} bytes\n", .{ scenario.name, counting.live });
+        std.debug.print("bench|{s}|{d}|{d}|{d}|{d}\n", .{ scenario.name, scenario.iters, total_ns / scenario.iters, counting.peak, counting.allocations / (scenario.iters + 1) });
+    }
+}
+
+/// Immediate-mode pattern: one long-lived tree, cleared and rebuilt every frame.
+fn benchRebuild(io: std.Io, allocator: std.mem.Allocator, iters: usize) !u64 {
+    var tree = zafi.Tree.init(allocator);
+    defer tree.deinit();
+    const children = try allocator.alloc(zafi.NodeId, 1000);
+    defer allocator.free(children);
+    try rebuildStep(&tree, children); // warm-up
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    for (0..iters) |_| try rebuildStep(&tree, children);
+    return @intCast(start.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.nanoseconds);
+}
+
+fn rebuildStep(tree: *zafi.Tree, children: []zafi.NodeId) !void {
+    tree.clear();
+    for (children) |*child| {
+        child.* = try tree.new_leaf(.{
+            .size = .{ .width = zafi.Dimension.length(10), .height = zafi.Dimension.length(10) },
+            .flex_grow = 1,
+            .flex_shrink = 1,
+            .margin = .{
+                .left = zafi.LengthPercentageAuto.length(1),
+                .right = zafi.LengthPercentageAuto.length(1),
+                .top = zafi.LengthPercentageAuto.zero(),
+                .bottom = zafi.LengthPercentageAuto.zero(),
+            },
+        });
+    }
+    const root = try tree.new_with_children(.{
+        .display = .flex,
+        .size = .{ .width = zafi.Dimension.length(2000), .height = zafi.Dimension.length(100) },
+    }, children);
+    try tree.compute_layout(root, .{ .width = .{ .definite = 2000 }, .height = .{ .definite = 100 } });
+}
+
+/// Retained-UI pattern: one built tree; each frame one leaf changes size and
+/// the tree is re-laid out.
+fn benchRelayout(io: std.Io, allocator: std.mem.Allocator, iters: usize) !u64 {
+    var tree = zafi.Tree.init(allocator);
+    defer tree.deinit();
+    const leaves = try allocator.alloc(zafi.NodeId, 2500);
+    defer allocator.free(leaves);
+    for (leaves) |*leaf| leaf.* = try tree.new_leaf(fixedSize(5, 5));
+    const auto_track = zafi.GridTemplateComponent{ .single = zafi.TrackSizingFunction.auto };
+    const columns = try allocator.alloc(zafi.GridTemplateComponent, 50);
+    defer allocator.free(columns);
+    @memset(columns, auto_track);
+    const rows = try allocator.alloc(zafi.GridTemplateComponent, 50);
+    defer allocator.free(rows);
+    @memset(rows, auto_track);
+    const root = try tree.new_with_children(.{
+        .display = .grid,
+        .grid_template_columns = columns,
+        .grid_template_rows = rows,
+        .size = .{ .width = zafi.Dimension.length(500), .height = zafi.Dimension.length(500) },
+    }, leaves);
+    var frame: usize = 0;
+    try relayoutStep(&tree, root, leaves, &frame); // initial layout
+    try relayoutStep(&tree, root, leaves, &frame); // warm-up
+    const start = std.Io.Clock.Timestamp.now(io, .awake);
+    for (0..iters) |_| try relayoutStep(&tree, root, leaves, &frame);
+    return @intCast(start.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.nanoseconds);
+}
+
+fn relayoutStep(tree: *zafi.Tree, root: zafi.NodeId, leaves: []const zafi.NodeId, frame: *usize) !void {
+    frame.* += 1;
+    const leaf = leaves[(frame.* * 37) % leaves.len];
+    const side: f32 = if (frame.* % 2 == 0) 5 else 6;
+    try tree.set_style(leaf, fixedSize(side, side));
+    try tree.compute_layout(root, .{ .width = .{ .definite = 500 }, .height = .{ .definite = 500 } });
 }
 
 /// Counts live and peak bytes through a backing allocator, so the reported

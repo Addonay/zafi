@@ -258,6 +258,115 @@ fn mixed() {
 }
 
 // ---------------------------------------------------------------------------
+// Retained-tree scenarios (state lives across iterations)
+// ---------------------------------------------------------------------------
+
+/// Immediate-mode pattern: one long-lived tree, cleared and rebuilt every frame.
+fn rebuild_setup() -> TaffyTree<String> {
+    TaffyTree::new()
+}
+
+fn rebuild_step(tree: &mut TaffyTree<String>) {
+    tree.clear();
+    let mut children = Vec::with_capacity(1000);
+    for _ in 0..1000 {
+        children.push(
+            tree.new_leaf(Style {
+                size: Size { width: Dimension::length(10.0), height: Dimension::length(10.0) },
+                flex_grow: 1.0,
+                flex_shrink: 1.0,
+                margin: Rect {
+                    left: LengthPercentageAuto::length(1.0),
+                    right: LengthPercentageAuto::length(1.0),
+                    top: LengthPercentageAuto::length(0.0),
+                    bottom: LengthPercentageAuto::length(0.0),
+                },
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+    }
+    let root = tree
+        .new_with_children(
+            Style {
+                display: Display::Flex,
+                size: Size { width: Dimension::length(2000.0), height: Dimension::length(100.0) },
+                ..Default::default()
+            },
+            &children,
+        )
+        .unwrap();
+    tree.compute_layout(root, Size { width: AvailableSpace::Definite(2000.0), height: AvailableSpace::Definite(100.0) })
+        .unwrap();
+}
+
+/// Retained-UI pattern: one built tree; each frame one leaf changes size and the tree is re-laid out.
+struct Relayout {
+    tree: TaffyTree<String>,
+    root: NodeId,
+    leaves: Vec<NodeId>,
+    frame: usize,
+}
+
+fn relayout_setup() -> Relayout {
+    let mut tree: TaffyTree<String> = TaffyTree::new();
+    let mut leaves = Vec::with_capacity(2500);
+    for _ in 0..2500 {
+        leaves.push(tree.new_leaf(fixed(5.0, 5.0)).unwrap());
+    }
+    let columns = vec![GridTemplateComponent::Single(TrackSizingFunction::AUTO); 50];
+    let rows = vec![GridTemplateComponent::Single(TrackSizingFunction::AUTO); 50];
+    let root = tree
+        .new_with_children(
+            Style {
+                display: Display::Grid,
+                grid_template_columns: columns,
+                grid_template_rows: rows,
+                size: Size { width: Dimension::length(500.0), height: Dimension::length(500.0) },
+                ..Default::default()
+            },
+            &leaves,
+        )
+        .unwrap();
+    let mut state = Relayout { tree, root, leaves, frame: 0 };
+    relayout_step(&mut state);
+    state
+}
+
+fn relayout_step(state: &mut Relayout) {
+    state.frame += 1;
+    let leaf = state.leaves[(state.frame * 37) % state.leaves.len()];
+    let side = if state.frame % 2 == 0 { 5.0 } else { 6.0 };
+    state.tree.set_style(leaf, fixed(side, side)).unwrap();
+    state
+        .tree
+        .compute_layout(state.root, Size { width: AvailableSpace::Definite(500.0), height: AvailableSpace::Definite(500.0) })
+        .unwrap();
+}
+
+/// Like `measure` for a scenario whose state lives across iterations. Memory is
+/// the peak live bytes from before `setup`, so it includes the retained tree.
+fn measure_stateful<S>(name: &str, iters: usize, filter: Option<&str>, setup: fn() -> S, step: fn(&mut S)) {
+    if let Some(needle) = filter {
+        if !name.contains(needle) {
+            return;
+        }
+    }
+    let baseline = LIVE.load(Ordering::Relaxed);
+    PEAK.store(baseline, Ordering::Relaxed);
+    let mut state = setup();
+    step(&mut state); // warm-up
+    let start = Instant::now();
+    for _ in 0..iters {
+        step(&mut state);
+    }
+    let elapsed = start.elapsed();
+    let peak = PEAK.load(Ordering::Relaxed).saturating_sub(baseline);
+    println!("bench|{}|{}|{}|{}", name, iters, elapsed.as_nanos() as usize / iters, peak);
+    drop(state);
+}
+
+// ---------------------------------------------------------------------------
 // Driver
 // ---------------------------------------------------------------------------
 
@@ -301,4 +410,6 @@ fn main() {
     measure("grid_50x50", 10, filter, grid);
     measure("block_nested_50", 30, filter, block_nested);
     measure("mixed_flex_grid_block", 10, filter, mixed);
+    measure_stateful("rebuild_flex_1000", 50, filter, rebuild_setup, rebuild_step);
+    measure_stateful("relayout_grid_50x50", 50, filter, relayout_setup, relayout_step);
 }
