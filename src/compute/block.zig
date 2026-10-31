@@ -28,6 +28,16 @@ const SIZE_NONE: geometry.Size(?f32) = .{ .width = null, .height = null };
 const RECT_ZERO: geometry.Rect(f32) = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 };
 
 /// Context for positioning Block and Float boxes within a Block Formatting Context
+/// The block-axis offset `align-content` applies to a block container's in-flow
+/// content given the free space between its content box and that content. The
+/// whole stack of in-flow content is one alignment subject, so the distribution
+/// keywords use their single-subject fallbacks. Also useful to hosts laying out
+/// inline formatting contexts (line boxes) outside zafi.
+pub fn compute_block_align_content_offset(align_content: style.alignment.AlignContent, free_space: f32) f32 {
+    const keyword = alignment.apply_alignment_fallback(free_space, 1, align_content);
+    return alignment.compute_alignment_offset(free_space, 1, 0.0, keyword, false, true);
+}
+
 pub const BlockFormattingContext = struct {
     /// The float positioning context that handles positioning floats within this Block Formatting Context
     float_context: float.FloatContext,
@@ -218,7 +228,8 @@ pub const BlockContext = struct {
     }
 
     /// Update the height that descendant floats consume within a particular child
-    fn add_child_floated_content_height_contribution(self: *BlockContext, child_contribution: f32) void {
+    /// `child_contribution` is relative to this block's border-top.
+    pub fn add_child_floated_content_height_contribution(self: *BlockContext, child_contribution: f32) void {
         self.float_content_contribution = @max(self.float_content_contribution, child_contribution);
     }
 
@@ -588,8 +599,7 @@ tree_ref,
         const container_inner_height = container_outer_height - resolved_content_box_inset.vertical_axis_sum();
         const inflow_content_height = intrinsic_outer_height - resolved_content_box_inset.vertical_axis_sum();
         const free_space = container_inner_height - inflow_content_height;
-        const keyword = alignment.apply_alignment_fallback(free_space, 1, align_content_value);
-        const group_offset = alignment.compute_alignment_offset(free_space, 1, 0.0, keyword, false, true);
+        const group_offset = compute_block_align_content_offset(align_content_value, free_space);
         if (inflow_result.first_baseline) |baseline| {
             inflow_result.first_baseline = baseline + group_offset;
         }
@@ -803,7 +813,9 @@ fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
             is_not_floated and
             !is_scroll_container and
             !contain.establishes_independent_formatting_context() and
-            !child_style.establishes_formatting_context_from_display();
+            !child_style.establishes_formatting_context_from_display() and
+            // A non-normal align-content establishes an independent formatting context
+            child_style.align_content.keyword == .normal;
 
         try item_list.list.append(allocator, .{
             .node_id = child_node_id,
@@ -1209,6 +1221,10 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
         const clear_threshold = block_ctx.cleared_threshold(item.clear);
         const clear_pos = clear_threshold orelse -std.math.inf(f32);
 
+        // The height consumed by floats within a same-BFC child, relative to the
+        // child's border-top; added to the parent's once the child's position is known.
+        var child_float_contribution = -std.math.inf(f32);
+
         var item_layout: layout.LayoutOutput = undefined;
         if (item.is_in_same_bfc) {
             // Childless children cannot interact with the block formatting context, so they
@@ -1225,15 +1241,17 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                 const inset_right = container_outer_width - width - inset_left;
                 const insets = [2]f32{ inset_left, inset_right };
 
-                // Compute child layout
-                var child_block_ctx = block_ctx.sub_context(@max(y_offset_for_absolute + item_non_auto_margin.top, clear_pos), insets);
+                // Compute child layout. The child's position is estimated from its top
+                // margin collapsed with the preceding margins (its own collapsed-through
+                // margins are not yet known).
+                const estimated_y = committed_y_offset + active_collapsible_margin_set.collapse_with_margin(item_non_auto_margin.top).resolve();
+                var child_block_ctx = block_ctx.sub_context(@max(estimated_y, clear_pos), insets);
                 const child_output = try compute_block_child_layout(Tree, tree_ref, item.node_id, child_inputs, &child_block_ctx);
 
                 // Extract float contribution from child block context
                 {
-                    const child_contribution = child_block_ctx.floated_content_height_contribution();
+                    child_float_contribution = child_block_ctx.floated_content_height_contribution();
                     const child_top_adjoining_floats = child_block_ctx.top_adjoining_floats();
-                    block_ctx.add_child_floated_content_height_contribution(y_offset_for_absolute + child_contribution);
                     // Floats placed while the position of the child's top margin strut was unresolved
                     // also adjoin this block's current strut
                     block_ctx.merge_adjoining_floats(child_top_adjoining_floats);
@@ -1366,6 +1384,12 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                 .y = float_avoiding_position.y + inset_offset.y,
             };
         };
+
+        // Floats within the child are positioned relative to its border-top, so the
+        // child's (margin-collapsed) position, not its relative offset, is added.
+        if (item.is_in_same_bfc) {
+            block_ctx.add_child_floated_content_height_contribution(location.y - inset_offset.y + child_float_contribution);
+        }
 
         // Apply alignment. `justify-self` aligns the margin box within its alignment
         // container and takes precedence over legacy `text-align`, but auto margins
