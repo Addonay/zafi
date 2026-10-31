@@ -1068,6 +1068,12 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             .height = if (item.overflow.x == .scroll) item.scrollbar_width else 0.0,
         };
 
+        // Resolve item inset (the overwhelmingly common case is `inset: auto` on every side, which
+        // resolves to a zero offset). Only `position: relative` applies an inset as a positional
+        // correction factor; out-of-flow items have their insets resolved against their containing
+        // block by the out-of-flow positioning pass.
+        const inset_offset = resolve_relative_offset(item, parent_size, direction);
+
         // Handle floated boxes
         if (style.float.float_direction(item.float)) |float_direction| {
             has_active_floats = true;
@@ -1132,6 +1138,11 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             // location for the output Layout
             location.y += item_non_auto_margin.top;
             location.x += item_non_auto_margin.left;
+
+            // A relatively positioned float is placed as a float first, then offset by its
+            // inset. The offset does not affect the placement of other content (CSS 2.2 9.4.3).
+            location.x += inset_offset.x;
+            location.y += inset_offset.y;
 
             item.final_layout = if (store_layouts) layout.Layout{
                 .order = item.order,
@@ -1373,28 +1384,6 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             .top = item_margin.top orelse 0.0,
             .bottom = item_margin.bottom orelse 0.0,
         };
-
-        // Resolve item inset (the overwhelmingly common case is `inset: auto` on every
-        // side, which resolves to a zero offset). Only `position: relative` applies an
-        // inset as a positional correction factor; out-of-flow items have their insets
-        // resolved against their containing block by the out-of-flow positioning pass.
-        var inset_offset = geometry.Point(f32){ .x = 0, .y = 0 };
-        if (item.position.applies_relative_inset() and !isAutoInsetRect(item.inset)) {
-            const inset_percentage_basis = geometry.Size(?f32){ .width = container_inner_width, .height = container_percentage_resolution_height };
-            const inset = geometry.Rect(?f32){
-                .left = resolveLengthPercentageAuto(item.inset.left, inset_percentage_basis.width),
-                .right = resolveLengthPercentageAuto(item.inset.right, inset_percentage_basis.width),
-                .top = resolveLengthPercentageAuto(item.inset.top, inset_percentage_basis.height),
-                .bottom = resolveLengthPercentageAuto(item.inset.bottom, inset_percentage_basis.height),
-            };
-            inset_offset = geometry.Point(f32){
-                .x = if (direction.is_rtl())
-                    (if (inset.right) |x| -x else inset.left orelse 0.0)
-                else
-                    (inset.left orelse (if (inset.right) |x| -x else 0.0)),
-                .y = (inset.top orelse (if (inset.bottom) |x| -x else 0.0)),
-            };
-        }
 
         // Set y_margin_offset (same bfc child)
         if (item.is_in_same_bfc and (!is_collapsing_with_first_margin_set or !own_margins_collapse_with_children.start)) {
@@ -1655,6 +1644,29 @@ fn resolveLengthPercentage(value: style.dimension.LengthPercentage, basis: ?f32)
 
 /// `LengthPercentageAuto::maybe_resolve`: `auto` stays `None`, lengths resolve
 /// even against an indefinite basis; percentages require a definite basis.
+/// Compute the offset applied to a box by its `inset` if it is `position: relative` (CSS2.2 9.4.3).
+/// Percentages resolve against the containing block's content box (`parent_size`); a percentage
+/// that cannot be resolved behaves as `auto`. If both insets in an axis are non-auto, `top` wins
+/// over `bottom`, and `left` wins over `right` in LTR (`right` over `left` in RTL).
+fn resolve_relative_offset(item: *const BlockItem, parent_size: geometry.Size(?f32), direction: style.Direction) geometry.Point(f32) {
+    if (!item.position.applies_relative_inset() or isAutoInsetRect(item.inset)) {
+        return .{ .x = 0, .y = 0 };
+    }
+    const inset = geometry.Rect(?f32){
+        .left = resolveLengthPercentageAuto(item.inset.left, parent_size.width),
+        .right = resolveLengthPercentageAuto(item.inset.right, parent_size.width),
+        .top = resolveLengthPercentageAuto(item.inset.top, parent_size.height),
+        .bottom = resolveLengthPercentageAuto(item.inset.bottom, parent_size.height),
+    };
+    return .{
+        .x = if (direction.is_rtl())
+            (if (inset.right) |x| -x else inset.left orelse 0.0)
+        else
+            (inset.left orelse (if (inset.right) |x| -x else 0.0)),
+        .y = (inset.top orelse (if (inset.bottom) |x| -x else 0.0)),
+    };
+}
+
 fn resolveLengthPercentageAuto(value: style.dimension.LengthPercentageAuto, basis: ?f32) ?f32 {
     return switch (value.value.tag()) {
         .auto => null,
