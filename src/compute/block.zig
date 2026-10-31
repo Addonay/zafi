@@ -140,9 +140,10 @@ pub const BlockContext = struct {
         return self.bfc.float_context.has_active_floats(min_y + self.y_offset);
     }
 
-    /// Position a floated box with the context
+    /// Position a floated box with the context. `id` identifies the box in `floats_placed_since`.
     pub fn place_floated_box(
         self: *BlockContext,
+        id: u64,
         floated_box: geometry.Size(f32),
         min_y: f32,
         direction: style.float.FloatDirection,
@@ -152,6 +153,7 @@ pub const BlockContext = struct {
             self.adjoining_floats[@backingInt(direction)] = true;
         }
         var pos = self.bfc.float_context.place_floated_box(
+            id,
             floated_box,
             min_y + self.y_offset,
             self.content_box_insets,
@@ -163,6 +165,67 @@ pub const BlockContext = struct {
         self.float_content_contribution = @max(self.float_content_contribution, pos.y + floated_box.height);
 
         return pos;
+    }
+
+    /// A mark of how many floats a Block Formatting Context held when it was taken.
+    /// See `BlockContext.float_mark`.
+    pub const FloatMark = struct {
+        /// The number of left floats
+        left: usize,
+        /// The number of right floats
+        right: usize,
+    };
+
+    /// The id and position (relative to this block, as returned by `place_floated_box`) of a
+    /// floated box placed since a `FloatMark` was taken.
+    pub const PlacedFloat = struct {
+        id: u64,
+        position: geometry.Point(f32),
+    };
+
+    /// Iterator over the floats placed since a `FloatMark`: left floats in the order they were
+    /// placed, then right floats.
+    pub const FloatsPlacedSince = struct {
+        float_context: *const float.FloatContext,
+        left: []const float.PlacedFloatedBox,
+        right: []const float.PlacedFloatedBox,
+        x_inset: f32,
+        y_offset: f32,
+        index: usize = 0,
+
+        pub fn next(self: *FloatsPlacedSince) ?PlacedFloat {
+            const left_len = self.left.len;
+            if (self.index >= left_len + self.right.len) return null;
+            const is_left = self.index < left_len;
+            const direction: style.float.FloatDirection = if (is_left) .left else .right;
+            const placed = if (is_left) self.left[self.index] else self.right[self.index - left_len];
+            self.index += 1;
+            const pos = self.float_context.placed_position(placed, direction);
+            return .{
+                .id = placed.id,
+                .position = .{ .x = pos.x - self.x_inset, .y = pos.y - self.y_offset },
+            };
+        }
+    };
+
+    /// A mark of the floats placed in the Block Formatting Context so far, for `floats_placed_since`
+    pub fn float_mark(self: BlockContext) FloatMark {
+        const float_context = &self.bfc.float_context;
+        return .{ .left = float_context.left_floats().len, .right = float_context.right_floats().len };
+    }
+
+    /// The id and position of each floated box placed since `mark` was taken: left floats in the
+    /// order they were placed, then right floats. Positions are relative to this block, as
+    /// returned by `place_floated_box`.
+    pub fn floats_placed_since(self: BlockContext, mark: FloatMark) FloatsPlacedSince {
+        const float_context = &self.bfc.float_context;
+        return .{
+            .float_context = float_context,
+            .left = float_context.left_floats()[mark.left..],
+            .right = float_context.right_floats()[mark.right..],
+            .x_inset = self.insets[0],
+            .y_offset = self.y_offset,
+        };
     }
 
     /// Search a space suitable for laying out non-floated content into
@@ -497,9 +560,16 @@ fn compute_inner(comptime Tree: type, tree_ref: *Tree,
     const establishes_new_bfc = is_scroll_container or style_value.align_content.keyword != .normal or style_value.contain.establishes_independent_formatting_context() or style_value.establishes_formatting_context_from_display();
 
     // Determine margin collapsing behaviour
-    const own_margins_collapse_with_children = geometry.Line(bool){
+    //
+    // Whether a child's margins could collapse through each of this box's block-axis edges: the
+    // box does not establish a new BFC and has neither border nor padding on that side.
+    const children_margins_adjoin_own_edges = geometry.Line(bool){
         .start = vertical_margins_are_collapsible.start and !establishes_new_bfc and !style_value.position.is_out_of_flow() and padding.top == 0.0 and border.top == 0.0,
-        .end = vertical_margins_are_collapsible.end and !establishes_new_bfc and !style_value.position.is_out_of_flow() and padding.bottom == 0.0 and border.bottom == 0.0 and size.height == null,
+        .end = vertical_margins_are_collapsible.end and !establishes_new_bfc and !style_value.position.is_out_of_flow() and padding.bottom == 0.0 and border.bottom == 0.0,
+    };
+    const own_margins_collapse_with_children = geometry.Line(bool){
+        .start = children_margins_adjoin_own_edges.start,
+        .end = children_margins_adjoin_own_edges.end and size.height == null,
     };
     const has_styles_preventing_being_collapsed_through = !style_value.is_block() or block_ctx.is_bfc_root() or establishes_new_bfc or style_value.position.is_out_of_flow() or padding.top > 0.0 or padding.bottom > 0.0 or border.top > 0.0 or border.bottom > 0.0;
 
@@ -572,6 +642,7 @@ tree_ref,
         justify_items,
         direction,
         own_margins_collapse_with_children,
+        children_margins_adjoin_own_edges,
         is_scroll_container,
         store_layouts,
         block_ctx);
@@ -854,8 +925,12 @@ fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
 /// Resolve the `stretch` sizing keyword for an item's height style. In the block axis the
 /// intrinsic sizing keywords are all equal to the content size, which is what an auto height
 /// already resolves to, so only `stretch` requires explicit resolution.
-fn resolve_stretch_height(height_style: style.dimension.Dimension, container_inner_height: ?f32, item_y_margin_sum: f32) ?f32 {
-    const stretch_size = if (container_inner_height) |height| height - item_y_margin_sum else null;
+/// Margins that are treated as zero (because they collapse through the container's edge) are
+/// not subtracted from the container's height.
+fn resolve_stretch_height(height_style: style.dimension.Dimension, container_inner_height: ?f32, item_margin: geometry.Rect(f32), margins_treated_as_zero: geometry.Line(bool)) ?f32 {
+    const margin_top = if (margins_treated_as_zero.start) 0.0 else item_margin.top;
+    const margin_bottom = if (margins_treated_as_zero.end) 0.0 else item_margin.bottom;
+    const stretch_size = if (container_inner_height) |height| height - margin_top - margin_bottom else null;
     return switch (sizing_keyword.resolve_sizing_keyword(height_style, stretch_size, container_inner_height) orelse return null) {
         .exact => |height| height,
         .measure => null,
@@ -931,6 +1006,7 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
     justify_items: style.alignment.AlignItems,
     direction: style.Direction,
     own_margins_collapse_with_children: geometry.Line(bool),
+    children_margins_adjoin_own_edges: geometry.Line(bool),
     is_scroll_container: bool,
     store_layouts: bool,
     block_ctx: *BlockContext) BlockError!InFlowResult {
@@ -992,6 +1068,12 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             .height = if (item.overflow.x == .scroll) item.scrollbar_width else 0.0,
         };
 
+        // Resolve item inset (the overwhelmingly common case is `inset: auto` on every side, which
+        // resolves to a zero offset). Only `position: relative` applies an inset as a positional
+        // correction factor; out-of-flow items have their insets resolved against their containing
+        // block by the out-of-flow positioning pass.
+        const inset_offset = resolve_relative_offset(item, parent_size, direction);
+
         // Handle floated boxes
         if (style.float.float_direction(item.float)) |float_direction| {
             has_active_floats = true;
@@ -1019,7 +1101,9 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             const item_known_height = resolve_stretch_height(
                 item.size_style.height,
                 container_percentage_resolution_height,
-                item_non_auto_margin.vertical_axis_sum());
+                item_non_auto_margin,
+                // The margins of a float never collapse
+                .{ .start = false, .end = false });
             var item_layout = try TreeApi.perform_child_layout(tree_ref, 
                 item.node_id,
                 geometry.Size(?f32){ .width = item_known_width, .height = item_known_height },
@@ -1043,6 +1127,7 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                 committed_y_offset + active_collapsible_margin_set.resolve();
 
             var location = block_ctx.place_floated_box(
+                item.node_id,
                 margin_box,
                 y_offset_for_float,
                 float_direction,
@@ -1053,6 +1138,11 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             // location for the output Layout
             location.y += item_non_auto_margin.top;
             location.x += item_non_auto_margin.left;
+
+            // A relatively positioned float is placed as a float first, then offset by its
+            // inset. The offset does not affect the placement of other content (CSS 2.2 9.4.3).
+            location.x += inset_offset.x;
+            location.y += inset_offset.y;
 
             item.final_layout = if (store_layouts) layout.Layout{
                 .order = item.order,
@@ -1195,7 +1285,8 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                 resolve_stretch_height(
                     item.size_style.height,
                     container_percentage_resolution_height,
-                    item_non_auto_margin.vertical_axis_sum())
+                    item_non_auto_margin,
+                    children_margins_adjoin_own_edges)
             else
                 null;
 
@@ -1233,8 +1324,10 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                 item_layout = try TreeApi.compute_child_layout(tree_ref, item.node_id, child_inputs);
             } else {
                 // Replaced elements may not have a known width (they are sized by their
-                // measure function rather than stretch-sized)
-                const width = known_dimensions.width orelse stretch_width;
+                // measure function rather than stretch-sized). The width is never smaller than
+                // the item's padding and border, which the content box inset of the child is
+                // built from.
+                const width = @max(known_dimensions.width orelse stretch_width, item.padding_border_sum.width);
 
                 // TODO: account for auto margins
                 const inset_left = item_non_auto_margin.left + content_box_inset.left;
@@ -1286,31 +1379,11 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
         const resolved_margin = geometry.Rect(f32){
             .left = item_margin.left orelse x_axis_auto_margin_size,
             .right = item_margin.right orelse x_axis_auto_margin_size,
-            .top = top_margin_set.resolve(),
-            .bottom = bottom_margin_set.resolve(),
+            // The item's own vertical margins (its collapsed margin sets are only used for
+            // placing it in the flow). `Layout::margin` reports the item's own margins.
+            .top = item_margin.top orelse 0.0,
+            .bottom = item_margin.bottom orelse 0.0,
         };
-
-        // Resolve item inset (the overwhelmingly common case is `inset: auto` on every
-        // side, which resolves to a zero offset). Only `position: relative` applies an
-        // inset as a positional correction factor; out-of-flow items have their insets
-        // resolved against their containing block by the out-of-flow positioning pass.
-        var inset_offset = geometry.Point(f32){ .x = 0, .y = 0 };
-        if (item.position.applies_relative_inset() and !isAutoInsetRect(item.inset)) {
-            const inset_percentage_basis = geometry.Size(?f32){ .width = container_inner_width, .height = container_percentage_resolution_height };
-            const inset = geometry.Rect(?f32){
-                .left = resolveLengthPercentageAuto(item.inset.left, inset_percentage_basis.width),
-                .right = resolveLengthPercentageAuto(item.inset.right, inset_percentage_basis.width),
-                .top = resolveLengthPercentageAuto(item.inset.top, inset_percentage_basis.height),
-                .bottom = resolveLengthPercentageAuto(item.inset.bottom, inset_percentage_basis.height),
-            };
-            inset_offset = geometry.Point(f32){
-                .x = if (direction.is_rtl())
-                    (if (inset.right) |x| -x else inset.left orelse 0.0)
-                else
-                    (inset.left orelse (if (inset.right) |x| -x else 0.0)),
-                .y = (inset.top orelse (if (inset.bottom) |x| -x else 0.0)),
-            };
-        }
 
         // Set y_margin_offset (same bfc child)
         if (item.is_in_same_bfc and (!is_collapsing_with_first_margin_set or !own_margins_collapse_with_children.start)) {
@@ -1571,6 +1644,29 @@ fn resolveLengthPercentage(value: style.dimension.LengthPercentage, basis: ?f32)
 
 /// `LengthPercentageAuto::maybe_resolve`: `auto` stays `None`, lengths resolve
 /// even against an indefinite basis; percentages require a definite basis.
+/// Compute the offset applied to a box by its `inset` if it is `position: relative` (CSS2.2 9.4.3).
+/// Percentages resolve against the containing block's content box (`parent_size`); a percentage
+/// that cannot be resolved behaves as `auto`. If both insets in an axis are non-auto, `top` wins
+/// over `bottom`, and `left` wins over `right` in LTR (`right` over `left` in RTL).
+fn resolve_relative_offset(item: *const BlockItem, parent_size: geometry.Size(?f32), direction: style.Direction) geometry.Point(f32) {
+    if (!item.position.applies_relative_inset() or isAutoInsetRect(item.inset)) {
+        return .{ .x = 0, .y = 0 };
+    }
+    const inset = geometry.Rect(?f32){
+        .left = resolveLengthPercentageAuto(item.inset.left, parent_size.width),
+        .right = resolveLengthPercentageAuto(item.inset.right, parent_size.width),
+        .top = resolveLengthPercentageAuto(item.inset.top, parent_size.height),
+        .bottom = resolveLengthPercentageAuto(item.inset.bottom, parent_size.height),
+    };
+    return .{
+        .x = if (direction.is_rtl())
+            (if (inset.right) |x| -x else inset.left orelse 0.0)
+        else
+            (inset.left orelse (if (inset.right) |x| -x else 0.0)),
+        .y = (inset.top orelse (if (inset.bottom) |x| -x else 0.0)),
+    };
+}
+
 fn resolveLengthPercentageAuto(value: style.dimension.LengthPercentageAuto, basis: ?f32) ?f32 {
     return switch (value.value.tag()) {
         .auto => null,
@@ -1773,6 +1869,22 @@ test "block floats honor horizontal content-box insets" {
     const root = try tree_ref.new_with_children(.{ .display = .block, .padding = .{ .left = .length(10), .right = .zero(), .top = .zero(), .bottom = .zero() }, .size = .{ .width = .length(100), .height = .length(30) } }, &[_]NodeId{floated});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 30 } });
     try testing.expectEqual(@as(f32, 10), (try tree_ref.layout_of(floated)).location.x);
+}
+
+test "block floats placed since a mark report their ids and positions" {
+    const testing = std.testing;
+    var bfc = BlockFormattingContext.new(testing.allocator);
+    defer bfc.deinit();
+    var root_ctx = bfc.root_block_context();
+    root_ctx.set_width(100);
+    _ = root_ctx.place_floated_box(1, .{ .width = 40, .height = 20 }, 0, .left, .none, false);
+    const mark = root_ctx.float_mark();
+    _ = root_ctx.place_floated_box(2, .{ .width = 30, .height = 10 }, 0, .right, .none, false);
+    var placed = root_ctx.floats_placed_since(mark);
+    const first = placed.next().?;
+    try testing.expectEqual(@as(u64, 2), first.id);
+    try testing.expectEqual(@as(f32, 70), first.position.x);
+    try testing.expectEqual(@as(?BlockContext.PlacedFloat, null), placed.next());
 }
 
 test "block establishes a new bfc for overflow scroll children" {
