@@ -6,7 +6,7 @@
 //! negative implicit tracks are created during placement.
 
 const geometry = @import("../../../geometry.zig");
-const track_counts = @import("grid_track_counts.zig");
+const grid_track_counts = @import("grid_track_counts.zig");
 
 pub const OriginZeroLine = struct {
     value: i16,
@@ -23,10 +23,10 @@ pub const OriginZeroLine = struct {
     pub fn sub_u16(self: OriginZeroLine, amount: u16) OriginZeroLine {
         return .{ .value = self.value - @as(i16, @intCast(amount)) };
     }
-    pub fn into_track_vec_index(self: OriginZeroLine, counts: track_counts.TrackCounts) usize {
+    pub fn into_track_vec_index(self: OriginZeroLine, counts: grid_track_counts.TrackCounts) usize {
         return origin_zero_line_into_track_vec_index_with_counts(self, counts);
     }
-    pub fn try_into_track_vec_index(self: OriginZeroLine, counts: track_counts.TrackCounts) ?usize {
+    pub fn try_into_track_vec_index(self: OriginZeroLine, counts: grid_track_counts.TrackCounts) ?usize {
         return origin_zero_line_try_into_track_vec_index_with_counts(self, counts);
     }
     pub fn implied_negative_implicit_tracks(self: OriginZeroLine) u16 {
@@ -121,10 +121,10 @@ pub fn origin_zero_line_try_into_track_vec_index(value: OriginZeroLine, negative
     return @intCast(index * 2);
 }
 
-pub fn into_track_vec_index(value: OriginZeroLine, counts: track_counts.TrackCounts) usize {
+pub fn into_track_vec_index(value: OriginZeroLine, counts: grid_track_counts.TrackCounts) usize {
     return origin_zero_line_into_track_vec_index(value, counts.negative_implicit, counts.explicit, counts.positive_implicit);
 }
-pub fn try_into_track_vec_index(value: OriginZeroLine, counts: track_counts.TrackCounts) ?usize {
+pub fn try_into_track_vec_index(value: OriginZeroLine, counts: grid_track_counts.TrackCounts) ?usize {
     return origin_zero_line_try_into_track_vec_index(value, counts.negative_implicit, counts.explicit, counts.positive_implicit);
 }
 pub fn implied_negative_implicit_tracks(value: OriginZeroLine) u16 {
@@ -159,10 +159,10 @@ pub fn line_origin_zero_span(value: geometry.Line(OriginZeroLine)) u16 {
         0;
 }
 
-pub fn origin_zero_line_into_track_vec_index_with_counts(value: OriginZeroLine, counts: track_counts.TrackCounts) usize {
+pub fn origin_zero_line_into_track_vec_index_with_counts(value: OriginZeroLine, counts: grid_track_counts.TrackCounts) usize {
     return origin_zero_line_into_track_vec_index(value, counts.negative_implicit, counts.explicit, counts.positive_implicit);
 }
 
-pub fn origin_zero_line_try_into_track_vec_index_with_counts(value: OriginZeroLine, counts: track_counts.TrackCounts) ?usize {
+pub fn origin_zero_line_try_into_track_vec_index_with_counts(value: OriginZeroLine, counts: grid_track_counts.TrackCounts) ?usize {
     return origin_zero_line_try_into_track_vec_index(value, counts.negative_implicit, counts.explicit, counts.positive_implicit);
 }

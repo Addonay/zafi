@@ -6,19 +6,20 @@
 
 const std = @import("std");
 const geometry = @import("../../geometry.zig");
-const style_mod = @import("../../style/mod.zig");
-const grid_style = @import("../../style/grid.zig");
-const taffy_tree = @import("../../tree/taffy_tree.zig");
+const style = @import("../../style/root.zig");
+const grid = @import("../../style/grid.zig");
+const NodeId = @import("../../tree/node.zig").NodeId;
+const LayoutTree = @import("../../tree/interfaces.zig").LayoutTree;
 const coordinates = @import("types/coordinates.zig");
-const counts_mod = @import("types/grid_track_counts.zig");
+const grid_track_counts = @import("types/grid_track_counts.zig");
 
 const OriginZeroLine = coordinates.OriginZeroLine;
 const MAX_OZ_LINE: i16 = 10_000;
 const MIN_OZ_LINE: i16 = -10_000;
 
 pub const GridSizeEstimate = struct {
-    columns: counts_mod.TrackCounts,
-    rows: counts_mod.TrackCounts,
+    columns: grid_track_counts.TrackCounts,
+    rows: grid_track_counts.TrackCounts,
 };
 
 /// Estimate the number of rows and columns in the grid.
@@ -27,13 +28,13 @@ pub const GridSizeEstimate = struct {
 /// However, the estimate for the positive implicit track count is a lower
 /// bound as auto-placement can affect this in ways which are impossible to
 /// predict until the auto-placement algorithm is run.
-pub fn compute_grid_size_estimate(
+pub fn compute_grid_size_estimate(comptime Tree: type,
     explicit_col_count: u16,
     explicit_row_count: u16,
-    child_ids: []const taffy_tree.NodeId,
-    tree: *const taffy_tree.TaffyTree,
+    child_ids: []const NodeId,
+    tree_ref: *const Tree,
 ) GridSizeEstimate {
-    const known = get_known_child_positions(child_ids, tree, explicit_col_count, explicit_row_count);
+    const known = get_known_child_positions(Tree, child_ids, tree_ref, explicit_col_count, explicit_row_count);
 
     var negative_implicit_inline_tracks = known.col_min.implied_negative_implicit_tracks();
     const explicit_inline_tracks = explicit_col_count;
@@ -58,8 +59,8 @@ pub fn compute_grid_size_estimate(
     _ = &negative_implicit_block_tracks;
 
     return .{
-        .columns = counts_mod.TrackCounts.from_raw(negative_implicit_inline_tracks, explicit_inline_tracks, positive_implicit_inline_tracks),
-        .rows = counts_mod.TrackCounts.from_raw(negative_implicit_block_tracks, explicit_block_tracks, positive_implicit_block_tracks),
+        .columns = grid_track_counts.TrackCounts.from_raw(negative_implicit_inline_tracks, explicit_inline_tracks, positive_implicit_inline_tracks),
+        .rows = grid_track_counts.TrackCounts.from_raw(negative_implicit_block_tracks, explicit_block_tracks, positive_implicit_block_tracks),
     };
 }
 
@@ -74,12 +75,13 @@ const KnownChildPositions = struct {
 
 /// Iterate over children, producing an estimate of the min and max grid lines
 /// (in origin-zero coordinates) along with the span of each item (in tracks).
-fn get_known_child_positions(
-    child_ids: []const taffy_tree.NodeId,
-    tree: *const taffy_tree.TaffyTree,
+fn get_known_child_positions(comptime Tree: type,
+    child_ids: []const NodeId,
+    tree_ref: *const Tree,
     explicit_col_count: u16,
     explicit_row_count: u16,
 ) KnownChildPositions {
+    const TreeApi = LayoutTree(Tree);
     var col_min = OriginZeroLine{ .value = 0 };
     var col_max = OriginZeroLine{ .value = 0 };
     var col_max_span: u16 = 0;
@@ -88,7 +90,7 @@ fn get_known_child_positions(
     var row_max_span: u16 = 0;
 
     for (child_ids) |child_id| {
-        const child_style = (tree.node_const(child_id) orelse continue).style;
+        const child_style = TreeApi.get_style(tree_ref, child_id);
         const col_line = child_style.grid_column;
         const row_line = child_style.grid_row;
 
@@ -121,10 +123,10 @@ const ChildMinMaxLineSpan = struct {
 
 /// Conservative estimate of the greatest and smallest grid lines used by a
 /// single grid item. Values are returned in origin-zero coordinates.
-fn child_min_line_max_line_span(line: geometry.Line(grid_style.GridPlacement), explicit_track_count: u16) ChildMinMaxLineSpan {
+fn child_min_line_max_line_span(line: geometry.Line(grid.GridPlacement), explicit_track_count: u16) ChildMinMaxLineSpan {
     // Convert line into origin-zero coordinates before attempting to analyze.
     // Named lines are ignored here as they are accounted for separately.
-    const oz_line = grid_style.line_into_origin_zero(line, explicit_track_count);
+    const oz_line = grid.line_into_origin_zero(line, explicit_track_count);
     const start = oz_line.start;
     const end = oz_line.end;
 
@@ -154,7 +156,7 @@ fn child_min_line_max_line_span(line: geometry.Line(grid_style.GridPlacement), e
         0;
 
     const span: u16 = if ((start == .auto or start == .span) and (end == .auto or end == .span))
-        grid_style.origin_zero_line_indefinite_span(oz_line)
+        grid.origin_zero_line_indefinite_span(oz_line)
     else
         1;
 

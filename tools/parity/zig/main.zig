@@ -9,7 +9,7 @@ const grid = zlay.style.grid;
 
 const Pair = struct { []const u8, zlay.NodeId };
 
-fn emit(name: []const u8, t: *zlay.TaffyTree, nodes: []const Pair) void {
+fn emit(name: []const u8, t: *zlay.Tree, nodes: []const Pair) void {
     for (nodes) |pair| {
         const l = t.unrounded_layout(pair[1]) catch return;
         std.debug.print("{s}|{s}|{d:.3}|{d:.3}|{d:.3}|{d:.3}\n", .{
@@ -25,7 +25,7 @@ pub fn main() !void {
 
     // 1. flex container align-items: center
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const child = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(20), .height = zlay.Dimension.length(20) },
         });
@@ -40,7 +40,7 @@ pub fn main() !void {
 
     // 2. flex default align-items: stretch on an auto-cross child
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const child = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(20), .height = zlay.Dimension.auto },
         });
@@ -54,7 +54,7 @@ pub fn main() !void {
 
     // 3. wrapped flex container with auto height
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const s = zlay.Style{
             .size = .{ .width = zlay.Dimension.length(60), .height = zlay.Dimension.length(10) },
         };
@@ -73,7 +73,7 @@ pub fn main() !void {
 
     // 4. RTL flex row
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(20), .height = zlay.Dimension.length(10) },
         });
@@ -91,7 +91,7 @@ pub fn main() !void {
 
     // 5. flex gap
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(20), .height = zlay.Dimension.length(10) },
         });
@@ -109,7 +109,7 @@ pub fn main() !void {
 
     // 6. flex-basis on an exactly-fitting line
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(10), .height = zlay.Dimension.length(10) },
             .flex_basis = zlay.Dimension.length(40),
@@ -126,7 +126,7 @@ pub fn main() !void {
 
     // 7. align-self overrides container flex-start
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const child = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(20), .height = zlay.Dimension.length(20) },
             .align_self = zlay.AlignSelf.center,
@@ -142,7 +142,7 @@ pub fn main() !void {
 
     // 8. flex-grow distribution
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(20), .height = zlay.Dimension.length(10) },
             .flex_grow = 1,
@@ -161,7 +161,7 @@ pub fn main() !void {
 
     // 9. grid fr tracks with gap
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(10), .height = zlay.Dimension.length(10) },
         });
@@ -184,7 +184,7 @@ pub fn main() !void {
 
     // 10. grid fixed + fr with gap
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(10), .height = zlay.Dimension.length(10) },
         });
@@ -207,7 +207,7 @@ pub fn main() !void {
 
     // 11. grid repeat(auto-fill, minmax(100px, 1fr))
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(10), .height = zlay.Dimension.length(10) },
         });
@@ -229,7 +229,7 @@ pub fn main() !void {
 
     // 12. grid auto track sized by content
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(50), .height = zlay.Dimension.length(10) },
         });
@@ -251,7 +251,7 @@ pub fn main() !void {
 
     // 13. block sibling margin collapse
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const zero = zlay.LengthPercentageAuto.zero();
         const a = try t.new_leaf(.{
             .display = .block,
@@ -273,7 +273,7 @@ pub fn main() !void {
 
     // 14. block parent/child margin collapse
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const zero = zlay.LengthPercentageAuto.zero();
         const child = try t.new_leaf(.{
             .display = .block,
@@ -290,7 +290,7 @@ pub fn main() !void {
 
     // 15. min overrides max
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const root = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(20), .height = zlay.Dimension.length(20) },
             .min_size = .{ .width = zlay.LengthPercentageAuto.length(100), .height = zlay.LengthPercentageAuto.auto() },
@@ -302,7 +302,7 @@ pub fn main() !void {
 
     // 16. absolute child with left+right insets and a percentage grandchild
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const gc = try t.new_leaf(.{
             .display = .block,
             .size = .{ .width = zlay.Dimension.percent(0.5), .height = zlay.Dimension.length(10) },
@@ -327,7 +327,7 @@ pub fn main() !void {
 
     // 17. grid 1fr sanity without gap
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(10), .height = zlay.Dimension.length(10) },
         });
@@ -343,7 +343,7 @@ pub fn main() !void {
 
     // 18. grid fr tracks with gap, stretched items reveal actual track widths
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{});
         const b = try t.new_leaf(.{});
         const columns = [_]grid.GridTemplateComponent{
@@ -362,7 +362,7 @@ pub fn main() !void {
 
     // 19. flex align-content: center on a wrapped container
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const s = zlay.Style{
             .size = .{ .width = zlay.Dimension.length(60), .height = zlay.Dimension.length(10) },
         };
@@ -382,7 +382,7 @@ pub fn main() !void {
 
     // 20. flex justify-content: center
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{
             .size = .{ .width = zlay.Dimension.length(20), .height = zlay.Dimension.length(10) },
         });
@@ -397,7 +397,7 @@ pub fn main() !void {
 
     // 21. auto-fill minmax with stretched items reveals the generated track count
     {
-        var t = zlay.TaffyTree.init(alloc);
+        var t = zlay.Tree.init(alloc);
         const a = try t.new_leaf(.{});
         const b = try t.new_leaf(.{});
         const repeats = [_]grid.GridTemplateComponent{.{ .repeat = .{

@@ -12,21 +12,25 @@
 //! * `AlignItems`/`AlignContent` serialize as a single string: the PascalCase
 //!   keyword, prefixed with `Safe` when the safety flag is `safe`.
 //! * `GridPlacement` uses external tagging (`"Auto"`, `{"Line":2}`,
-//!   `{"NamedLine":["foo",-1]}`); named payloads serialize as two-element
-//!   arrays like Rust's tuple variants.
+//!   `{"NamedLine":["foo",-1]}`).
 //! * `Contain` serializes as its u8 bit set.
 //!
-//! Only types whose in-memory shape differs from the wire shape need hooks;
-//! the rest rely on reflection plus `rename_all = .pascal_case`.
+//! Every type above whose *in-memory* shape already matches the wire shape is
+//! left to plain reflection plus `rename` / `rename_all`: the enums, `Style`
+//! itself, and the externally-tagged `GridPlacement` / `RepetitionCount`
+//! unions. Only the entries dispatched from `serialize`/`deserialize` below
+//! need code, and each one mirrors a hand-written `impl Serialize` /
+//! `impl Deserialize` in the Rust source rather than working around this
+//! framework.
 
 const std = @import("std");
 const serde = @import("serde");
 
-const compact = @import("style/compact_length.zig");
+const compact_length = @import("style/compact_length.zig");
 const dimension = @import("style/dimension.zig");
 const alignment = @import("style/alignment.zig");
 const grid = @import("style/grid.zig");
-const style_mod = @import("style/mod.zig");
+const style = @import("style/root.zig");
 
 pub const pascal_options = .{ .rename_all = serde.NamingConvention.pascal_case };
 
@@ -40,24 +44,20 @@ pub fn serialize(value: anytype, serializer: anytype) !void {
         return serialize(value.*, serializer);
     }
     const T = @TypeOf(value);
-    if (comptime T == compact.CompactLength) return serializeCompactLength(value, serializer);
+    if (comptime T == compact_length.CompactLength) return serializeCompactLength(value, serializer);
     if (comptime T == dimension.LengthPercentage) return serializeCompactLength(value.value, serializer);
     if (comptime T == dimension.LengthPercentageAuto) return serializeCompactLength(value.value, serializer);
     if (comptime T == dimension.Dimension) return serializeCompactLength(value.value, serializer);
     if (comptime T == grid.MinTrackSizingFunction) return serializeCompactLength(value.value, serializer);
     if (comptime T == grid.MaxTrackSizingFunction) return serializeCompactLength(value.value, serializer);
-    if (comptime T == style_mod.Contain) return serializer.serializeInt(@as(u8, @bitCast(value)));
+    if (comptime T == style.Contain) return serializer.serializeInt(@as(u8, @bitCast(value)));
     if (comptime T == alignment.AlignItems) return serializeAlignment(value, serializer);
     if (comptime T == alignment.AlignContent) return serializeAlignment(value, serializer);
-    if (comptime T == grid.NamedLine) return serializePair(value.name, value.index, serializer);
-    if (comptime T == grid.NamedSpan) return serializePair(value.name, value.count, serializer);
-    if (comptime T == grid.GridPlacement) return serializeGridPlacement(value, serializer);
-    if (comptime T == grid.RepetitionCount) return serializeRepetitionCount(value, serializer);
     @compileError("serde_hooks has no serializer for " ++ @typeName(T));
 }
 
 pub fn deserialize(comptime T: type, allocator: std.mem.Allocator, deserializer: anytype) @TypeOf(deserializer.*).Error!T {
-    if (comptime T == compact.CompactLength) return deserializeCompactLength(deserializer);
+    if (comptime T == compact_length.CompactLength) return deserializeCompactLength(deserializer);
     if (comptime T == dimension.LengthPercentage) {
         const inner = try deserializeCompactLength(deserializer);
         if (!isLengthPercentageTag(inner.tag())) return deserializer.raiseError(error.InvalidTag);
@@ -83,16 +83,12 @@ pub fn deserialize(comptime T: type, allocator: std.mem.Allocator, deserializer:
         if (!isMaxTrackTag(inner.tag())) return deserializer.raiseError(error.InvalidTag);
         return .{ .value = inner };
     }
-    if (comptime T == style_mod.Contain) {
+    if (comptime T == style.Contain) {
         const bits = try deserializer.deserializeInt(u8);
         return @bitCast(bits);
     }
     if (comptime T == alignment.AlignItems) return deserializeAlignment(T, allocator, deserializer);
     if (comptime T == alignment.AlignContent) return deserializeAlignment(T, allocator, deserializer);
-    if (comptime T == grid.NamedLine) return deserializeNamedLine(allocator, deserializer);
-    if (comptime T == grid.NamedSpan) return deserializeNamedSpan(allocator, deserializer);
-    if (comptime T == grid.GridPlacement) return deserializeGridPlacement(allocator, deserializer);
-    if (comptime T == grid.RepetitionCount) return deserializeRepetitionCount(allocator, deserializer);
     @compileError("serde_hooks has no deserializer for " ++ @typeName(T));
 }
 
@@ -100,7 +96,7 @@ pub fn deserialize(comptime T: type, allocator: std.mem.Allocator, deserializer:
 // CompactLength
 // ---------------------------------------------------------------------------
 
-fn serializeCompactLength(value: compact.CompactLength, serializer: anytype) !void {
+fn serializeCompactLength(value: compact_length.CompactLength, serializer: anytype) !void {
     // Note: Rust's serde refuses to serialize calc values. The serde.zig JSON
     // serializer has a fixed two-error set (`OutOfMemory`, `WriteFailed`), so
     // a custom error cannot be propagated here; calc instead serializes as its
@@ -113,53 +109,53 @@ fn serializeCompactLength(value: compact.CompactLength, serializer: anytype) !vo
     try serializer.serializeInt(value.serialized());
 }
 
-fn deserializeCompactLength(deserializer: anytype) !compact.CompactLength {
+fn deserializeCompactLength(deserializer: anytype) !compact_length.CompactLength {
     const bits = try deserializer.deserializeInt(u64);
     const tag: u8 = @intCast(bits >> 32);
     if (!isBaseCompactTag(tag)) return deserializer.raiseError(error.InvalidTag);
-    return compact.from_serialized(bits);
+    return compact_length.from_serialized(bits);
 }
 
 /// Tags Rust accepts when deserializing a bare `CompactLength`
 /// (everything except the calc tag and unknown bit patterns).
 fn isBaseCompactTag(tag: u8) bool {
-    return tag == @backingInt(compact.CompactLengthTag.length) or
-        tag == @backingInt(compact.CompactLengthTag.percent) or
-        tag == @backingInt(compact.CompactLengthTag.auto) or
-        tag == @backingInt(compact.CompactLengthTag.min_content) or
-        tag == @backingInt(compact.CompactLengthTag.max_content) or
-        tag == @backingInt(compact.CompactLengthTag.fit_content_keyword) or
-        tag == @backingInt(compact.CompactLengthTag.fit_content_px) or
-        tag == @backingInt(compact.CompactLengthTag.fit_content_percent) or
-        tag == @backingInt(compact.CompactLengthTag.stretch) or
-        tag == @backingInt(compact.CompactLengthTag.content) or
-        tag == @backingInt(compact.CompactLengthTag.fr);
+    return tag == @backingInt(compact_length.CompactLengthTag.length) or
+        tag == @backingInt(compact_length.CompactLengthTag.percent) or
+        tag == @backingInt(compact_length.CompactLengthTag.auto) or
+        tag == @backingInt(compact_length.CompactLengthTag.min_content) or
+        tag == @backingInt(compact_length.CompactLengthTag.max_content) or
+        tag == @backingInt(compact_length.CompactLengthTag.fit_content_keyword) or
+        tag == @backingInt(compact_length.CompactLengthTag.fit_content_px) or
+        tag == @backingInt(compact_length.CompactLengthTag.fit_content_percent) or
+        tag == @backingInt(compact_length.CompactLengthTag.stretch) or
+        tag == @backingInt(compact_length.CompactLengthTag.content) or
+        tag == @backingInt(compact_length.CompactLengthTag.fr);
 }
 
-fn isLengthPercentageTag(tag: compact.CompactLengthTag) bool {
+fn isLengthPercentageTag(tag: compact_length.CompactLengthTag) bool {
     return tag == .length or tag == .percent;
 }
 
-fn isLengthPercentageAutoTag(tag: compact.CompactLengthTag) bool {
+fn isLengthPercentageAutoTag(tag: compact_length.CompactLengthTag) bool {
     return tag == .length or tag == .percent or tag == .auto;
 }
 
 /// Rust's `Dimension` deserializer accepts these tags (notably excluding fr).
-fn isDimensionTag(tag: compact.CompactLengthTag) bool {
+fn isDimensionTag(tag: compact_length.CompactLengthTag) bool {
     return switch (tag) {
         .length, .percent, .auto, .min_content, .max_content, .fit_content_keyword, .fit_content_px, .fit_content_percent, .stretch, .content => true,
         else => false,
     };
 }
 
-fn isMinTrackTag(tag: compact.CompactLengthTag) bool {
+fn isMinTrackTag(tag: compact_length.CompactLengthTag) bool {
     return switch (tag) {
         .length, .percent, .auto, .min_content, .max_content, .fit_content_px, .fit_content_percent => true,
         else => false,
     };
 }
 
-fn isMaxTrackTag(tag: compact.CompactLengthTag) bool {
+fn isMaxTrackTag(tag: compact_length.CompactLengthTag) bool {
     return switch (tag) {
         .length, .percent, .auto, .min_content, .max_content, .fit_content_px, .fit_content_percent, .fr => true,
         else => false,
@@ -269,149 +265,50 @@ fn parseAlignContentKeyword(name: []const u8) ?alignment.AlignContentKeyword {
 }
 
 // ---------------------------------------------------------------------------
-// Named grid lines (Rust tuple variants serialize as two-element arrays)
+// Named grid lines
+//
+// Upstream models these as *tuple variants* of `GridPlacement`/`RepetitionCount`
+// (`NamedLine(S, i16)`), which Rust's derive renders as a two-element array.
+// serde.zig renders a struct as an object, so these two payload types keep a
+// hook. Everything else about the unions is handled by reflection: the union
+// serializer dispatches each payload through the same
+// custom-serializer-first path, so these hooks compose with serde.zig's native
+// external tagging.
 // ---------------------------------------------------------------------------
 
-fn serializePair(name: []const u8, second: anytype, serializer: anytype) !void {
+pub fn serializeNamedLine(value: grid.NamedLine, serializer: anytype) !void {
     var array = try serializer.beginArray();
-    try array.serializeString(name);
-    try array.serializeInt(second);
+    try array.serializeString(value.name);
+    try array.serializeInt(value.index);
     try array.end();
 }
 
-fn deserializeNamedLine(allocator: std.mem.Allocator, deserializer: anytype) !grid.NamedLine {
+pub fn serializeNamedSpan(value: grid.NamedSpan, serializer: anytype) !void {
+    var array = try serializer.beginArray();
+    try array.serializeString(value.name);
+    try array.serializeInt(value.count);
+    try array.end();
+}
+
+fn deserializeNamedPair(comptime T: type, comptime Second: type, allocator: std.mem.Allocator, deserializer: anytype) !T {
     var sequence = try deserializer.deserializeSeqAccess();
     const name = (try sequence.nextElement([]const u8, allocator)) orelse return deserializer.raiseError(error.InvalidLength);
-    const index = (try sequence.nextElement(i16, allocator)) orelse return deserializer.raiseError(error.InvalidLength);
+    const second = (try sequence.nextElement(Second, allocator)) orelse return deserializer.raiseError(error.InvalidLength);
     // Consume the closing bracket; reject any extra elements.
     if (try sequence.nextElement(serde.core.Value, allocator) != null) return deserializer.raiseError(error.UnexpectedToken);
-    return .{ .name = name, .index = index };
-}
-
-fn deserializeNamedSpan(allocator: std.mem.Allocator, deserializer: anytype) !grid.NamedSpan {
-    var sequence = try deserializer.deserializeSeqAccess();
-    const name = (try sequence.nextElement([]const u8, allocator)) orelse return deserializer.raiseError(error.InvalidLength);
-    const count = (try sequence.nextElement(u16, allocator)) orelse return deserializer.raiseError(error.InvalidLength);
-    if (try sequence.nextElement(serde.core.Value, allocator) != null) return deserializer.raiseError(error.UnexpectedToken);
-    return .{ .name = name, .count = count };
-}
-
-// ---------------------------------------------------------------------------
-// GridPlacement / RepetitionCount
-//
-// These unions mix void variants with payload variants. serde.zig's external
-// union rename does not apply to void variants, so both directions are
-// implemented explicitly to match Taffy's Rust representation exactly.
-// ---------------------------------------------------------------------------
-
-fn protocolBackend(comptime T: type) type {
-    return switch (@typeInfo(T)) {
-        .pointer => |pointer| pointer.child,
-        else => T,
+    return switch (comptime T) {
+        grid.NamedLine => .{ .name = name, .index = second },
+        grid.NamedSpan => .{ .name = name, .count = second },
+        else => @compileError("deserializeNamedPair: unsupported type " ++ @typeName(T)),
     };
 }
 
-fn Protocol(comptime D: type) type {
-    if (@hasDecl(D, "serde_protocol")) return D.serde_protocol;
-    return struct {
-        pub fn checkpoint(d: *D) D {
-            return d.*;
-        }
-        pub fn restore(d: *D, saved: D) void {
-            d.* = saved;
-        }
-    };
+// The framework passes the target type as the first argument, so these take
+// `comptime T` even though each one only ever serves one type.
+pub fn deserializeNamedLine(comptime T: type, allocator: std.mem.Allocator, deserializer: anytype) !T {
+    return deserializeNamedPair(T, i16, allocator, deserializer);
 }
 
-fn serializeGridPlacement(value: grid.GridPlacement, serializer: anytype) !void {
-    switch (value) {
-        .auto => try serializer.serializeString("Auto"),
-        .line => |line| try serializeTagged("Line", line, serializer),
-        .span => |span| try serializeTagged("Span", span, serializer),
-        .named_line => |named| try serializeTagged("NamedLine", .{ named.name, named.index }, serializer),
-        .named_span => |named| try serializeTagged("NamedSpan", .{ named.name, named.count }, serializer),
-    }
-}
-
-fn serializeRepetitionCount(value: grid.RepetitionCount, serializer: anytype) !void {
-    switch (value) {
-        .auto_fit => try serializer.serializeString("AutoFit"),
-        .auto_fill => try serializer.serializeString("AutoFill"),
-        .count => |count| try serializeTagged("Count", count, serializer),
-    }
-}
-
-fn serializeTagged(comptime tag: []const u8, payload: anytype, serializer: anytype) !void {
-    var object = try serializer.beginStruct();
-    try object.serializeField(tag, payload);
-    try object.end();
-}
-
-fn deserializeGridPlacement(allocator: std.mem.Allocator, deserializer: anytype) !grid.GridPlacement {
-    const D = protocolBackend(@TypeOf(deserializer));
-    const saved = Protocol(D).checkpoint(deserializer);
-    if (deserializer.deserializeString(allocator)) |name| {
-        defer serde.core.releaseString(deserializer, allocator, name);
-        if (std.mem.eql(u8, name, "Auto")) return .auto;
-        Protocol(D).restore(deserializer, saved);
-    } else |err| {
-        if (err == error.OutOfMemory) return deserializer.raiseError(error.OutOfMemory);
-        Protocol(D).restore(deserializer, saved);
-    }
-
-    var access = try deserializer.deserializeStruct(grid.GridPlacement);
-    const key = (try access.nextKey(allocator)) orelse return deserializer.raiseError(error.MissingField);
-    defer access.freeKey(key, allocator);
-    if (std.mem.eql(u8, key, "Line")) {
-        const payload = try access.nextValue(i16, allocator);
-        try expectNoMoreKeys(&access, allocator, deserializer);
-        return .{ .line = payload };
-    }
-    if (std.mem.eql(u8, key, "Span")) {
-        const payload = try access.nextValue(u16, allocator);
-        try expectNoMoreKeys(&access, allocator, deserializer);
-        return .{ .span = payload };
-    }
-    if (std.mem.eql(u8, key, "NamedLine")) {
-        const payload = try access.nextValue(grid.NamedLine, allocator);
-        try expectNoMoreKeys(&access, allocator, deserializer);
-        return .{ .named_line = payload };
-    }
-    if (std.mem.eql(u8, key, "NamedSpan")) {
-        const payload = try access.nextValue(grid.NamedSpan, allocator);
-        try expectNoMoreKeys(&access, allocator, deserializer);
-        return .{ .named_span = payload };
-    }
-    return deserializer.raiseError(error.UnexpectedToken);
-}
-
-fn deserializeRepetitionCount(allocator: std.mem.Allocator, deserializer: anytype) !grid.RepetitionCount {
-    const D = protocolBackend(@TypeOf(deserializer));
-    const saved = Protocol(D).checkpoint(deserializer);
-    if (deserializer.deserializeString(allocator)) |name| {
-        defer serde.core.releaseString(deserializer, allocator, name);
-        if (std.mem.eql(u8, name, "AutoFit")) return .auto_fit;
-        if (std.mem.eql(u8, name, "AutoFill")) return .auto_fill;
-        Protocol(D).restore(deserializer, saved);
-    } else |err| {
-        if (err == error.OutOfMemory) return deserializer.raiseError(error.OutOfMemory);
-        Protocol(D).restore(deserializer, saved);
-    }
-
-    var access = try deserializer.deserializeStruct(grid.RepetitionCount);
-    const key = (try access.nextKey(allocator)) orelse return deserializer.raiseError(error.MissingField);
-    defer access.freeKey(key, allocator);
-    if (std.mem.eql(u8, key, "Count")) {
-        const payload = try access.nextValue(u16, allocator);
-        try expectNoMoreKeys(&access, allocator, deserializer);
-        return .{ .count = payload };
-    }
-    return deserializer.raiseError(error.UnexpectedToken);
-}
-
-fn expectNoMoreKeys(access: anytype, allocator: std.mem.Allocator, deserializer: anytype) !void {
-    if (try access.nextKey(allocator)) |extra| {
-        access.freeKey(extra, allocator);
-        return deserializer.raiseError(error.UnexpectedToken);
-    }
+pub fn deserializeNamedSpan(comptime T: type, allocator: std.mem.Allocator, deserializer: anytype) !T {
+    return deserializeNamedPair(T, u16, allocator, deserializer);
 }

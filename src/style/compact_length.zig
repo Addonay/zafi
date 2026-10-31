@@ -135,7 +135,7 @@ pub const CompactLength = struct {
     pub fn resolved_percentage_size(self: CompactLength, parent_size: f32) ?f32 {
         return switch (self.tag()) {
             .percent => self.value() * parent_size,
-            // TaffyTree's default resolver returns 0 for calc values.
+            // Tree's default resolver returns 0 for calc values.
             .calc => 0,
             else => null,
         };

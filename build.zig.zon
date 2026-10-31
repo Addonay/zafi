@@ -2,27 +2,23 @@
     // Default dependency name for this package (the module itself is called
     // `zlay`; see build.zig).
     .name = .zlay,
-    .version = "0.1.0",
+    .version = "0.2.0",
     // Generated for this standalone package; never reused from a parent.
+    .dependencies = .{
+        .serde = .{
+            .url = "git+https://github.com/OrlovEvgeny/serde.zig#b378c4c7392c0eead087000e455e3b108b4b590f",
+            .hash = "serde-1.2.2-1DszTxNsGQB0pwXk4nyJcSPq0_Z2XLXrZY0ISwq5nARW",
+        },
+    },
     .fingerprint = 0x31343ede0d6ce2d0, // Changing this has security and trust implications.
     // Toolchain floor. `build.zig` and the sources track Zig 0.17 development
     // builds; this is the oldest revision the package is tested against.
-    .minimum_zig_version = "0.17.0-dev.2085+5e36170b5",
+    .minimum_zig_version = "0.17.0",
     // One optional, lazy dependency: `serde` (OrlovEvgeny/serde.zig) provides
     // Taffy-compatible JSON serialization behind `-Dserde=true`. Pinned by
     // immutable commit and fetched only when the option is enabled, so the
     // default build stays dependency-free. The Taffy source checkout under
     // `.references/` is a verification reference, not a build input.
-    .dependencies = .{
-        .serde = .{
-            .url = "git+https://github.com/OrlovEvgeny/serde.zig#972037804152d50f80919acf78124f54d9d067bd",
-            .hash = "serde-1.2.0-1DszT2cgGQCLUJwUUPP6B676qxvAflryLl_NxDqvXUIe",
-            .lazy = true,
-        },
-    },
-    // Files included when the package is fetched by `zig fetch`/a URL
-    // dependency. Development-only trees (`tools/`, `audit/`, plans) stay in
-    // the repository but are not part of the distributed package.
     .paths = .{
         "build.zig",
         "build.zig.zon",

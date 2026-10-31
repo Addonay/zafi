@@ -6,14 +6,14 @@
 
 const std = @import("std");
 const geometry = @import("../../geometry.zig");
-const style = @import("../../style/mod.zig");
-const grid_style = @import("../../style/grid.zig");
+const style = @import("../../style/root.zig");
+const grid = @import("../../style/grid.zig");
 const math = @import("../../util/math.zig");
 const grid_track = @import("types/grid_track.zig");
-const counts_mod = @import("types/grid_track_counts.zig");
+const grid_track_counts = @import("types/grid_track_counts.zig");
 
 const GridTrack = grid_track.GridTrack;
-const TrackCounts = counts_mod.TrackCounts;
+const TrackCounts = grid_track_counts.TrackCounts;
 
 /// The maximum number of tracks in each direction from the start of the explicit grid
 pub const MAX_GRID_TRACKS: u16 = 10_000;
@@ -40,7 +40,7 @@ pub const ExplicitGridSize = struct {
 /// ...treating each track as its max track sizing function if that is definite or
 /// as its minimum track sizing function otherwise, flooring the max track sizing
 /// function by the min track sizing function if both are definite
-fn track_definite_value(sizing_function: grid_style.TrackSizingFunction, parent_size: ?f32) f32 {
+fn track_definite_value(sizing_function: grid.TrackSizingFunction, parent_size: ?f32) f32 {
     const max_size = sizing_function.max.definite_value(parent_size);
     const min_size = sizing_function.min.definite_value(parent_size);
     if (max_size) |maximum| return math.f32_maybe_max(maximum, min_size);
@@ -54,7 +54,7 @@ pub fn compute_explicit_grid_size_in_axis(
     auto_fit_strategy: AutoRepeatStrategy,
     axis: geometry.AbsoluteAxis,
 ) ExplicitGridSize {
-    const template: []const grid_style.GridTemplateComponent = if (axis == .horizontal) item_style.grid_template_columns else item_style.grid_template_rows;
+    const template: []const grid.GridTemplateComponent = if (axis == .horizontal) item_style.grid_template_columns else item_style.grid_template_rows;
 
     // If template contains no tracks, then there are trivially zero explicit tracks
     if (template.len == 0) return .{};
@@ -108,7 +108,7 @@ pub fn compute_explicit_grid_size_in_axis(
 
     // Find the auto repetition and the insertion point of its repetitions
     var auto_repeat_insertion_point: u32 = 0;
-    var repetition_definition: grid_style.GridTemplateRepetition = undefined;
+    var repetition_definition: grid.GridTemplateRepetition = undefined;
     for (template) |track_def| {
         switch (track_def) {
             .single => auto_repeat_insertion_point +|= 1,
@@ -194,7 +194,7 @@ fn saturating_f32_to_u32(value: f32) u32 {
     return @intFromFloat(value);
 }
 
-fn is_auto_repetition(value: grid_style.GridTemplateComponent) bool {
+fn is_auto_repetition(value: grid.GridTemplateComponent) bool {
     return value == .repeat and (value.repeat.count == .auto_fit or value.repeat.count == .auto_fill);
 }
 
@@ -215,8 +215,8 @@ pub fn initialize_grid_tracks(
     track_has_items_context: ?*const anyopaque,
     track_has_items: TrackHasItemsFn,
 ) !void {
-    const track_template: []const grid_style.GridTemplateComponent = if (axis == .horizontal) item_style.grid_template_columns else item_style.grid_template_rows;
-    const auto_tracks: []const grid_style.TrackSizingFunction = if (axis == .horizontal) item_style.grid_auto_columns else item_style.grid_auto_rows;
+    const track_template: []const grid.GridTemplateComponent = if (axis == .horizontal) item_style.grid_template_columns else item_style.grid_template_rows;
+    const auto_tracks: []const grid.TrackSizingFunction = if (axis == .horizontal) item_style.grid_auto_columns else item_style.grid_auto_rows;
     const gap = if (axis == .horizontal) item_style.gap.width else item_style.gap.height;
 
     tracks.clearRetainingCapacity();
@@ -324,13 +324,13 @@ fn create_implicit_tracks(
     tracks: *std.ArrayList(GridTrack),
     allocator: std.mem.Allocator,
     count: usize,
-    auto_tracks: ?[]const grid_style.TrackSizingFunction,
+    auto_tracks: ?[]const grid.TrackSizingFunction,
     offset: usize,
     gap: style.dimension.LengthPercentage,
 ) !void {
     var index: usize = 0;
     while (index < count) : (index += 1) {
-        const track_def: grid_style.TrackSizingFunction = if (auto_tracks) |defined|
+        const track_def: grid.TrackSizingFunction = if (auto_tracks) |defined|
             defined[(offset + index) % defined.len]
         else
             .auto;
@@ -341,13 +341,13 @@ fn create_implicit_tracks(
 
 test "explicit grid auto-fill repetitions respect gaps" {
     const testing = @import("std").testing;
-    const columns = [_]grid_style.GridTemplateComponent{.{ .repeat = .{
+    const columns = [_]grid.GridTemplateComponent{.{ .repeat = .{
         .count = .auto_fill,
-        .tracks = &[_]grid_style.TrackSizingFunction{grid_style.TrackSizingFunction.from_length(40)},
+        .tracks = &[_]grid.TrackSizingFunction{grid.TrackSizingFunction.from_length(40)},
     } }};
-    const rows = [_]grid_style.GridTemplateComponent{.{ .repeat = .{
+    const rows = [_]grid.GridTemplateComponent{.{ .repeat = .{
         .count = .auto_fill,
-        .tracks = &[_]grid_style.TrackSizingFunction{grid_style.TrackSizingFunction.from_length(20)},
+        .tracks = &[_]grid.TrackSizingFunction{grid.TrackSizingFunction.from_length(20)},
     } }};
     const item_style = style.Style{
         .display = .grid,
@@ -368,9 +368,9 @@ test "explicit grid auto-fill repetitions respect gaps" {
 
 test "invalid templates with zero-track repetitions are ignored" {
     const testing = @import("std").testing;
-    const columns = [_]grid_style.GridTemplateComponent{.{ .repeat = .{
+    const columns = [_]grid.GridTemplateComponent{.{ .repeat = .{
         .count = .{ .count = 2 },
-        .tracks = &[_]grid_style.TrackSizingFunction{},
+        .tracks = &[_]grid.TrackSizingFunction{},
     } }};
     const item_style = style.Style{ .display = .grid, .grid_template_columns = &columns };
     const horizontal = compute_explicit_grid_size_in_axis(&item_style, 200, .max_repetitions_that_do_not_overflow, .horizontal);

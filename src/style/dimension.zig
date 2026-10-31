@@ -1,7 +1,7 @@
 //! Direct semantic port of Taffy's `style/dimension.rs`.
 
-const available = @import("available_space.zig");
-const compact = @import("compact_length.zig");
+const AvailableSpace = @import("available_space.zig").AvailableSpace;
+const compact_length = @import("compact_length.zig");
 const std = @import("std");
 
 const serde_support = @import("../serde_support.zig");
@@ -22,13 +22,13 @@ pub const LengthPercentage = struct {
     pub const zerdeSerialize = serde_serialize;
     pub const zerdeDeserialize = serde_deserialize;
 
-    value: compact.CompactLength,
+    value: compact_length.CompactLength,
 
     pub fn from_length(value: anytype) LengthPercentage {
-        return .{ .value = compact.compact_length_from_length(value) };
+        return .{ .value = compact_length.compact_length_from_length(value) };
     }
     pub fn from_percent(value: anytype) LengthPercentage {
-        return .{ .value = compact.compact_length_from_percent(value) };
+        return .{ .value = compact_length.compact_length_from_percent(value) };
     }
 
     pub fn from_str(input: []const u8) DimensionParseError!LengthPercentage {
@@ -39,22 +39,22 @@ pub const LengthPercentage = struct {
     }
 
     pub fn length(value: f32) LengthPercentage {
-        return .{ .value = compact.CompactLength.length(value) };
+        return .{ .value = compact_length.CompactLength.length(value) };
     }
 
     pub fn percent(value: f32) LengthPercentage {
-        return .{ .value = compact.CompactLength.percent(value) };
+        return .{ .value = compact_length.CompactLength.percent(value) };
     }
 
     pub fn calc(pointer: *const anyopaque) LengthPercentage {
-        return .{ .value = compact.CompactLength.calc(pointer) };
+        return .{ .value = compact_length.CompactLength.calc(pointer) };
     }
 
     pub fn resolve(self: LengthPercentage, basis: f32) f32 {
         return switch (self.value.tag()) {
             .length => self.value.value(),
             .percent => self.value.value() * basis,
-            // TaffyTree's default calc resolver returns 0; other non-definite
+            // Tree's default calc resolver returns 0; other non-definite
             // values resolve to zero through `ResolveOrZero`.
             .calc => 0,
             else => 0,
@@ -71,9 +71,9 @@ pub const LengthPercentage = struct {
     }
 
     pub fn zero() LengthPercentage {
-        return .{ .value = compact.CompactLength.length(0) };
+        return .{ .value = compact_length.CompactLength.length(0) };
     }
-    pub fn into_raw(self: LengthPercentage) compact.CompactLength {
+    pub fn into_raw(self: LengthPercentage) compact_length.CompactLength {
         return self.value;
     }
     pub fn expand(self: LengthPercentage) ExpandedLengthPercentage {
@@ -92,13 +92,13 @@ pub const LengthPercentageAuto = struct {
     pub const zerdeSerialize = serde_serialize;
     pub const zerdeDeserialize = serde_deserialize;
 
-    value: compact.CompactLength,
+    value: compact_length.CompactLength,
 
     pub fn from_length(value: anytype) LengthPercentageAuto {
-        return .{ .value = compact.compact_length_from_length(value) };
+        return .{ .value = compact_length.compact_length_from_length(value) };
     }
     pub fn from_percent(value: anytype) LengthPercentageAuto {
-        return .{ .value = compact.compact_length_from_percent(value) };
+        return .{ .value = compact_length.compact_length_from_percent(value) };
     }
 
     pub fn from_str(input: []const u8) DimensionParseError!LengthPercentageAuto {
@@ -110,19 +110,19 @@ pub const LengthPercentageAuto = struct {
     }
 
     pub fn auto() LengthPercentageAuto {
-        return .{ .value = compact.CompactLength.auto() };
+        return .{ .value = compact_length.CompactLength.auto() };
     }
 
     pub fn length(value: f32) LengthPercentageAuto {
-        return .{ .value = compact.CompactLength.length(value) };
+        return .{ .value = compact_length.CompactLength.length(value) };
     }
 
     pub fn percent(value: f32) LengthPercentageAuto {
-        return .{ .value = compact.CompactLength.percent(value) };
+        return .{ .value = compact_length.CompactLength.percent(value) };
     }
 
     pub fn calc(pointer: *const anyopaque) LengthPercentageAuto {
-        return .{ .value = compact.CompactLength.calc(pointer) };
+        return .{ .value = compact_length.CompactLength.calc(pointer) };
     }
 
     pub fn resolve(self: LengthPercentageAuto, basis: f32) ?f32 {
@@ -146,12 +146,12 @@ pub const LengthPercentageAuto = struct {
     }
 
     pub fn zero() LengthPercentageAuto {
-        return .{ .value = compact.CompactLength.length(0) };
+        return .{ .value = compact_length.CompactLength.length(0) };
     }
     pub fn is_auto(self: LengthPercentageAuto) bool {
         return self.value.tag() == .auto;
     }
-    pub fn into_raw(self: LengthPercentageAuto) compact.CompactLength {
+    pub fn into_raw(self: LengthPercentageAuto) compact_length.CompactLength {
         return self.value;
     }
     pub fn expand(self: LengthPercentageAuto) ExpandedLengthPercentageAuto {
@@ -171,24 +171,24 @@ pub const Dimension = struct {
     pub const zerdeSerialize = serde_serialize;
     pub const zerdeDeserialize = serde_deserialize;
 
-    value: compact.CompactLength,
+    value: compact_length.CompactLength,
 
-    pub const auto: Dimension = .{ .value = compact.CompactLength.auto() };
-    pub const min_content: Dimension = .{ .value = compact.CompactLength.min_content() };
-    pub const max_content: Dimension = .{ .value = compact.CompactLength.max_content() };
-    pub const fit_content: Dimension = .{ .value = compact.CompactLength.fit_content() };
-    pub const stretch: Dimension = .{ .value = compact.CompactLength.stretch() };
-    pub const content: Dimension = .{ .value = compact.CompactLength.content() };
+    pub const auto: Dimension = .{ .value = compact_length.CompactLength.auto() };
+    pub const min_content: Dimension = .{ .value = compact_length.CompactLength.min_content() };
+    pub const max_content: Dimension = .{ .value = compact_length.CompactLength.max_content() };
+    pub const fit_content: Dimension = .{ .value = compact_length.CompactLength.fit_content() };
+    pub const stretch: Dimension = .{ .value = compact_length.CompactLength.stretch() };
+    pub const content: Dimension = .{ .value = compact_length.CompactLength.content() };
 
     pub fn length(value: f32) Dimension {
-        return .{ .value = compact.CompactLength.length(value) };
+        return .{ .value = compact_length.CompactLength.length(value) };
     }
 
     pub fn from_length(value: anytype) Dimension {
-        return .{ .value = compact.compact_length_from_length(value) };
+        return .{ .value = compact_length.compact_length_from_length(value) };
     }
     pub fn from_percent(value: anytype) Dimension {
-        return .{ .value = compact.compact_length_from_percent(value) };
+        return .{ .value = compact_length.compact_length_from_percent(value) };
     }
 
     pub fn from_str(input: []const u8) DimensionParseError!Dimension {
@@ -209,18 +209,18 @@ pub const Dimension = struct {
         return error.InvalidDimension;
     }
     pub fn calc(value: *const anyopaque) Dimension {
-        return .{ .value = compact.CompactLength.calc(value) };
+        return .{ .value = compact_length.CompactLength.calc(value) };
     }
-    pub fn from_raw(value: compact.CompactLength) Dimension {
+    pub fn from_raw(value: compact_length.CompactLength) Dimension {
         return .{ .value = value };
     }
 
     pub fn percent(value: f32) Dimension {
-        return .{ .value = compact.CompactLength.percent(value) };
+        return .{ .value = compact_length.CompactLength.percent(value) };
     }
 
     pub fn fit_content_length(value: f32) Dimension {
-        return .{ .value = compact.CompactLength.fit_content_length(value) };
+        return .{ .value = compact_length.CompactLength.fit_content_length(value) };
     }
 
     pub fn fit_content_px(value: f32) Dimension {
@@ -228,7 +228,7 @@ pub const Dimension = struct {
     }
 
     pub fn fit_content_percent(value: f32) Dimension {
-        return .{ .value = compact.CompactLength.fit_content_percent(value) };
+        return .{ .value = compact_length.CompactLength.fit_content_percent(value) };
     }
 
     pub fn resolve(self: Dimension, basis: ?f32) ?f32 {
@@ -267,7 +267,7 @@ pub const Dimension = struct {
     pub fn is_content(self: Dimension) bool {
         return self.value.tag() == .content;
     }
-    pub fn tag(self: Dimension) compact.CompactLengthTag {
+    pub fn tag(self: Dimension) compact_length.CompactLengthTag {
         return self.value.tag();
     }
     pub fn numeric_value(self: Dimension) f32 {
@@ -277,7 +277,7 @@ pub const Dimension = struct {
     pub fn calc_handle(self: Dimension) ?*const anyopaque {
         return self.value.calc_value();
     }
-    pub fn into_raw(self: Dimension) compact.CompactLength {
+    pub fn into_raw(self: Dimension) compact_length.CompactLength {
         return self.value;
     }
     pub fn expand(self: Dimension) ExpandedDimension {
@@ -311,7 +311,7 @@ pub const ExpandedDimension = union(enum) {
     calc,
 };
 
-pub fn dimensionToAvailable(value: Dimension) available.AvailableSpace {
+pub fn dimensionToAvailable(value: Dimension) AvailableSpace {
     return switch (value.value.tag()) {
         .min_content => .min_content,
         .max_content => .max_content,
@@ -319,7 +319,7 @@ pub fn dimensionToAvailable(value: Dimension) available.AvailableSpace {
     };
 }
 
-pub fn dimension_value(value: Dimension) compact.CompactLength {
+pub fn dimension_value(value: Dimension) compact_length.CompactLength {
     return value.value;
 }
 
@@ -334,10 +334,10 @@ pub fn clamp_resolved_size(value: f32, minimum: LengthPercentageAuto, maximum: L
 pub fn dimension_auto() Dimension {
     return Dimension.auto;
 }
-pub fn from(value: compact.CompactLength) Dimension {
+pub fn from(value: compact_length.CompactLength) Dimension {
     return Dimension.from_raw(value);
 }
-pub fn dimension_raw_value(value: Dimension) compact.CompactLength {
+pub fn dimension_raw_value(value: Dimension) compact_length.CompactLength {
     return value.value;
 }
 pub fn min_content() Dimension {
@@ -398,7 +398,7 @@ pub fn dimension_from_expanded(value: ExpandedDimension) Dimension {
 test "dimension keeps keyword values distinct" {
     const testing = @import("std").testing;
     // The packed representation must stay pointer-sized.
-    try testing.expectEqual(@as(usize, 8), @sizeOf(compact.CompactLength));
+    try testing.expectEqual(@as(usize, 8), @sizeOf(compact_length.CompactLength));
     try testing.expectEqual(@as(usize, 8), @sizeOf(Dimension));
     try testing.expectEqual(@as(usize, 8), @sizeOf(LengthPercentage));
     try testing.expectEqual(@as(usize, 8), @sizeOf(LengthPercentageAuto));

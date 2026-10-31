@@ -1,0 +1,43 @@
+src/style/mod.zig:30:    pub fn from_str(input: []const u8) error{InvalidDisplay}!Display {
+src/style/mod.zig:48:    pub fn from_str(input: []const u8) error{InvalidPosition}!Position {
+src/style/mod.zig:62:    pub fn from_str(input: []const u8) error{InvalidBoxSizing}!BoxSizing {
+src/style/mod.zig:78:    pub fn from_str(input: []const u8) error{InvalidOverflow}!Overflow {
+src/style/mod.zig:106:    pub fn from_str(input: []const u8) error{InvalidDirection}!Direction {
+src/style/mod.zig:128:    pub fn from_str(input: []const u8) error{InvalidContain}!Contain {
+src/style/mod.zig:199:    pub fn is_block(self: CoreStyle) bool {
+src/style/mod.zig:200:        return self.value.is_block();
+src/style/mod.zig:397:    pub fn clear(self: BlockItemStyle) @import("float.zig").Clear {
+src/style/mod.zig:459:    pub fn is_block(self: Style) bool {
+src/style/mod.zig:469:    pub fn clear_value(self: Style) float.Clear {
+src/style/mod.zig:612:pub fn is_block(value: Style) bool {
+src/style/mod.zig:721:pub fn clear(value: Style) float.Clear {
+src/style/grid.zig:153:    pub fn from_str(input: []const u8) !GridAutoFlow {
+src/style/grid.zig:536:    pub fn from_str(input: []const u8) GridStyleParseError!MinTrackSizingFunction {
+src/style/grid.zig:678:    pub fn from_str(input: []const u8) GridStyleParseError!MaxTrackSizingFunction {
+src/style/grid.zig:837:    pub fn from_str(input: []const u8) GridStyleParseError!TrackSizingFunction {
+src/style/grid.zig:956:fn parse_line_name_group(input: []const u8, index: *usize) GridStyleParseError!GridTemplateLineNames {
+src/style/grid.zig:992:    pub fn from_str(input: []const u8) GridStyleParseError!GridTemplateTracks {
+src/style/grid.zig:1002:                const parsed_names = try parse_line_name_group(input, &index);
+src/style/grid.zig:1033:    pub fn from_str(input: []const u8) GridStyleParseError!GridTemplateComponents {
+src/style/grid.zig:1043:                const parsed_names = try parse_line_name_group(input, &index);
+src/compute/grid/mod.zig:171:    pub fn to_track_list_string(self: DetailedGridTracksInfo) []const u8 {
+src/compute/grid/mod.zig:208:        return self.rows.to_track_list_string();
+src/compute/grid/mod.zig:211:        return self.columns.to_track_list_string();
+src/compute/grid/mod.zig:805:        const row_line_names = try name_resolver.detailed_line_names(detail_alloc, .vertical);
+src/compute/grid/mod.zig:806:        const column_line_names = try name_resolver.detailed_line_names(detail_alloc, .horizontal);
+src/compute/grid/types/named.zig:161:    pub fn detailed_line_names(self: *const NamedLineResolver, allocator: std.mem.Allocator, axis: geometry.AbsoluteAxis) ![]const []const []const u8 {
+src/tree/taffy_tree.zig:89:    pub fn ensurePages(self: *NodeStore, count: usize) !void {
+src/tree/taffy_tree.zig:230:    pub fn clear(self: *TaffyTree) void {
+src/tree/taffy_tree.zig:252:    pub fn new_with_children(self: *TaffyTree, value: style_mod.Style, child_list: []const NodeId) !NodeId {
+src/tree/taffy_tree.zig:258:    pub fn set_children(self: *TaffyTree, parent_id: NodeId, child_list: []const NodeId) !void {
+src/tree/taffy_tree.zig:285:    pub fn add_child(self: *TaffyTree, parent_id: NodeId, child: NodeId) !void {
+src/tree/taffy_tree.zig:294:    pub fn insert_child_at_index(self: *TaffyTree, parent_id: NodeId, index: usize, child: NodeId) !void {
+src/tree/taffy_tree.zig:304:    pub fn remove_child(self: *TaffyTree, parent_id: NodeId, child: NodeId) !NodeId {
+src/tree/taffy_tree.zig:317:    pub fn remove_child_at_index(self: *TaffyTree, parent_id: NodeId, index: usize) !NodeId {
+src/tree/taffy_tree.zig:322:    pub fn remove_children_range(self: *TaffyTree, parent_id: NodeId, start: usize, end: usize) !void {
+src/tree/taffy_tree.zig:331:    pub fn replace_child_at_index(self: *TaffyTree, parent_id: NodeId, index: usize, child: NodeId) !NodeId {
+src/tree/taffy_tree.zig:488:    pub fn mark_dirty(self: *TaffyTree, id: NodeId) void {
+src/tree/taffy_tree.zig:615:    pub fn remove(self: *TaffyTree, id: NodeId) !NodeId {
+src/tree/taffy_tree.zig:644:    pub fn remove_last_node(self: *TaffyTree) !NodeId {
+src/tree/taffy_tree.zig:665:    pub fn node(self: *TaffyTree, id: NodeId) ?*NodeData {
+src/tree/taffy_tree.zig:673:    pub fn node_const(self: *const TaffyTree, id: NodeId) ?*const NodeData {

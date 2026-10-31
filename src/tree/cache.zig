@@ -1,7 +1,7 @@
 //! Direct port of Taffy's `tree/cache.rs` cache storage.
 
 const layout = @import("layout.zig");
-const available = @import("../style/available_space.zig");
+const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
 const geometry = @import("../geometry.zig");
 const std = @import("std");
 
@@ -63,7 +63,7 @@ fn size_option_cache_key(input: geometry.Size(?f32)) u64 {
     return (@as(u64, option_cache_key(input.width)) << 32) | option_cache_key(input.height);
 }
 
-fn available_space_cache_key(input: available.AvailableSpace) u32 {
+fn available_space_cache_key(input: AvailableSpace) u32 {
     return switch (input) {
         .definite => |value| @bitCast(-value),
         .min_content => @bitCast(-std.math.inf(f32)),
@@ -71,15 +71,15 @@ fn available_space_cache_key(input: available.AvailableSpace) u32 {
     };
 }
 
-fn size_available_space_cache_key(input: geometry.Size(available.AvailableSpace)) u64 {
+fn size_available_space_cache_key(input: geometry.Size(AvailableSpace)) u64 {
     return (@as(u64, available_space_cache_key(input.width)) << 32) | available_space_cache_key(input.height);
 }
 
-fn mixed_cache_key(known_dimension: ?f32, available_space: available.AvailableSpace) u32 {
+fn mixed_cache_key(known_dimension: ?f32, available_space: AvailableSpace) u32 {
     return if (known_dimension) |value| @bitCast(value) else available_space_cache_key(available_space);
 }
 
-fn size_mixed_cache_key(known_dimensions: geometry.Size(?f32), available_space: geometry.Size(available.AvailableSpace)) u64 {
+fn size_mixed_cache_key(known_dimensions: geometry.Size(?f32), available_space: geometry.Size(AvailableSpace)) u64 {
     return (@as(u64, mixed_cache_key(known_dimensions.width, available_space.width)) << 32) | mixed_cache_key(known_dimensions.height, available_space.height);
 }
 
@@ -202,7 +202,7 @@ fn input_equal(a: layout.LayoutInput, b: layout.LayoutInput) bool {
         available_equal(a.available_space.height, b.available_space.height);
 }
 
-fn available_equal(a: available.AvailableSpace, b: available.AvailableSpace) bool {
+fn available_equal(a: AvailableSpace, b: AvailableSpace) bool {
     return switch (a) {
         .definite => |value| switch (b) {
             .definite => |other| value == other,

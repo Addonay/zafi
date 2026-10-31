@@ -38,18 +38,95 @@ pub const Display = enum {
     }
 };
 pub const BoxGenerationMode = enum { normal, none };
+
+/// WARNING: this enum follows the behaviour of CSS's `position` property,
+/// which can be unintuitive.
+///
+/// `Position.static` is the default value, matching CSS. (Taffy made
+/// `Position.relative` the default for backwards compatibility before CSS
+/// semantics were implemented; Zlay tracks current Taffy, so `static` is the
+/// default here too.)
 pub const Position = enum {
     /// Taffy-compatible serde: PascalCase variant names.
     pub const serde = serde_options;
 
+    /// Laid out in normal flow. `inset` has no effect and the box does not act
+    /// as a containing block for out-of-flow descendants.
+    static,
+    /// Laid out in normal flow, then the `inset` offset is applied as a
+    /// correction factor. Offsets do not affect the position of any other item.
+    /// Acts as a containing block for out-of-flow descendants.
     relative,
+    /// Taken out of normal flow and positioned relative to its containing block
+    /// (the closest positioned ancestor, otherwise the initial containing
+    /// block). No space is created for it in flow and its size is not altered by
+    /// its siblings.
+    ///
+    /// To opt out of layout entirely use `Display.none` instead.
     absolute,
+    /// Taken out of normal flow and positioned relative to the initial
+    /// containing block (the viewport), regardless of ancestors.
+    fixed,
+    /// Laid out in normal flow exactly like `static`: `inset` is *not* applied as
+    /// an offset, because in CSS sticky insets are scroll thresholds which
+    /// Taffy has no knowledge of. Applying the sticky offset is the caller's job
+    /// once it knows the scroll position. Acts as a containing block for
+    /// out-of-flow descendants.
+    sticky,
 
     pub fn from_str(input: []const u8) error{InvalidPosition}!Position {
         const source = std.mem.trim(u8, input, " \t\r\n");
+        if (std.ascii.eqlIgnoreCase(source, "static")) return .static;
         if (std.ascii.eqlIgnoreCase(source, "relative")) return .relative;
         if (std.ascii.eqlIgnoreCase(source, "absolute")) return .absolute;
+        if (std.ascii.eqlIgnoreCase(source, "fixed")) return .fixed;
+        if (std.ascii.eqlIgnoreCase(source, "sticky")) return .sticky;
         return error.InvalidPosition;
+    }
+
+    /// Whether this position takes the item out of normal flow.
+    pub fn is_out_of_flow(self: Position) bool {
+        return self == .absolute or self == .fixed;
+    }
+
+    /// Whether this position causes the item to act as a containing block for
+    /// out-of-flow descendants (any value other than `static`).
+    pub fn is_positioned(self: Position) bool {
+        return self != .static;
+    }
+
+    /// Whether `inset` is applied as a positional offset for this position.
+    /// Only `relative` applies insets; `static`/`sticky` ignore them and the
+    /// out-of-flow positions resolve them against their containing block.
+    pub fn applies_relative_inset(self: Position) bool {
+        return self == .relative;
+    }
+};
+
+/// Which out-of-flow positions a node establishes a containing block for.
+///
+/// This is the single policy point for containing-block establishment: it
+/// decides both which out-of-flow boxes a node claims and lays out, and (for
+/// grid containers) whether the static position of an out-of-flow child is
+/// derived from its grid area. The default matches plain CSS positioning: a
+/// node is the containing block for `absolute` boxes when its own `position` is
+/// not `static`, and never for `fixed` boxes (which are claimed by the root).
+pub const ContainingBlockClaims = struct {
+    /// Whether the node is the containing block for `position: absolute` boxes.
+    absolute: bool,
+    /// Whether the node is the containing block for `position: fixed` boxes.
+    fixed: bool,
+
+    pub const none = ContainingBlockClaims{ .absolute = false, .fixed = false };
+    pub const all = ContainingBlockClaims{ .absolute = true, .fixed = true };
+
+    /// Whether the node is the containing block for a box with `position`.
+    pub fn for_position(self: ContainingBlockClaims, value: Position) bool {
+        return switch (value) {
+            .absolute => self.absolute,
+            .fixed => self.fixed,
+            else => false,
+        };
     }
 };
 pub const BoxSizing = enum {
@@ -185,7 +262,7 @@ pub const Contain = packed struct(u8) {
 /// Rust trait names retained as explicit Zig interface records. A view wraps
 /// a concrete `Style` and exposes the same accessor boundary as Taffy's trait;
 /// custom trees can provide their own records without depending on the
-/// high-level `TaffyTree` storage.
+/// high-level `Tree` storage.
 pub const CheapCloneStr = []const u8;
 pub const CoreStyle = struct {
     value: Style,
@@ -413,7 +490,7 @@ pub const Style = struct {
     contain: Contain = .{},
     float: float.Float = .none,
     clear: float.Clear = .none,
-    position: Position = .relative,
+    position: Position = .static,
     inset: geometry.Rect(dimension.LengthPercentageAuto) = .{ .left = dimension.LengthPercentageAuto.auto(), .right = dimension.LengthPercentageAuto.auto(), .top = dimension.LengthPercentageAuto.auto(), .bottom = dimension.LengthPercentageAuto.auto() },
     size: geometry.Size(dimension.Dimension) = .{ .width = .auto, .height = .auto },
     min_size: geometry.Size(dimension.LengthPercentageAuto) = .{ .width = dimension.LengthPercentageAuto.auto(), .height = dimension.LengthPercentageAuto.auto() },
@@ -457,7 +534,20 @@ pub const Style = struct {
     }
 
     pub fn is_block(self: Style) bool {
-        return self.display == .block;
+        return self.display == .block or self.display == .flow_root;
+    }
+
+    /// Whether the box establishes an independent formatting context purely
+    /// because of its `display` value. `flow_root` is a Zlay extension (CSS
+    /// `display: flow-root`) rather than a Taffy concept.
+    pub fn establishes_formatting_context_from_display(self: Style) bool {
+        return self.display == .flow_root;
+    }
+
+    /// Which out-of-flow (`absolute`/`fixed`) descendants this node establishes
+    /// the containing block for. See `ContainingBlockClaims`.
+    pub fn is_containing_block(self: Style) ContainingBlockClaims {
+        return .{ .absolute = self.position.is_positioned(), .fixed = false };
     }
 
     pub fn is_table(self: Style) bool {
@@ -610,7 +700,10 @@ pub fn box_generation_mode(value: Style) BoxGenerationMode {
     return if (value.display == .none) .none else .normal;
 }
 pub fn is_block(value: Style) bool {
-    return value.display == .block or value.display == .flow_root;
+    return value.is_block();
+}
+pub fn is_containing_block(value: Style) ContainingBlockClaims {
+    return value.is_containing_block();
 }
 pub fn is_compressible_replaced(value: Style) bool {
     return value.item_is_replaced;

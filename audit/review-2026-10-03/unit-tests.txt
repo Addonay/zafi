@@ -1,0 +1,4 @@
+Command: zig build test --summary all
+Toolchain: Zig 0.17.0
+Build Summary: 4/4 steps succeeded; 87/87 tests passed
+Captured from initial tool output on 2026-10-03.

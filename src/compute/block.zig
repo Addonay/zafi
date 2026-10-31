@@ -7,18 +7,22 @@
 const std = @import("std");
 
 const geometry = @import("../geometry.zig");
-const style = @import("../style/mod.zig");
-const tree = @import("../tree/taffy_tree.zig");
-const tree_layout = @import("../tree/layout.zig");
-const float_layout = @import("float.zig");
+const style = @import("../style/root.zig");
+const NodeId = @import("../tree/node.zig").NodeId;
+const layout = @import("../tree/layout.zig");
+const float = @import("float.zig");
 const sizing_keyword = @import("common/sizing_keyword.zig");
 const alignment = @import("common/alignment.zig");
 const scrollable_overflow = @import("common/scrollable_overflow.zig");
+const oof = @import("oof.zig");
+const compute = @import("root.zig");
 const math = @import("../util/math.zig");
+const LayoutTree = @import("../tree/interfaces.zig").LayoutTree;
+const tree = @import("../tree/tree.zig");
 
-pub const ContentSlot = float_layout.ContentSlot;
-pub const BfcSlot = float_layout.BfcSlot;
-pub const FIT_TOLERANCE = float_layout.FIT_TOLERANCE;
+pub const ContentSlot = float.ContentSlot;
+pub const BfcSlot = float.BfcSlot;
+pub const FIT_TOLERANCE = float.FIT_TOLERANCE;
 
 const SIZE_NONE: geometry.Size(?f32) = .{ .width = null, .height = null };
 const RECT_ZERO: geometry.Rect(f32) = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 };
@@ -26,11 +30,11 @@ const RECT_ZERO: geometry.Rect(f32) = .{ .left = 0, .right = 0, .top = 0, .botto
 /// Context for positioning Block and Float boxes within a Block Formatting Context
 pub const BlockFormattingContext = struct {
     /// The float positioning context that handles positioning floats within this Block Formatting Context
-    float_context: float_layout.FloatContext,
+    float_context: float.FloatContext,
 
     /// Create a new `BlockFormattingContext`.
     pub fn new(allocator: std.mem.Allocator) BlockFormattingContext {
-        return .{ .float_context = float_layout.FloatContext.init(allocator) };
+        return .{ .float_context = float.FloatContext.init(allocator) };
     }
 
     pub fn deinit(self: *BlockFormattingContext) void {
@@ -133,8 +137,7 @@ pub const BlockContext = struct {
         min_y: f32,
         direction: style.float.FloatDirection,
         clear: style.float.Clear,
-        adjoins_unresolved_strut: bool,
-    ) geometry.Point(f32) {
+        adjoins_unresolved_strut: bool) geometry.Point(f32) {
         if (adjoins_unresolved_strut) {
             self.adjoining_floats[@backingInt(direction)] = true;
         }
@@ -143,8 +146,7 @@ pub const BlockContext = struct {
             min_y + self.y_offset,
             self.content_box_insets,
             direction,
-            clear,
-        );
+            clear);
         pos.y -= self.y_offset;
         pos.x -= self.insets[0];
 
@@ -171,8 +173,7 @@ pub const BlockContext = struct {
             margins,
             direction,
             clear,
-            after,
-        );
+            after);
         slot.y -= self.y_offset;
         slot.x -= self.insets[0];
         return slot;
@@ -230,7 +231,7 @@ pub const BlockContext = struct {
 /// Per-child data that is accumulated and modified over the course of the layout algorithm
 const BlockItem = struct {
     /// The identifier for the associated node
-    node_id: tree.NodeId,
+    node_id: NodeId,
 
     /// The "source order" of the item. This is the index of the item within the children iterator,
     /// and controls the order in which the nodes are placed
@@ -296,7 +297,11 @@ const BlockItem = struct {
 
     /// Pending layout for in-flow non-floated items. Held back from `set_unrounded_layout` so the
     /// post-loop `align-content` pass in `compute_inner` can shift `location.y` before commit.
-    final_layout: ?tree_layout.Layout = null,
+    final_layout: ?layout.Layout = null,
+
+    /// Out-of-flow candidates bubbled out of this (in-flow) item's subtree. Anchors are relative
+    /// to the item's border box until they are translated at merge time.
+    oof_candidates: layout.OofCandidates = .empty,
 };
 
 /// The visible children of a block container, plus flags recording which optional later passes
@@ -305,23 +310,20 @@ const ItemList = struct {
     list: std.ArrayList(BlockItem),
     /// Whether any child has `display: none`.
     has_hidden: bool = false,
-    /// Whether any child is absolutely positioned.
-    has_absolute: bool = false,
 };
 
 /// Computes the layout of a block container according to the block layout algorithm
-pub const BlockError = error{ InvalidParentNode, InvalidChildNode, InvalidInputNode, ChildIndexOutOfBounds, InvalidLayoutMode, OutOfMemory };
+pub const BlockError = error{ InvalidParentNode, InvalidChildNode, InvalidInputNode, ChildIndexOutOfBounds, InvalidLayoutMode, OutOfMemory, Cycle, DuplicateChild, NodeIdExhausted };
 
-pub fn compute_block_layout(
-    tree_ref: *tree.TaffyTree,
-    node_id: tree.NodeId,
-    inputs: tree_layout.LayoutInput,
-    block_ctx: ?*BlockContext,
-) BlockError!tree_layout.LayoutOutput {
+pub fn compute_block_layout(comptime Tree: type, tree_ref: *Tree,
+    node_id: NodeId,
+    inputs: layout.LayoutInput,
+    block_ctx: ?*BlockContext) BlockError!layout.LayoutOutput {
+    const TreeApi = LayoutTree(Tree);
     const known_dimensions = inputs.known_dimensions;
     const parent_size = inputs.parent_size;
     const run_mode = inputs.run_mode;
-    const style_value = &(tree_ref.node(node_id) orelse return error.InvalidInputNode).style;
+    const style_value = TreeApi.get_style(tree_ref, node_id);
 
     // Pull these out earlier to avoid borrowing issues
     const overflow = style_value.overflow;
@@ -344,8 +346,7 @@ pub fn compute_block_layout(
         math.optional_size_maybe_clamp(
             maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveDimensionSize(style_value.size, parent_size), aspect_ratio), box_sizing_adjustment),
             min_size,
-            max_size,
-        )
+            max_size)
     else
         SIZE_NONE;
 
@@ -357,18 +358,17 @@ pub fn compute_block_layout(
 
     const styled_based_known_dimensions = maybeMaxSizeF32(
         optionalSizeOr(optionalSizeOr(optionalSizeOr(known_dimensions, min_max_definite_size), clamped_style_size), SIZE_NONE),
-        padding_border_size,
-    );
+        padding_border_size);
 
     // Short-circuit layout if the container's size is fully determined by the container's size and
     // the run mode is ComputeSize (and thus the container's size is all that we're interested in)
     if (run_mode == .compute_size) {
         if (styled_based_known_dimensions.width != null and styled_based_known_dimensions.height != null) {
-            return tree_layout.LayoutOutput.from_outer_size(.{ .width = styled_based_known_dimensions.width.?, .height = styled_based_known_dimensions.height.? });
+            return layout.LayoutOutput.from_outer_size(.{ .width = styled_based_known_dimensions.width.?, .height = styled_based_known_dimensions.height.? });
         }
         if (inputs.axis == .horizontal) {
             if (styled_based_known_dimensions.width) |width| {
-                return tree_layout.LayoutOutput.from_outer_size(.{ .width = width, .height = 0 });
+                return layout.LayoutOutput.from_outer_size(.{ .width = width, .height = 0 });
             }
         }
     }
@@ -377,19 +377,19 @@ pub fn compute_block_layout(
     forwarded_inputs.known_dimensions = styled_based_known_dimensions;
 
     // Unwrap the block formatting context if one was passed, or else create a new one
-    var output: tree_layout.LayoutOutput = undefined;
+    var output: layout.LayoutOutput = undefined;
     if (block_ctx != null and !establishes_new_bfc) {
-        output = try compute_inner(tree_ref, node_id, forwarded_inputs, block_ctx.?);
+        output = try compute_inner(Tree, tree_ref, node_id, forwarded_inputs, block_ctx.?);
     } else {
         var root_bfc = BlockFormattingContext.new(tree_ref.allocator);
         defer root_bfc.deinit();
         var root_ctx = root_bfc.root_block_context();
-        output = try compute_inner(tree_ref, node_id, forwarded_inputs, &root_ctx);
+        output = try compute_inner(Tree, tree_ref, node_id, forwarded_inputs, &root_ctx);
     }
 
     // Layout containment suppresses the box's baseline for baseline-alignment purposes
     if (contain.suppresses_baseline()) {
-        output.baselines = tree_layout.Baselines.none;
+        output.baselines = layout.Baselines.none;
     }
 
     return output;
@@ -399,49 +399,33 @@ pub fn compute_block_layout(
 /// dispatch so that `.block` children share their parent's floats and margin-collapse state.
 ///
 /// This mirrors `TaffyView::compute_child_layout` with the `block_ctx` parameter.
-pub fn compute_block_child_layout(
-    tree_ref: *tree.TaffyTree,
-    node_id: tree.NodeId,
-    inputs: tree_layout.LayoutInput,
-    block_ctx: ?*BlockContext,
-) BlockError!tree_layout.LayoutOutput {
-    // If RunMode is PerformHiddenLayout then this indicates that an ancestor node is `Display::None`
-    // and thus that we should lay out this node using hidden layout regardless of its own display style.
-    if (inputs.run_mode == .perform_hidden_layout) {
-        return tree_ref.compute_child_layout(node_id, inputs);
-    }
-
-    const node_data = tree_ref.node(node_id) orelse return error.InvalidInputNode;
-    if (node_data.style.display == .none or node_data.children.items.len == 0) {
-        return tree_ref.compute_child_layout(node_id, inputs);
-    }
-
-    if (node_data.style.display == .block) {
-        // Cache lookup/store mirrors `compute_cached_layout`, except that a `.block` node is
-        // dispatched with the inherited block context instead of `null`.
-        if (tree_ref.cache_get(node_id, &inputs)) |cached| return cached;
-        const output = try compute_block_layout(tree_ref, node_id, inputs, block_ctx);
-        tree_ref.cache_store(node_id, &inputs, output);
-        return output;
-    }
-
-    return tree_ref.compute_child_layout(node_id, inputs);
+/// Taffy `LayoutBlockContainer::compute_block_child_layout`: lay out a block
+/// child with an inherited block formatting context.
+///
+/// This is a thin wrapper over the shared cached dispatcher rather than a second
+/// dispatch path. Sharing the dispatcher is what keeps the out-of-flow
+/// positioning pass running for a block child that acts as a containing block
+/// for its out-of-flow descendants.
+pub fn compute_block_child_layout(comptime Tree: type, tree_ref: *Tree,
+    node_id: NodeId,
+    inputs: layout.LayoutInput,
+    block_ctx: ?*BlockContext) BlockError!layout.LayoutOutput {
+    return compute.cached_layout_with_block_ctx(Tree, tree_ref, node_id, inputs, block_ctx);
 }
 
 /// Computes the layout of a block container according to the block layout algorithm
-fn compute_inner(
-    tree_ref: *tree.TaffyTree,
-    node_id: tree.NodeId,
-    inputs: tree_layout.LayoutInput,
-    block_ctx: *BlockContext,
-) BlockError!tree_layout.LayoutOutput {
+fn compute_inner(comptime Tree: type, tree_ref: *Tree,
+    node_id: NodeId,
+    inputs: layout.LayoutInput,
+    block_ctx: *BlockContext) BlockError!layout.LayoutOutput {
+    const TreeApi = LayoutTree(Tree);
     const known_dimensions = inputs.known_dimensions;
     const parent_size = inputs.parent_size;
     const available_space = inputs.available_space;
     const run_mode = inputs.run_mode;
     const vertical_margins_are_collapsible = inputs.vertical_margins_are_collapsible;
 
-    const style_value = &(tree_ref.node(node_id) orelse return error.InvalidInputNode).style;
+    const style_value = TreeApi.get_style(tree_ref, node_id);
     const raw_padding = style_value.padding;
     const raw_border = style_value.border;
     const raw_margin = style_value.margin;
@@ -493,14 +477,14 @@ fn compute_inner(
 
     const overflow = style_value.overflow;
     const is_scroll_container = overflow.x.is_scroll_container() or overflow.y.is_scroll_container();
-    const establishes_new_bfc = is_scroll_container or style_value.align_content != null or style_value.contain.establishes_independent_formatting_context();
+    const establishes_new_bfc = is_scroll_container or style_value.align_content != null or style_value.contain.establishes_independent_formatting_context() or style_value.establishes_formatting_context_from_display();
 
     // Determine margin collapsing behaviour
     const own_margins_collapse_with_children = geometry.Line(bool){
-        .start = vertical_margins_are_collapsible.start and !establishes_new_bfc and style_value.position == .relative and padding.top == 0.0 and border.top == 0.0,
-        .end = vertical_margins_are_collapsible.end and !establishes_new_bfc and style_value.position == .relative and padding.bottom == 0.0 and border.bottom == 0.0 and size.height == null,
+        .start = vertical_margins_are_collapsible.start and !establishes_new_bfc and !style_value.position.is_out_of_flow() and padding.top == 0.0 and border.top == 0.0,
+        .end = vertical_margins_are_collapsible.end and !establishes_new_bfc and !style_value.position.is_out_of_flow() and padding.bottom == 0.0 and border.bottom == 0.0 and size.height == null,
     };
-    const has_styles_preventing_being_collapsed_through = !style_value.is_block() or block_ctx.is_bfc_root() or establishes_new_bfc or style_value.position == .absolute or padding.top > 0.0 or padding.bottom > 0.0 or border.top > 0.0 or border.bottom > 0.0 or (if (size.height) |h| h > 0.0 else false) or (if (min_size.height) |h| h > 0.0 else false);
+    const has_styles_preventing_being_collapsed_through = !style_value.is_block() or block_ctx.is_bfc_root() or establishes_new_bfc or style_value.position.is_out_of_flow() or padding.top > 0.0 or padding.bottom > 0.0 or border.top > 0.0 or border.bottom > 0.0;
 
     const text_align = style_value.text_align;
     const align_content = style_value.align_content;
@@ -514,29 +498,38 @@ fn compute_inner(
     var item_buffer: [8]BlockItem = undefined;
     var item_allocator_buffer = std.heap.BufferFirstAllocator.init(std.mem.sliceAsBytes(item_buffer[0..]), tree_ref.allocator);
     const items_allocator = item_allocator_buffer.allocator();
-    var items = try generate_item_list(tree_ref, node_id, container_content_box_size, items_allocator);
+    var items = try generate_item_list(Tree, tree_ref, node_id, container_content_box_size, items_allocator);
     defer items.list.deinit(items_allocator);
 
     // 2. Compute container width
     const container_outer_width = known_dimensions_final.width orelse blk: {
         const available_width = math.available_maybe_sub(available_space.width, content_box_inset.horizontal_axis_sum());
-        const intrinsic_width = try determine_content_based_container_width(tree_ref, items.list.items, available_width) + content_box_inset.horizontal_axis_sum();
+        const intrinsic_width = try determine_content_based_container_width(Tree, tree_ref, items.list.items, available_width) + content_box_inset.horizontal_axis_sum();
         break :blk @max(math.f32_maybe_clamp(intrinsic_width, min_size.width, max_size.width), padding_border_size.width);
     };
 
     // Short-circuit if computing size and both dimensions known
     if (run_mode == .compute_size) {
         if (known_dimensions_final.height) |container_outer_height| {
-            return tree_layout.LayoutOutput.from_outer_size(.{ .width = container_outer_width, .height = container_outer_height });
+            return layout.LayoutOutput.from_outer_size(.{ .width = container_outer_width, .height = container_outer_height });
         }
     }
 
     // We can also short-circuit if the width is known and only the width has been requested.
     if (run_mode == .compute_size and inputs.axis == .horizontal) {
-        return tree_layout.LayoutOutput.from_outer_size(.{ .width = container_outer_width, .height = 0.0 });
+        return layout.LayoutOutput.from_outer_size(.{ .width = container_outer_width, .height = 0.0 });
     }
 
-    const container_percentage_resolution_height: ?f32 = if (percentage_basis_dimensions.height) |height| height else math.maybe_max(size.height, min_size.height);
+    // Under `SizingMode.ContentSize` the container's own `height`/`min-height` are
+    // ignored, so they cannot serve as the percentage basis for children either
+    // (https://drafts.csswg.org/css-flexbox/#min-size-auto: the content size
+    // suggestion must not be influenced by the item's specified height).
+    const container_percentage_resolution_height: ?f32 = if (percentage_basis_dimensions.height) |height|
+        height
+    else if (inputs.sizing_mode == .inherent_size)
+        math.maybe_max(size.height, min_size.height)
+    else
+        null;
 
     // 3. Perform final item layout and return content height
     const percentage_resolution_width = parent_size.width orelse container_outer_width;
@@ -548,7 +541,8 @@ fn compute_inner(
     // are dead stores, so skip building them.
     const store_layouts = run_mode != .compute_size or align_content != null;
     var inflow_result = try perform_final_layout_on_in_flow_children(
-        tree_ref,
+        Tree,
+tree_ref,
         run_mode,
         items.list.items,
         container_outer_width,
@@ -561,8 +555,7 @@ fn compute_inner(
         own_margins_collapse_with_children,
         is_scroll_container,
         store_layouts,
-        block_ctx,
-    );
+        block_ctx);
 
     // Root BFCs contain floats
     var intrinsic_outer_height = inflow_result.intrinsic_outer_height;
@@ -600,33 +593,32 @@ fn compute_inner(
                 inflow_result.first_baseline = baseline + group_offset;
             }
             for (items.list.items) |*item| {
-                if (item.final_layout) |*layout| {
-                    layout.location.y += group_offset;
+                if (item.final_layout) |*item_layout| {
+                    item_layout.location.y += group_offset;
                 }
             }
 
             {
                 inflow_result.inflow_overflow_rect = RECT_ZERO;
                 for (items.list.items) |item| {
-                    if (item.final_layout) |layout| {
+                    if (item.final_layout) |item_layout| {
                         const contribution_location = if (direction.is_rtl())
                             geometry.Point(f32){
-                                .x = container_outer_width - (layout.location.x + layout.size.width) - resolved_border.right,
-                                .y = layout.location.y - resolved_border.top,
+                                .x = container_outer_width - (item_layout.location.x + item_layout.size.width) - resolved_border.right,
+                                .y = item_layout.location.y - resolved_border.top,
                             }
                         else
                             geometry.Point(f32){
-                                .x = layout.location.x - resolved_border.left,
-                                .y = layout.location.y - resolved_border.top,
+                                .x = item_layout.location.x - resolved_border.left,
+                                .y = item_layout.location.y - resolved_border.top,
                             };
                         inflow_result.inflow_overflow_rect = inflow_result.inflow_overflow_rect.@"union"(scrollable_overflow.compute_scrollable_overflow_contribution(
                             contribution_location,
-                            layout.size,
-                            layout.scrollable_overflow_rect,
+                            item_layout.size,
+                            item_layout.scrollable_overflow_rect,
                             item.overflow,
                             item.contain,
-                            is_scroll_container,
-                        ));
+                            is_scroll_container));
                     }
                 }
             }
@@ -637,25 +629,31 @@ fn compute_inner(
     var all_in_flow_children_can_be_collapsed_through = true;
     for (items.list.items) |item| {
         if (style.float.is_floated(item.float)) continue;
-        if (item.position == .absolute or item.can_be_collapsed_through) continue;
+        if (item.position.is_out_of_flow() or item.can_be_collapsed_through) continue;
         all_in_flow_children_can_be_collapsed_through = false;
         break;
     }
-    const can_be_collapsed_through =
-        !has_styles_preventing_being_collapsed_through and all_in_flow_children_can_be_collapsed_through;
+    // CSS2 §8.3.1: a box's top and bottom margins collapse through it only if its
+    // *used* height is zero, so `height`/`min-height`/`max-height` are judged by the
+    // height they resolve to (e.g. `height: 1px; max-height: 0` collapses,
+    // `min-height: 1%` under an auto-height parent collapses) rather than by their
+    // computed values.
+    const can_be_collapsed_through = !has_styles_preventing_being_collapsed_through and
+        container_outer_height == 0.0 and
+        all_in_flow_children_can_be_collapsed_through;
 
-    var output = tree_layout.LayoutOutput{
+    var output = layout.LayoutOutput{
         .size = final_outer_size,
         .scrollable_overflow_rect = RECT_ZERO,
-        .baselines = tree_layout.Baselines.from_first(inflow_result.first_baseline),
+        .baselines = layout.Baselines.from_first(inflow_result.first_baseline),
         .top_margin = if (own_margins_collapse_with_children.start)
             inflow_result.first_child_top_margin_set
         else
-            tree_layout.CollapsibleMarginSet.from_margin(resolveAutoOrZeroRect(raw_margin, parent_size.width).top),
+            layout.CollapsibleMarginSet.from_margin(resolveAutoOrZeroRect(raw_margin, parent_size.width).top),
         .bottom_margin = if (own_bottom_margin_collapses_with_children)
             inflow_result.last_child_bottom_margin_set
         else
-            tree_layout.CollapsibleMarginSet.from_margin(resolveAutoOrZeroRect(raw_margin, parent_size.width).bottom),
+            layout.CollapsibleMarginSet.from_margin(resolveAutoOrZeroRect(raw_margin, parent_size.width).bottom),
         .margins_can_collapse_through = can_be_collapsed_through,
     };
 
@@ -670,25 +668,41 @@ fn compute_inner(
 
     // Commit deferred child layouts to the tree.
     for (items.list.items) |item| {
-        if (item.final_layout) |layout| {
-            try tree_ref.set_unrounded_layout(item.node_id, layout);
+        if (item.final_layout) |item_layout| {
+            try TreeApi.set_unrounded_layout(tree_ref, item.node_id, item_layout);
         }
     }
 
-    // 4. Layout absolutely positioned children
-    const absolute_overflow_rect = blk: {
-        if (!items.has_absolute) break :blk RECT_ZERO;
-        const absolute_position_inset = resolved_border.add(scrollbar_gutter);
-        const absolute_position_area = final_outer_size.sub(absolute_position_inset.sum_axes());
-        const absolute_position_offset = geometry.Point(f32){ .x = absolute_position_inset.left, .y = absolute_position_inset.top };
-        break :blk try perform_absolute_layout_on_absolute_children(
-            tree_ref,
-            items.list.items,
-            absolute_position_area,
-            absolute_position_offset,
-            direction,
-            is_scroll_container,
-        );
+    // 4. Collect out-of-flow candidates in document order (direct out-of-flow
+    // children plus candidates bubbled from in-flow children's subtrees). These
+    // are laid out by the out-of-flow positioning pass (`oof.compute_oof_layout`),
+    // which runs after this algorithm.
+    const scratch = TreeApi.scratch_allocator(tree_ref);
+    var oof_candidates: layout.OofCandidates = .empty;
+    for (items.list.items) |*item| {
+        if (item.position.is_out_of_flow()) {
+            try oof_candidates.append(scratch, .{
+                .node = item.node_id,
+                .order = item.order,
+                .position = item.position,
+                .static_position = .{
+                    .x = layout.AxisStaticPosition.from_edge(
+                        item.static_position.x,
+                        if (direction.is_rtl()) .end else .start),
+                    .y = layout.AxisStaticPosition.from_edge(item.static_position.y, .start),
+                },
+            });
+        } else if (item.oof_candidates.items.len != 0) {
+            // Translate anchors from item-relative to container-relative coordinates
+            if (item.final_layout) |item_layout| oof.translateCandidates(&item.oof_candidates, item_layout.location);
+            try oof.appendCandidates(scratch, &oof_candidates, &item.oof_candidates);
+        }
+    }
+    const absolute_position_inset = resolved_border.add(scrollbar_gutter);
+    output.oof_candidates = oof_candidates;
+    output.oof_positioning_area = .{
+        .size = final_outer_size.sub(absolute_position_inset.sum_axes()),
+        .offset = .{ .x = absolute_position_inset.left, .y = absolute_position_inset.top },
     };
 
     {
@@ -697,23 +711,25 @@ fn compute_inner(
         // scroll containers do not extend their overflow region by their own padding.
         if (is_scroll_container) {
             if (direction.is_rtl()) {
-                inflow_result.inflow_overflow_rect.left += resolved_padding.left;
+                inflow_result.inflow_overflow_rect.right += resolved_padding.left;
             } else {
                 inflow_result.inflow_overflow_rect.right += resolved_padding.right;
             }
             inflow_result.inflow_overflow_rect.bottom += resolved_padding.bottom;
         }
-        output.scrollable_overflow_rect = inflow_result.inflow_overflow_rect.@"union"(absolute_overflow_rect);
+        // The absolute overflow contribution is merged in by the out-of-flow
+        // positioning pass, which owns the out-of-flow boxes' geometry.
+        output.scrollable_overflow_rect = inflow_result.inflow_overflow_rect;
     }
 
     // 5. Perform hidden layout on hidden children
     if (items.has_hidden) {
-        const children = try tree_ref.child_ids(node_id);
+        const children = try TreeApi.child_ids(tree_ref, node_id);
         for (children, 0..) |child, order| {
-            const child_style = &(tree_ref.node(child) orelse return error.InvalidChildNode).style;
+            const child_style = TreeApi.get_style(tree_ref, child);
             if (child_style.box_generation_mode() == .none) {
-                try tree_ref.set_unrounded_layout(child, tree_layout.Layout.with_order(@intCast(order)));
-                _ = try tree_ref.perform_child_layout(child, SIZE_NONE, SIZE_NONE, .{ .width = .max_content, .height = .max_content }, .inherent_size, geometry.Line(bool){ .start = false, .end = false });
+                try TreeApi.set_unrounded_layout(tree_ref, child, layout.Layout.with_order(@intCast(order)));
+                _ = try TreeApi.perform_child_layout(tree_ref, child, SIZE_NONE, SIZE_NONE, .{ .width = .max_content, .height = .max_content }, .inherent_size, geometry.Line(bool){ .start = false, .end = false });
             }
         }
     }
@@ -722,29 +738,29 @@ fn compute_inner(
 }
 
 /// Create a list of `BlockItem` structs where each item represents a child of the current node
-fn generate_item_list(
-    tree_ref: *tree.TaffyTree,
-    node: tree.NodeId,
+fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
+    node: NodeId,
     node_inner_size: geometry.Size(?f32),
-    allocator: std.mem.Allocator,
-) BlockError!ItemList {
+    allocator: std.mem.Allocator) BlockError!ItemList {
+    const TreeApi = LayoutTree(Tree);
     var item_list = ItemList{ .list = .empty };
     errdefer item_list.list.deinit(allocator);
     var visible_order: u32 = 0;
-    for (try tree_ref.child_ids(node), 0..) |child_node_id, child_index| {
+    for (try TreeApi.child_ids(tree_ref, node), 0..) |child_node_id, child_index| {
         _ = child_index;
-        const child_node = tree_ref.node(child_node_id) orelse return error.InvalidChildNode;
-        const child_style = &child_node.style;
+        const child_style = TreeApi.get_style(tree_ref, child_node_id);
+        const child_count_value = try TreeApi.child_count(tree_ref, child_node_id);
         if (child_style.box_generation_mode() == .none) {
             item_list.has_hidden = true;
             continue;
         }
-        if (child_style.position == .absolute) item_list.has_absolute = true;
         const order: u32 = visible_order;
         visible_order += 1;
         const aspect_ratio = child_style.aspect_ratio;
-        const padding = resolveOrZeroRectSize(child_style.padding, node_inner_size);
-        const border = resolveOrZeroRectSize(child_style.border, node_inner_size);
+        // Percentage padding and border resolve against the container's inline size
+        // (its width) on all four sides.
+        const padding = resolveOrZeroRect(child_style.padding, node_inner_size.width);
+        const border = resolveOrZeroRect(child_style.border, node_inner_size.width);
         const pb_sum = padding.add(border).sum_axes();
         const box_sizing_adjustment =
             if (child_style.box_sizing == .content_box) pb_sum else geometry.Size(f32){ .width = 0, .height = 0 };
@@ -761,7 +777,13 @@ fn generate_item_list(
         const is_scroll_container = overflow.x.is_scroll_container() or overflow.y.is_scroll_container();
         const contain = child_style.contain;
 
-        const is_in_same_bfc: bool = is_block and !is_table and position != .absolute and is_not_floated and !is_scroll_container and !contain.establishes_independent_formatting_context();
+        const is_in_same_bfc: bool = is_block and
+            !is_table and
+            !position.is_out_of_flow() and
+            is_not_floated and
+            !is_scroll_container and
+            !contain.establishes_independent_formatting_context() and
+            !child_style.establishes_formatting_context_from_display();
 
         try item_list.list.append(allocator, .{
             .node_id = child_node_id,
@@ -769,7 +791,7 @@ fn generate_item_list(
             .is_table = is_table,
             .is_replaced = is_replaced,
             .is_in_same_bfc = is_in_same_bfc,
-            .is_leaf = child_node.children.items.len == 0,
+            .is_leaf = child_count_value == 0,
             .float = float_value,
             .clear = child_style.clear,
             .size_style = child_style.size,
@@ -806,18 +828,17 @@ fn resolve_stretch_height(height_style: style.dimension.Dimension, container_inn
 }
 
 /// Compute the content-based width in the case that the width of the container is not known
-fn determine_content_based_container_width(
-    tree_ref: *tree.TaffyTree,
+fn determine_content_based_container_width(comptime Tree: type, tree_ref: *Tree,
     items: []const BlockItem,
-    available_width: @import("../style/available_space.zig").AvailableSpace,
-) BlockError!f32 {
-    const available = @import("../style/available_space.zig");
-    const available_space = geometry.Size(available.AvailableSpace){ .width = available_width, .height = .min_content };
+    available_width: @import("../style/available_space.zig").AvailableSpace) BlockError!f32 {
+    const TreeApi = LayoutTree(Tree);
+    const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
+    const available_space = geometry.Size(AvailableSpace){ .width = available_width, .height = .min_content };
 
     var max_child_width: f32 = 0.0;
-    var float_contribution = float_layout.FloatIntrinsicWidthCalculator.new(available_width);
+    var float_contribution = float.FloatIntrinsicWidthCalculator.new(available_width);
     for (items) |item| {
-        if (item.position == .absolute) continue;
+        if (item.position.is_out_of_flow()) continue;
         const known_dimensions = math.optional_size_maybe_clamp(item.size, item.min_size, item.max_size);
 
         const margin_basis = available_space.width.into_option();
@@ -826,17 +847,16 @@ fn determine_content_based_container_width(
             const resolved_keyword = sizing_keyword.resolve_sizing_keyword(item.size_style.width, null, null);
             const item_available_width = if (resolved_keyword) |resolution| switch (resolution) {
                 .measure => |measure| measure,
-                .exact => |exact| available.AvailableSpace{ .definite = exact },
+                .exact => |exact| AvailableSpace{ .definite = exact },
             } else math.available_maybe_sub(available_space.width, item_x_margin_sum);
-            break :blk try tree_ref.measure_child_size(
+            break :blk try TreeApi.measure_child_size(tree_ref, 
                 item.node_id,
                 known_dimensions,
                 SIZE_NONE,
-                geometry.Size(available.AvailableSpace){ .width = item_available_width, .height = available_space.height },
+                geometry.Size(AvailableSpace){ .width = item_available_width, .height = available_space.height },
                 .inherent_size,
                 .horizontal,
-                .{ .start = true, .end = true },
-            );
+                .{ .start = true, .end = true });
         };
 
         const width_with_margins = math.f32_max(width, item.padding_border_sum.width) + item_x_margin_sum;
@@ -857,15 +877,14 @@ fn determine_content_based_container_width(
 const InFlowResult = struct {
     inflow_overflow_rect: geometry.Rect(f32),
     intrinsic_outer_height: f32,
-    first_child_top_margin_set: tree_layout.CollapsibleMarginSet,
-    last_child_bottom_margin_set: tree_layout.CollapsibleMarginSet,
+    first_child_top_margin_set: layout.CollapsibleMarginSet,
+    last_child_bottom_margin_set: layout.CollapsibleMarginSet,
     first_baseline: ?f32,
 };
 
 /// Compute each child's final size and position
-fn perform_final_layout_on_in_flow_children(
-    tree_ref: *tree.TaffyTree,
-    run_mode: tree_layout.RunMode,
+fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree,
+    run_mode: layout.RunMode,
     items: []BlockItem,
     container_outer_width: f32,
     container_percentage_resolution_height_in: ?f32,
@@ -877,13 +896,13 @@ fn perform_final_layout_on_in_flow_children(
     own_margins_collapse_with_children: geometry.Line(bool),
     is_scroll_container: bool,
     store_layouts: bool,
-    block_ctx: *BlockContext,
-) BlockError!InFlowResult {
+    block_ctx: *BlockContext) BlockError!InFlowResult {
+    const TreeApi = LayoutTree(Tree);
     // Resolve container_inner_width for sizing child nodes using initial content_box_inset
     const container_inner_width = @max(0.0, container_outer_width - resolved_content_box_inset.horizontal_axis_sum());
     const container_percentage_resolution_height = math.maybe_sub(container_percentage_resolution_height_in, resolved_content_box_inset.vertical_axis_sum());
     const parent_size = geometry.Size(?f32){ .width = container_inner_width, .height = container_percentage_resolution_height };
-    // Vertical available space in block flow is indefinite, NOT a min-content constraint:
+    // Vertical available_space space in block flow is indefinite, NOT a min-content constraint:
     // MaxContent is taffy's representation of "indefinite".
     const available_space = geometry.Size(@import("../style/available_space.zig").AvailableSpace){ .width = .{ .definite = container_inner_width }, .height = .max_content };
 
@@ -902,8 +921,8 @@ fn perform_final_layout_on_in_flow_children(
     var inflow_overflow_rect = RECT_ZERO;
     var committed_y_offset = resolved_content_box_inset.top;
     var y_offset_for_absolute = resolved_content_box_inset.top;
-    var first_child_top_margin_set = tree_layout.CollapsibleMarginSet.zero;
-    var active_collapsible_margin_set = tree_layout.CollapsibleMarginSet.zero;
+    var first_child_top_margin_set = layout.CollapsibleMarginSet.zero;
+    var active_collapsible_margin_set = layout.CollapsibleMarginSet.zero;
     var is_collapsing_with_first_margin_set = true;
     var first_baseline: ?f32 = null;
     // Whether the active margin set contains the margins of a self-collapsing element with
@@ -913,7 +932,7 @@ fn perform_final_layout_on_in_flow_children(
     var has_active_floats = block_ctx.has_active_floats(committed_y_offset);
 
     for (items) |*item| {
-        if (item.position == .absolute) {
+        if (item.position.is_out_of_flow()) {
             const x = switch (direction) {
                 .ltr => resolved_content_box_inset.left,
                 .rtl => container_outer_width - resolved_content_box_inset.right,
@@ -940,7 +959,7 @@ fn perform_final_layout_on_in_flow_children(
         if (style.float.float_direction(item.float)) |float_direction| {
             has_active_floats = true;
 
-            // A float with `width: auto` is shrink-to-fit (fit-content) sized: the available
+            // A float with `width: auto` is shrink-to-fit (fit-content) sized: the available_space
             // space clamped between its min-content and max-content sizes.
             const available_width = @max(0.0, container_inner_width - item_non_auto_x_margin_sum);
             var item_known_width: ?f32 = null;
@@ -963,9 +982,8 @@ fn perform_final_layout_on_in_flow_children(
             const item_known_height = resolve_stretch_height(
                 item.size_style.height,
                 container_percentage_resolution_height,
-                item_non_auto_margin.vertical_axis_sum(),
-            );
-            const item_layout = try tree_ref.perform_child_layout(
+                item_non_auto_margin.vertical_axis_sum());
+            var item_layout = try TreeApi.perform_child_layout(tree_ref, 
                 item.node_id,
                 geometry.Size(?f32){ .width = item_known_width, .height = item_known_height },
                 parent_size,
@@ -973,8 +991,9 @@ fn perform_final_layout_on_in_flow_children(
                 .inherent_size,
                 // A float establishes a new block formatting context: its margins do not
                 // collapse with the margins of its children
-                .{ .start = false, .end = false },
-            );
+                .{ .start = false, .end = false });
+            item.oof_candidates = item_layout.oof_candidates;
+            item_layout.oof_candidates = .empty;
             const margin_box = item_layout.size.add(item_non_auto_margin.sum_axes());
 
             // Floats that occur between collapsing margins are positioned as if they had an
@@ -991,15 +1010,14 @@ fn perform_final_layout_on_in_flow_children(
                 y_offset_for_float,
                 float_direction,
                 item.clear,
-                adjoins_unresolved_strut,
-            );
+                adjoins_unresolved_strut);
 
             // Convert the margin-box location returned by float placement into a border-box
             // location for the output Layout
             location.y += item_non_auto_margin.top;
             location.x += item_non_auto_margin.left;
 
-            item.final_layout = if (store_layouts) tree_layout.Layout{
+            item.final_layout = if (store_layouts) layout.Layout{
                 .order = item.order,
                 .size = item_layout.size,
                 .scrollable_overflow_rect = item_layout.scrollable_overflow_rect,
@@ -1024,8 +1042,7 @@ fn perform_final_layout_on_in_flow_children(
                     item_layout.scrollable_overflow_rect,
                     item.overflow,
                     item.contain,
-                    is_scroll_container,
-                ));
+                    is_scroll_container));
             }
 
             continue;
@@ -1097,7 +1114,7 @@ fn perform_final_layout_on_in_flow_children(
             SIZE_NONE
         else blk: {
             // Items with a sizing keyword width resolve their width either directly or by
-            // measuring the item under the corresponding available space constraint. `auto`
+            // measuring the item under the corresponding available_space space constraint. `auto`
             // (the common case) and an already-known width resolve without consulting the
             // sizing keywords.
             var keyword_width: ?f32 = null;
@@ -1105,15 +1122,14 @@ fn perform_final_layout_on_in_flow_children(
                 if (sizing_keyword.resolve_sizing_keyword(item.size_style.width, stretch_width, container_inner_width)) |resolution| {
                     keyword_width = switch (resolution) {
                         .exact => |width| width,
-                        .measure => |item_available_width| try tree_ref.measure_child_size(
+                        .measure => |item_available_width| try TreeApi.measure_child_size(tree_ref, 
                             item.node_id,
                             SIZE_NONE,
                             parent_size,
                             geometry.Size(@import("../style/available_space.zig").AvailableSpace){ .width = item_available_width, .height = .max_content },
                             .inherent_size,
                             .horizontal,
-                            .{ .start = true, .end = true },
-                        ),
+                            .{ .start = true, .end = true }),
                     };
                 }
             }
@@ -1122,21 +1138,19 @@ fn perform_final_layout_on_in_flow_children(
                 resolve_stretch_height(
                     item.size_style.height,
                     container_percentage_resolution_height,
-                    item_non_auto_margin.vertical_axis_sum(),
-                )
+                    item_non_auto_margin.vertical_axis_sum())
             else
                 null;
 
             const width = math.f32_maybe_clamp(
                 (item.size.width orelse keyword_width) orelse stretch_width,
                 item.min_size.width,
-                item.max_size.width,
-            );
+                item.max_size.width);
             const height = math.option_maybe_clamp(item.size.height orelse keyword_height, item.min_size.height, item.max_size.height);
             break :blk geometry.Size(?f32){ .width = width, .height = height };
         };
 
-        const child_inputs = tree_layout.LayoutInput{
+        const child_inputs = layout.LayoutInput{
             .run_mode = run_mode,
             .sizing_mode = .inherent_size,
             .axis = .both,
@@ -1150,12 +1164,12 @@ fn perform_final_layout_on_in_flow_children(
         const clear_threshold = block_ctx.cleared_threshold(item.clear);
         const clear_pos = clear_threshold orelse -std.math.inf(f32);
 
-        var item_layout: tree_layout.LayoutOutput = undefined;
+        var item_layout: layout.LayoutOutput = undefined;
         if (item.is_in_same_bfc) {
             // Childless children cannot interact with the block formatting context, so they
             // bypass the context-threading dispatch and go straight to the generic cached path.
             if (item.is_leaf) {
-                item_layout = try tree_ref.compute_child_layout(item.node_id, child_inputs);
+                item_layout = try TreeApi.compute_child_layout(tree_ref, item.node_id, child_inputs);
             } else {
                 // Replaced elements may not have a known width (they are sized by their
                 // measure function rather than stretch-sized)
@@ -1168,7 +1182,7 @@ fn perform_final_layout_on_in_flow_children(
 
                 // Compute child layout
                 var child_block_ctx = block_ctx.sub_context(@max(y_offset_for_absolute + item_non_auto_margin.top, clear_pos), insets);
-                const child_output = try compute_block_child_layout(tree_ref, item.node_id, child_inputs, &child_block_ctx);
+                const child_output = try compute_block_child_layout(Tree, tree_ref, item.node_id, child_inputs, &child_block_ctx);
 
                 // Extract float contribution from child block context
                 {
@@ -1183,14 +1197,19 @@ fn perform_final_layout_on_in_flow_children(
                 item_layout = child_output;
             }
         } else {
-            item_layout = try tree_ref.compute_child_layout(item.node_id, child_inputs);
+            item_layout = try TreeApi.compute_child_layout(tree_ref, item.node_id, child_inputs);
         }
+        // Out-of-flow candidates from this item's subtree bubble up to this container,
+        // with anchors relative to the item's border box until they are translated at
+        // merge time.
+        item.oof_candidates = item_layout.oof_candidates;
+        item_layout.oof_candidates = .empty;
         const final_size = item_layout.size;
 
         const top_margin_set = item_layout.top_margin.collapse_with_margin(item_margin.top orelse 0.0);
         const bottom_margin_set = item_layout.bottom_margin.collapse_with_margin(item_margin.bottom orelse 0.0);
 
-        // Expand auto margins to fill available space
+        // Expand auto margins to fill available_space space
         // Note: Vertical auto-margins for relatively positioned block items simply resolve to 0.
         // See: https://www.w3.org/TR/CSS21/visudet.html#abs-non-replaced-width
         const free_x_space = math.f32_max(0.0, stretch_width - final_size.width);
@@ -1209,9 +1228,11 @@ fn perform_final_layout_on_in_flow_children(
         };
 
         // Resolve item inset (the overwhelmingly common case is `inset: auto` on every
-        // side, which resolves to a zero offset)
+        // side, which resolves to a zero offset). Only `position: relative` applies an
+        // inset as a positional correction factor; out-of-flow items have their insets
+        // resolved against their containing block by the out-of-flow positioning pass.
         var inset_offset = geometry.Point(f32){ .x = 0, .y = 0 };
-        if (!isAutoInsetRect(item.inset)) {
+        if (item.position.applies_relative_inset() and !isAutoInsetRect(item.inset)) {
             const inset_percentage_basis = geometry.Size(?f32){ .width = container_inner_width, .height = container_percentage_resolution_height };
             const inset = geometry.Rect(?f32){
                 .left = resolveLengthPercentageAuto(item.inset.left, inset_percentage_basis.width),
@@ -1333,7 +1354,7 @@ fn perform_final_layout_on_in_flow_children(
 
         // Defer `set_unrounded_layout` to the post-loop pass in `compute_inner` so that
         // `align-content` can shift `location.y` before the layout is committed to the tree.
-        item.final_layout = if (store_layouts) tree_layout.Layout{
+        item.final_layout = if (store_layouts) layout.Layout{
             .order = item.order,
             .size = item_layout.size,
             .scrollable_overflow_rect = item_layout.scrollable_overflow_rect,
@@ -1358,8 +1379,7 @@ fn perform_final_layout_on_in_flow_children(
                 item_layout.scrollable_overflow_rect,
                 item.overflow,
                 item.contain,
-                is_scroll_container,
-            ));
+                is_scroll_container));
         }
 
         // Update first_child_top_margin_set
@@ -1412,7 +1432,7 @@ fn perform_final_layout_on_in_flow_children(
     // The margins of a self-collapsing element with clearance do not collapse with the bottom
     // margin of the parent block: they extend the parent's content height instead of escaping it
     const last_child_bottom_margin_set =
-        if (active_margin_set_has_clearance) tree_layout.CollapsibleMarginSet.zero else active_collapsible_margin_set;
+        if (active_margin_set_has_clearance) layout.CollapsibleMarginSet.zero else active_collapsible_margin_set;
     const bottom_y_margin_offset = if (active_margin_set_has_clearance)
         active_collapsible_margin_set.resolve()
     else if (own_margins_collapse_with_children.end)
@@ -1429,326 +1449,6 @@ fn perform_final_layout_on_in_flow_children(
         .last_child_bottom_margin_set = last_child_bottom_margin_set,
         .first_baseline = first_baseline,
     };
-}
-
-/// Perform absolute layout on all absolutely positioned children.
-fn perform_absolute_layout_on_absolute_children(
-    tree_ref: *tree.TaffyTree,
-    items: []const BlockItem,
-    area_size: geometry.Size(f32),
-    area_offset: geometry.Point(f32),
-    direction: style.Direction,
-    is_scroll_container: bool,
-) BlockError!geometry.Rect(f32) {
-    const area_width = area_size.width;
-    const area_height = area_size.height;
-
-    var absolute_overflow_rect = RECT_ZERO;
-
-    for (items) |item| {
-        if (item.position != .absolute) continue;
-        const child_style = &(tree_ref.node(item.node_id) orelse return error.InvalidChildNode).style;
-
-        // Skip items that are display:none or are not position:absolute
-        if (child_style.box_generation_mode() == .none or child_style.position != .absolute) continue;
-
-        const aspect_ratio = child_style.aspect_ratio;
-        const margin = resolveAutoRect(child_style.margin, area_width);
-        const padding = resolveOrZeroRect(child_style.padding, area_width);
-        const border = resolveOrZeroRect(child_style.border, area_width);
-        const padding_border_sum = padding.add(border).sum_axes();
-        const box_sizing_adjustment =
-            if (child_style.box_sizing == .content_box) padding_border_sum else geometry.Size(f32){ .width = 0, .height = 0 };
-
-        // Resolve inset
-        const left = resolveLengthPercentageAuto(child_style.inset.left, area_width);
-        const right = resolveLengthPercentageAuto(child_style.inset.right, area_width);
-        const top = resolveLengthPercentageAuto(child_style.inset.top, area_height);
-        const bottom = resolveLengthPercentageAuto(child_style.inset.bottom, area_height);
-
-        // Compute known dimensions from min/max/inherent size styles
-        const area_size_options = geometry.Size(?f32){ .width = area_size.width, .height = area_size.height };
-        const size_style = child_style.size;
-        const style_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveDimensionSize(size_style, area_size_options), aspect_ratio), box_sizing_adjustment);
-        var min_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(child_style.min_size, area_size_options), aspect_ratio), box_sizing_adjustment);
-        const max_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(child_style.max_size, area_size_options), aspect_ratio), box_sizing_adjustment);
-        min_size = geometry.Size(?f32){
-            .width = if (min_size.width) |value| @max(value, padding_border_sum.width) else padding_border_sum.width,
-            .height = if (min_size.height) |value| @max(value, padding_border_sum.height) else padding_border_sum.height,
-        };
-        var known_dimensions = math.optional_size_maybe_clamp(style_size, min_size, max_size);
-
-        // Resolve any sizing keywords in the size styles. An explicitly sized axis takes
-        // precedence over the inset-derived size below.
-        if (size_style.width.is_sizing_keyword() or size_style.height.is_sizing_keyword()) {
-            try resolveAbsoluteSizingKeywords(
-                tree_ref,
-                item.node_id,
-                &known_dimensions,
-                size_style,
-                area_size,
-                geometry.Rect(?f32){ .left = left, .right = right, .top = top, .bottom = bottom },
-                margin,
-                .content_size,
-            );
-            known_dimensions = math.optional_size_maybe_clamp(geometry.optional_f32_size_maybe_apply_aspect_ratio(known_dimensions, aspect_ratio), min_size, max_size);
-        }
-
-        // Fill in width from left/right and reapply aspect ratio if:
-        //   - Width is not already known
-        //   - Item has both left and right inset properties set
-        if (known_dimensions.width == null and left != null and right != null) {
-            const new_width_raw = f32MaybeSub(f32MaybeSub(area_width, margin.left), margin.right) - left.? - right.?;
-            known_dimensions.width = @max(new_width_raw, 0.0);
-            known_dimensions = math.optional_size_maybe_clamp(geometry.optional_f32_size_maybe_apply_aspect_ratio(known_dimensions, aspect_ratio), min_size, max_size);
-        }
-
-        // Fill in height from top/bottom and reapply aspect ratio if:
-        //   - Height is not already known
-        //   - Item has both top and bottom inset properties set
-        if (known_dimensions.height == null and top != null and bottom != null) {
-            const new_height_raw = f32MaybeSub(f32MaybeSub(area_height, margin.top), margin.bottom) - top.? - bottom.?;
-            known_dimensions.height = @max(new_height_raw, 0.0);
-            known_dimensions = math.optional_size_maybe_clamp(geometry.optional_f32_size_maybe_apply_aspect_ratio(known_dimensions, aspect_ratio), min_size, max_size);
-        }
-
-        var final_size: geometry.Size(f32) = undefined;
-        if (known_dimensions.width != null and known_dimensions.height != null) {
-            final_size = .{ .width = known_dimensions.width.?, .height = known_dimensions.height.? };
-        } else {
-            const measured_size = try tree_ref.measure_child_size_both(
-                item.node_id,
-                known_dimensions,
-                geometry.Size(?f32){ .width = area_size.width, .height = area_size.height },
-                geometry.Size(@import("../style/available_space.zig").AvailableSpace){
-                    .width = .{ .definite = math.f32_maybe_clamp(area_width, min_size.width, max_size.width) },
-                    .height = .{ .definite = math.f32_maybe_clamp(area_height, min_size.height, max_size.height) },
-                },
-                .content_size,
-                .{ .start = false, .end = false },
-            );
-            final_size = geometry.optional_size_unwrap_or(known_dimensions, measured_size);
-        }
-        final_size.width = math.f32_maybe_clamp(final_size.width, min_size.width, max_size.width);
-        final_size.height = math.f32_maybe_clamp(final_size.height, min_size.height, max_size.height);
-
-        const layout_output = try tree_ref.perform_child_layout(
-            item.node_id,
-            geometry.Size(?f32){ .width = final_size.width, .height = final_size.height },
-            geometry.Size(?f32){ .width = area_size.width, .height = area_size.height },
-            geometry.Size(@import("../style/available_space.zig").AvailableSpace){
-                .width = .{ .definite = math.f32_maybe_clamp(area_width, min_size.width, max_size.width) },
-                .height = .{ .definite = math.f32_maybe_clamp(area_height, min_size.height, max_size.height) },
-            },
-            .content_size,
-            .{ .start = false, .end = false },
-        );
-
-        const non_auto_margin = geometry.Rect(f32){
-            .left = if (left != null) (margin.left orelse 0.0) else 0.0,
-            .right = if (right != null) (margin.right orelse 0.0) else 0.0,
-            .top = if (top != null) (margin.top orelse 0.0) else 0.0,
-            .bottom = if (bottom != null) (margin.bottom orelse 0.0) else 0.0,
-        };
-
-        // Expand auto margins to fill available space
-        // https://www.w3.org/TR/CSS21/visudet.html#abs-non-replaced-width
-        const auto_margin = blk: {
-            // Auto margins for absolutely positioned elements in block containers only resolve
-            // if inset is set. Otherwise they resolve to 0.
-            const absolute_auto_margin_space = geometry.Point(f32){
-                .x = if (right) |right_value| area_size.width - right_value - (left orelse 0.0) else final_size.width,
-                .y = if (bottom) |bottom_value| area_size.height - bottom_value - (top orelse 0.0) else final_size.height,
-            };
-            const free_space = geometry.Size(f32){
-                .width = absolute_auto_margin_space.x - final_size.width - non_auto_margin.horizontal_axis_sum(),
-                .height = absolute_auto_margin_space.y - final_size.height - non_auto_margin.vertical_axis_sum(),
-            };
-
-            const auto_margin_size = geometry.Size(f32){
-                .width = blk2: {
-                    const auto_margin_count: u8 = @as(u8, if (margin.left == null) 1 else 0) + @as(u8, if (margin.right == null) 1 else 0);
-                    if (auto_margin_count == 2 and free_space.width <= 0.0) {
-                        break :blk2 0.0;
-                    } else if (auto_margin_count > 0) {
-                        break :blk2 free_space.width / @as(f32, @floatFromInt(auto_margin_count));
-                    }
-                    break :blk2 0.0;
-                },
-                .height = blk2: {
-                    const auto_margin_count: u8 = @as(u8, if (margin.top == null) 1 else 0) + @as(u8, if (margin.bottom == null) 1 else 0);
-                    if (auto_margin_count == 2 and free_space.height <= 0.0) {
-                        break :blk2 0.0;
-                    } else if (auto_margin_count > 0) {
-                        break :blk2 free_space.height / @as(f32, @floatFromInt(auto_margin_count));
-                    }
-                    break :blk2 0.0;
-                },
-            };
-
-            break :blk geometry.Rect(f32){
-                .left = if (margin.left != null) 0.0 else auto_margin_size.width,
-                .right = if (margin.right != null) 0.0 else auto_margin_size.width,
-                .top = if (margin.top != null) 0.0 else auto_margin_size.height,
-                .bottom = if (margin.bottom != null) 0.0 else auto_margin_size.height,
-            };
-        };
-
-        const resolved_margin = geometry.Rect(f32){
-            .left = margin.left orelse auto_margin.left,
-            .right = margin.right orelse auto_margin.right,
-            .top = margin.top orelse auto_margin.top,
-            .bottom = margin.bottom orelse auto_margin.bottom,
-        };
-
-        const x_offset: f32 = if (left != null and right != null) blk: {
-            if (direction.is_rtl()) {
-                break :blk area_size.width - final_size.width - right.? - resolved_margin.right;
-            }
-            break :blk left.? + resolved_margin.left;
-        } else if (left != null) blk: {
-            break :blk left.? + resolved_margin.left;
-        } else if (right != null) blk: {
-            break :blk area_size.width - final_size.width - right.? - resolved_margin.right;
-        } else blk: {
-            if (direction.is_rtl()) {
-                break :blk item.static_position.x - final_size.width - resolved_margin.right - area_offset.x;
-            }
-            break :blk item.static_position.x + resolved_margin.left - area_offset.x;
-        };
-
-        const y_option: ?f32 = if (top) |top_value|
-            top_value + resolved_margin.top
-        else if (bottom) |bottom_value|
-            area_size.height - final_size.height - bottom_value - resolved_margin.bottom
-        else
-            null;
-        const location = geometry.Point(f32){
-            .x = x_offset + area_offset.x,
-            .y = (if (y_option) |y| y + area_offset.y else null) orelse (item.static_position.y + resolved_margin.top),
-        };
-        // Note: axis intentionally switched here as scrollbars take up space in the opposite
-        // axis to the axis in which scrolling is enabled.
-        const scrollbar_size = geometry.Size(f32){
-            .width = if (item.overflow.y == .scroll) item.scrollbar_width else 0.0,
-            .height = if (item.overflow.x == .scroll) item.scrollbar_width else 0.0,
-        };
-
-        try tree_ref.set_unrounded_layout(item.node_id, tree_layout.Layout{
-            .order = item.order,
-            .size = final_size,
-            .scrollable_overflow_rect = layout_output.scrollable_overflow_rect,
-            .scrollbar_size = scrollbar_size,
-            .location = location,
-            .padding = padding,
-            .border = border,
-            .margin = resolved_margin,
-        });
-
-        {
-            // Location is measured from the scroll origin (the inline-start edge: right side in RTL)
-            const relative_location = if (direction.is_rtl())
-                geometry.Point(f32){
-                    .x = area_size.width - (location.x - area_offset.x) - final_size.width,
-                    .y = location.y - area_offset.y,
-                }
-            else
-                geometry.Point(f32){ .x = location.x - area_offset.x, .y = location.y - area_offset.y };
-            absolute_overflow_rect = absolute_overflow_rect.@"union"(scrollable_overflow.compute_scrollable_overflow_contribution(
-                relative_location,
-                final_size,
-                layout_output.scrollable_overflow_rect,
-                item.overflow,
-                item.contain,
-                is_scroll_container,
-            ));
-        }
-    }
-
-    return absolute_overflow_rect;
-}
-
-/// Resolve the sizing keywords on the size styles of an absolutely positioned item, filling in
-/// the corresponding `known_dimensions` axes. Mirrors the Rust
-/// `resolve_absolute_sizing_keywords`, including its measure calls.
-fn resolveAbsoluteSizingKeywords(
-    tree_ref: *tree.TaffyTree,
-    node: tree.NodeId,
-    known_dimensions: *geometry.Size(?f32),
-    size_style: geometry.Size(style.dimension.Dimension),
-    area_size: geometry.Size(f32),
-    inset: geometry.Rect(?f32),
-    margin: geometry.Rect(?f32),
-    sizing_mode: tree_layout.SizingMode,
-) BlockError!void {
-    const stretch_size = geometry.Size(f32){
-        .width = @max(
-            area_size.width - (inset.left orelse 0.0) - (inset.right orelse 0.0) - (margin.left orelse 0.0) - (margin.right orelse 0.0),
-            0.0,
-        ),
-        .height = @max(
-            area_size.height - (inset.top orelse 0.0) - (inset.bottom orelse 0.0) - (margin.top orelse 0.0) - (margin.bottom orelse 0.0),
-            0.0,
-        ),
-    };
-
-    const keyword_width = if (known_dimensions.width == null)
-        sizing_keyword.resolve_sizing_keyword(size_style.width, stretch_size.width, area_size.width)
-    else
-        null;
-    const keyword_height = if (known_dimensions.height == null)
-        sizing_keyword.resolve_sizing_keyword(size_style.height, stretch_size.height, area_size.height)
-    else
-        null;
-
-    const measure_width = asMeasureResolution(keyword_width);
-    const measure_height = asMeasureResolution(keyword_height);
-
-    // If both axes need to be measured then resolve them with a single measure call
-    if (measure_width != null and measure_height != null) {
-        const measured_size = try tree_ref.measure_child_size_both(
-            node,
-            SIZE_NONE,
-            geometry.Size(?f32){ .width = area_size.width, .height = area_size.height },
-            geometry.Size(@import("../style/available_space.zig").AvailableSpace){ .width = measure_width.?, .height = measure_height.? },
-            sizing_mode,
-            .{ .start = false, .end = false },
-        );
-        known_dimensions.* = geometry.Size(?f32){ .width = measured_size.width, .height = measured_size.height };
-        return;
-    }
-
-    if (keyword_width) |resolution| {
-        known_dimensions.width = switch (resolution) {
-            .exact => |width| width,
-            .measure => |available_width| try tree_ref.measure_child_size(
-                node,
-                known_dimensions.*,
-                geometry.Size(?f32){ .width = area_size.width, .height = area_size.height },
-                geometry.Size(@import("../style/available_space.zig").AvailableSpace){ .width = available_width, .height = .{ .definite = stretch_size.height } },
-                sizing_mode,
-                .horizontal,
-                .{ .start = false, .end = false },
-            ),
-        };
-    }
-    if (keyword_height) |resolution| {
-        known_dimensions.height = switch (resolution) {
-            .exact => |height| height,
-            .measure => |available_height| try tree_ref.measure_child_size(
-                node,
-                known_dimensions.*,
-                geometry.Size(?f32){ .width = area_size.width, .height = area_size.height },
-                geometry.Size(@import("../style/available_space.zig").AvailableSpace){
-                    .width = if (known_dimensions.width) |width| @import("../style/available_space.zig").AvailableSpace{ .definite = width } else .{ .definite = stretch_size.width },
-                    .height = available_height,
-                },
-                sizing_mode,
-                .vertical,
-                .{ .start = false, .end = false },
-            ),
-        };
-    }
 }
 
 fn asMeasureResolution(resolution: ?sizing_keyword.SizingKeywordResolution) ?@import("../style/available_space.zig").AvailableSpace {
@@ -1805,16 +1505,6 @@ fn resolveOrZeroRect(value: geometry.Rect(style.dimension.LengthPercentage), bas
         .right = resolveLengthPercentage(value.right, basis) orelse 0,
         .top = resolveLengthPercentage(value.top, basis) orelse 0,
         .bottom = resolveLengthPercentage(value.bottom, basis) orelse 0,
-    };
-}
-
-fn resolveOrZeroRectSize(value: geometry.Rect(style.dimension.LengthPercentage), basis: geometry.Size(?f32)) geometry.Rect(f32) {
-    if (isZeroLengthRect(value)) return RECT_ZERO;
-    return .{
-        .left = resolveLengthPercentage(value.left, basis.width) orelse 0,
-        .right = resolveLengthPercentage(value.right, basis.width) orelse 0,
-        .top = resolveLengthPercentage(value.top, basis.height) orelse 0,
-        .bottom = resolveLengthPercentage(value.bottom, basis.height) orelse 0,
     };
 }
 
@@ -1891,7 +1581,7 @@ fn f32MaybeSub(lhs: f32, rhs: ?f32) f32 {
 
 test "block flow collapses adjacent vertical margins" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const first = try tree_ref.new_leaf(.{
         .display = .block,
@@ -1903,7 +1593,7 @@ test "block flow collapses adjacent vertical margins" {
         .size = .{ .width = .length(20), .height = .length(10) },
         .margin = .{ .left = .zero(), .right = .zero(), .top = .length(10), .bottom = .zero() },
     });
-    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .auto } }, &[_]tree.NodeId{ first, second });
+    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .auto } }, &[_]NodeId{ first, second });
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .max_content });
     try testing.expectEqual(@as(f32, 0), (try tree_ref.layout_of(first)).location.y);
     try testing.expectEqual(@as(f32, 10), (try tree_ref.layout_of(first)).size.height);
@@ -1912,15 +1602,15 @@ test "block flow collapses adjacent vertical margins" {
 
 test "block parent and first child margins collapse" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const child = try tree_ref.new_leaf(.{
         .display = .block,
         .size = .{ .width = .length(20), .height = .length(10) },
         .margin = .{ .left = .zero(), .right = .zero(), .top = .length(15), .bottom = .zero() },
     });
-    const parent = try tree_ref.new_with_children(.{ .display = .block }, &[_]tree.NodeId{child});
-    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(100) } }, &[_]tree.NodeId{parent});
+    const parent = try tree_ref.new_with_children(.{ .display = .block }, &[_]NodeId{child});
+    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(100) } }, &[_]NodeId{parent});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
     // The child's top margin escapes the parent, so the parent's margin box is pushed down by
     // 15px while the child sits at y=0 inside the parent.
@@ -1931,11 +1621,11 @@ test "block parent and first child margins collapse" {
 
 test "block child layout receives resolved width for percentage descendants" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const grandchild = try tree_ref.new_leaf(.{ .display = .block, .size = .{ .width = .percent(1), .height = .length(10) } });
-    const child = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .percent(0.5), .height = .auto }, .margin = .{ .left = .zero(), .right = .zero(), .top = .zero(), .bottom = .zero() } }, &[_]tree.NodeId{grandchild});
-    const root = try tree_ref.new_with_children(.{ .display = .block }, &[_]tree.NodeId{child});
+    const child = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .percent(0.5), .height = .auto }, .margin = .{ .left = .zero(), .right = .zero(), .top = .zero(), .bottom = .zero() } }, &[_]NodeId{grandchild});
+    const root = try tree_ref.new_with_children(.{ .display = .block }, &[_]NodeId{child});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 80 }, .height = .{ .definite = 30 } });
     try testing.expectEqual(@as(f32, 40), (try tree_ref.layout_of(child)).size.width);
     try testing.expectEqual(@as(f32, 40), (try tree_ref.layout_of(grandchild)).size.width);
@@ -1943,10 +1633,10 @@ test "block child layout receives resolved width for percentage descendants" {
 
 test "block flow places floated children through the float context" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const floated = try tree_ref.new_leaf(.{ .display = .block, .float = .left, .size = .{ .width = .length(30), .height = .length(10) } });
-    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(40) } }, &[_]tree.NodeId{floated});
+    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(40) } }, &[_]NodeId{floated});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 40 } });
     const result = try tree_ref.layout_of(floated);
     try testing.expectEqual(@as(f32, 0), result.location.x);
@@ -1955,11 +1645,11 @@ test "block flow places floated children through the float context" {
 
 test "block in-flow content in the same bfc overlaps floats" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const floated = try tree_ref.new_leaf(.{ .display = .block, .float = .left, .size = .{ .width = .length(60), .height = .length(20) } });
     const content = try tree_ref.new_leaf(.{ .display = .block, .size = .{ .width = .auto, .height = .length(10) } });
-    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(40) } }, &[_]tree.NodeId{ floated, content });
+    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(40) } }, &[_]NodeId{ floated, content });
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 40 } });
     const result = try tree_ref.layout_of(content);
     // A block in the same formatting context straddles the float: its border box is
@@ -1970,11 +1660,11 @@ test "block in-flow content in the same bfc overlaps floats" {
 
 test "block bfc content avoids floats" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const floated = try tree_ref.new_leaf(.{ .display = .block, .float = .left, .size = .{ .width = .length(60), .height = .length(20) } });
-    const content = try tree_ref.new_with_children(.{ .display = .block, .overflow = .{ .x = .hidden, .y = .hidden }, .size = .{ .width = .auto, .height = .length(10) } }, &[_]tree.NodeId{});
-    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(40) } }, &[_]tree.NodeId{ floated, content });
+    const content = try tree_ref.new_with_children(.{ .display = .block, .overflow = .{ .x = .hidden, .y = .hidden }, .size = .{ .width = .auto, .height = .length(10) } }, &[_]NodeId{});
+    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(40) } }, &[_]NodeId{ floated, content });
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 40 } });
     const result = try tree_ref.layout_of(content);
     try testing.expectEqual(@as(f32, 60), result.location.x);
@@ -1983,21 +1673,21 @@ test "block bfc content avoids floats" {
 
 test "block floats honor horizontal content-box insets" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const floated = try tree_ref.new_leaf(.{ .display = .block, .float = .left, .size = .{ .width = .length(20), .height = .length(10) } });
-    const root = try tree_ref.new_with_children(.{ .display = .block, .padding = .{ .left = .length(10), .right = .zero(), .top = .zero(), .bottom = .zero() }, .size = .{ .width = .length(100), .height = .length(30) } }, &[_]tree.NodeId{floated});
+    const root = try tree_ref.new_with_children(.{ .display = .block, .padding = .{ .left = .length(10), .right = .zero(), .top = .zero(), .bottom = .zero() }, .size = .{ .width = .length(100), .height = .length(30) } }, &[_]NodeId{floated});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 30 } });
     try testing.expectEqual(@as(f32, 10), (try tree_ref.layout_of(floated)).location.x);
 }
 
 test "block establishes a new bfc for overflow scroll children" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const floated = try tree_ref.new_leaf(.{ .display = .block, .float = .left, .size = .{ .width = .length(40), .height = .length(40) } });
-    const scroller = try tree_ref.new_with_children(.{ .display = .block, .overflow = .{ .x = .scroll, .y = .scroll } }, &[_]tree.NodeId{floated});
-    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(100) } }, &[_]tree.NodeId{scroller});
+    const scroller = try tree_ref.new_with_children(.{ .display = .block, .overflow = .{ .x = .scroll, .y = .scroll } }, &[_]NodeId{floated});
+    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(100) } }, &[_]NodeId{scroller});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
     // The scroll container contains its float, giving it height 40 rather than 0.
     try testing.expectEqual(@as(f32, 40), (try tree_ref.layout_of(scroller)).size.height);
@@ -2005,14 +1695,14 @@ test "block establishes a new bfc for overflow scroll children" {
 
 test "block absolute child fills inset area" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const absolute = try tree_ref.new_leaf(.{
         .display = .block,
         .position = .absolute,
         .inset = .{ .left = .length(10), .right = .length(20), .top = .length(5), .bottom = .length(15) },
     });
-    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(100) } }, &[_]tree.NodeId{absolute});
+    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(100) } }, &[_]NodeId{absolute});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
     const result = try tree_ref.layout_of(absolute);
     try testing.expectEqual(@as(f32, 10), result.location.x);
@@ -2023,14 +1713,14 @@ test "block absolute child fills inset area" {
 
 test "block margins collapse through zero-height children" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const spacer = try tree_ref.new_leaf(.{
         .display = .block,
         .margin = .{ .left = .zero(), .right = .zero(), .top = .length(5), .bottom = .length(7) },
     });
     const sibling = try tree_ref.new_leaf(.{ .display = .block, .size = .{ .width = .length(10), .height = .length(10) } });
-    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .auto } }, &[_]tree.NodeId{ spacer, sibling });
+    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .auto } }, &[_]NodeId{ spacer, sibling });
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .max_content });
     // The spacer's top (5) and bottom (7) margins collapse into a single 7px strut that
     // pushes the following sibling down.
@@ -2041,18 +1731,18 @@ test "block margins collapse through zero-height children" {
 
 test "block clearance pushes cleared elements below floats" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const floated = try tree_ref.new_leaf(.{ .display = .block, .float = .left, .size = .{ .width = .length(40), .height = .length(30) } });
     const cleared = try tree_ref.new_leaf(.{ .display = .block, .clear = .left, .size = .{ .width = .length(10), .height = .length(10) } });
-    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(100) } }, &[_]tree.NodeId{ floated, cleared });
+    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(100) } }, &[_]NodeId{ floated, cleared });
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
     try testing.expectEqual(@as(f32, 30), (try tree_ref.layout_of(cleared)).location.y);
 }
 
 test "block absolute auto margins center the box" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const absolute = try tree_ref.new_leaf(.{
         .display = .block,
@@ -2061,18 +1751,18 @@ test "block absolute auto margins center the box" {
         .inset = .{ .left = .length(0), .right = .length(0), .top = .auto(), .bottom = .auto() },
         .margin = .{ .left = .auto(), .right = .auto(), .top = .zero(), .bottom = .zero() },
     });
-    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(100) } }, &[_]tree.NodeId{absolute});
+    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .length(100) } }, &[_]NodeId{absolute});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
     try testing.expectEqual(@as(f32, 40), (try tree_ref.layout_of(absolute)).location.x);
 }
 
 test "block skips display none children" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const hidden = try tree_ref.new_leaf(.{ .display = .none, .size = .{ .width = .length(50), .height = .length(50) } });
     const visible = try tree_ref.new_leaf(.{ .display = .block, .size = .{ .width = .length(10), .height = .length(10) } });
-    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .auto } }, &[_]tree.NodeId{ hidden, visible });
+    const root = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .length(100), .height = .auto } }, &[_]NodeId{ hidden, visible });
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
     const hidden_layout = try tree_ref.layout_of(hidden);
     try testing.expectEqual(@as(f32, 0), hidden_layout.size.width);

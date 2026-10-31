@@ -1,0 +1,114 @@
+{
+  "rust": [
+    {
+      "cached": 66101,
+      "root_dirty": 310376,
+      "one_child_dirty": 360291,
+      "resize": 367977
+    },
+    {
+      "cached": 66921,
+      "root_dirty": 313370,
+      "one_child_dirty": 355842,
+      "resize": 349296
+    },
+    {
+      "cached": 67514,
+      "root_dirty": 297838,
+      "one_child_dirty": 362080,
+      "resize": 381500
+    },
+    {
+      "cached": 65673,
+      "root_dirty": 300912,
+      "one_child_dirty": 344109,
+      "resize": 343653
+    },
+    {
+      "cached": 68524,
+      "root_dirty": 302682,
+      "one_child_dirty": 355806,
+      "resize": 349951
+    },
+    {
+      "cached": 67077,
+      "root_dirty": 324388,
+      "one_child_dirty": 368124,
+      "resize": 344723
+    },
+    {
+      "cached": 76722,
+      "root_dirty": 581803,
+      "one_child_dirty": 608822,
+      "resize": 343469
+    },
+    {
+      "cached": 79229,
+      "root_dirty": 306321,
+      "one_child_dirty": 353024,
+      "resize": 379598
+    },
+    {
+      "cached": 66084,
+      "root_dirty": 332657,
+      "one_child_dirty": 367097,
+      "resize": 349606
+    }
+  ],
+  "zig": [
+    {
+      "cached": 17727,
+      "root_dirty": 368849,
+      "one_child_dirty": 408185,
+      "resize": 406484
+    },
+    {
+      "cached": 17767,
+      "root_dirty": 366148,
+      "one_child_dirty": 392385,
+      "resize": 401645
+    },
+    {
+      "cached": 17272,
+      "root_dirty": 393519,
+      "one_child_dirty": 417159,
+      "resize": 402963
+    },
+    {
+      "cached": 19413,
+      "root_dirty": 385545,
+      "one_child_dirty": 414214,
+      "resize": 418517
+    },
+    {
+      "cached": 17382,
+      "root_dirty": 365027,
+      "one_child_dirty": 387558,
+      "resize": 392165
+    },
+    {
+      "cached": 17655,
+      "root_dirty": 370314,
+      "one_child_dirty": 393953,
+      "resize": 393006
+    },
+    {
+      "cached": 18719,
+      "root_dirty": 376070,
+      "one_child_dirty": 399034,
+      "resize": 402226
+    },
+    {
+      "cached": 17479,
+      "root_dirty": 376432,
+      "one_child_dirty": 398108,
+      "resize": 409719
+    },
+    {
+      "cached": 17700,
+      "root_dirty": 368882,
+      "one_child_dirty": 409922,
+      "resize": 407615
+    }
+  ]
+}

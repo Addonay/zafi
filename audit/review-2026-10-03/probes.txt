@@ -1,0 +1,18 @@
+sizes Style=512 NodeData=1256 Cache=464 Layout=100 NodeId=4
+duplicate_remove remaining=1 child_parent=null
+aliased_set_children error=InvalidChildNode count=0 child_parent=null
+invalid_replace error=InvalidChildNode count=0 child_parent=null
+invalid_new_with_children before=2 after=3
+clear_ids old=0 new=0 stale_valid=true
+self_cycle parent=0 child_count=1
+ancestor_cycle p_parent=1 c_parent=0
+clear_then_mutate root_height=10 child_height=10
+borrowed_style_mutation cached=10 dirty=80
+failed_page_append allocated=80384 freed=0 leaked=80384
+failed_add error=OutOfMemory count=0 child_parent=1
+churn live=0 slots=1000 pages=16
+rounding parent_x=0 child_x=0 combined_x=0 expected_cumulative=1
+persistent_grid_name first_byte=dd expected=68 name_len=12
+flow_root width=10 block_width=100
+grid_to_flex stale_grid_detail=true
+hidden_to_visible initially_dirty=false parent_height=30 child_height=30

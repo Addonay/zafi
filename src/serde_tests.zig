@@ -9,13 +9,13 @@ const std = @import("std");
 const serde = @import("serde");
 const json = serde.json;
 
-const Style = @import("style/mod.zig").Style;
-const Display = @import("style/mod.zig").Display;
-const Position = @import("style/mod.zig").Position;
-const BoxSizing = @import("style/mod.zig").BoxSizing;
-const Direction = @import("style/mod.zig").Direction;
-const Overflow = @import("style/mod.zig").Overflow;
-const Contain = @import("style/mod.zig").Contain;
+const Style = @import("style/root.zig").Style;
+const Display = @import("style/root.zig").Display;
+const Position = @import("style/root.zig").Position;
+const BoxSizing = @import("style/root.zig").BoxSizing;
+const Direction = @import("style/root.zig").Direction;
+const Overflow = @import("style/root.zig").Overflow;
+const Contain = @import("style/root.zig").Contain;
 const dimension = @import("style/dimension.zig");
 const Dimension = dimension.Dimension;
 const LengthPercentage = dimension.LengthPercentage;
@@ -84,13 +84,14 @@ test "style default serialization matches Taffy field shape" {
     const serialized = try toJson(allocator, Style{});
     defer allocator.free(serialized);
 
-    // Spot-check the Taffy field set, order and values captured from Rust.
+    // Spot-check the Taffy field set, order and values captured from Rust at the
+    // revision named in tools/pin.env.
     try testing.expect(std.mem.startsWith(u8, serialized, "{\"dummy\":null,\"display\":\"Flex\","));
     try testing.expect(std.mem.indexOf(u8, serialized, "\"box_sizing\":\"BorderBox\"") != null);
     try testing.expect(std.mem.indexOf(u8, serialized, "\"direction\":\"Ltr\"") != null);
     try testing.expect(std.mem.indexOf(u8, serialized, "\"overflow\":{\"x\":\"Visible\",\"y\":\"Visible\"}") != null);
     try testing.expect(std.mem.indexOf(u8, serialized, "\"contain\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, serialized, "\"position\":\"Relative\"") != null);
+    try testing.expect(std.mem.indexOf(u8, serialized, "\"position\":\"Static\"") != null);
     try testing.expect(std.mem.indexOf(u8, serialized, "\"size\":{\"width\":12884901888,\"height\":12884901888}") != null);
     try testing.expect(std.mem.indexOf(u8, serialized, "\"margin\":{\"left\":4294967296,") != null);
     try testing.expect(std.mem.indexOf(u8, serialized, "\"aspect_ratio\":null") != null);
@@ -177,13 +178,16 @@ test "style deserializes Taffy's Rust-generated wire format" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Captured from the pinned Rust crate (`serde_json::to_string`) with the
-    // same style as the round-trip test below.
+    // Captured from the tracked Rust crate (`serde_json::to_string`) with the
+    // same style as the round-trip test below, at the revision named in
+    // tools/pin.env. `position` serializes as `Static` there because that is
+    // upstream's default; regenerate if the pin moves.
     const rust_json =
-        \\{"dummy":null,"display":"Flex","item_is_table":false,"item_is_replaced":false,"box_sizing":"BorderBox","direction":"Ltr","overflow":{"x":"Visible","y":"Visible"},"scrollbar_width":0.0,"contain":0,"float":"None","clear":"None","position":"Relative","inset":{"left":12884901888,"right":12884901888,"top":12884901888,"bottom":12884901888},"size":{"width":9646899200,"height":5390204928},"min_size":{"width":12884901888,"height":12884901888},"max_size":{"width":12884901888,"height":12884901888},"aspect_ratio":2.0,"margin":{"left":12884901888,"right":5383389184,"top":4294967296,"bottom":4294967296},"padding":{"left":5375000576,"right":4294967296,"top":4294967296,"bottom":4294967296},"border":{"left":4294967296,"right":4294967296,"top":4294967296,"bottom":4294967296},"align_items":null,"align_self":null,"justify_items":null,"justify_self":null,"align_content":null,"justify_content":null,"gap":{"width":9638510592,"height":4294967296},"text_align":"Auto","flex_direction":"Row","flex_wrap":"NoWrap","flex_line_count":1,"flex_basis":12884901888,"flex_grow":0.0,"flex_shrink":1.0,"grid_template_rows":[],"grid_template_columns":[],"grid_auto_rows":[],"grid_auto_columns":[],"grid_auto_flow":"Row","grid_template_areas":null,"grid_template_column_names":[],"grid_template_row_names":[],"grid_row":{"start":"Auto","end":"Auto"},"grid_column":{"start":"Auto","end":"Auto"}}
+        \\{"dummy":null,"display":"Flex","item_is_table":false,"item_is_replaced":false,"box_sizing":"BorderBox","direction":"Ltr","overflow":{"x":"Visible","y":"Visible"},"scrollbar_width":0.0,"contain":0,"float":"None","clear":"None","position":"Static","inset":{"left":12884901888,"right":12884901888,"top":12884901888,"bottom":12884901888},"size":{"width":9646899200,"height":5390204928},"min_size":{"width":12884901888,"height":12884901888},"max_size":{"width":12884901888,"height":12884901888},"aspect_ratio":2.0,"margin":{"left":12884901888,"right":5383389184,"top":4294967296,"bottom":4294967296},"padding":{"left":5375000576,"right":4294967296,"top":4294967296,"bottom":4294967296},"border":{"left":4294967296,"right":4294967296,"top":4294967296,"bottom":4294967296},"align_items":null,"align_self":null,"justify_items":null,"justify_self":null,"align_content":null,"justify_content":null,"gap":{"width":9638510592,"height":4294967296},"text_align":"Auto","flex_direction":"Row","flex_wrap":"NoWrap","flex_line_count":1,"flex_basis":12884901888,"flex_grow":0.0,"flex_shrink":1.0,"grid_template_rows":[],"grid_template_columns":[],"grid_auto_rows":[],"grid_auto_columns":[],"grid_auto_flow":"Row","grid_template_areas":null,"grid_template_column_names":[],"grid_template_row_names":[],"grid_row":{"start":"Auto","end":"Auto"},"grid_column":{"start":"Auto","end":"Auto"}}
     ;
     const parsed = try json.fromSlice(Style, allocator, rust_json);
     try testing.expectEqual(Display.flex, parsed.display);
+    try testing.expectEqual(Position.static, parsed.position);
     try testing.expectEqual(dimension.Dimension.percent(0.5).value.value(), parsed.size.width.value.value());
     try testing.expectEqual(@as(f32, 12.5), parsed.size.height.value.value());
     try testing.expect(parsed.margin.left.is_auto());
@@ -191,6 +195,32 @@ test "style deserializes Taffy's Rust-generated wire format" {
     try testing.expectEqual(@as(f32, 3.5), parsed.padding.left.value.value());
     try testing.expectEqual(@as(f32, 0.25), parsed.gap.width.value.value());
     try testing.expectEqual(@as(?f32, 2.0), parsed.aspect_ratio);
+}
+
+test "every Position variant uses Taffy's wire name and round-trips" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Captured from the tracked Rust crate: serde renames each variant to its
+    // PascalCase spelling, and all five round-trip.
+    const cases = [_]struct { value: Position, wire: []const u8 }{
+        .{ .value = .static, .wire = "\"Static\"" },
+        .{ .value = .relative, .wire = "\"Relative\"" },
+        .{ .value = .absolute, .wire = "\"Absolute\"" },
+        .{ .value = .fixed, .wire = "\"Fixed\"" },
+        .{ .value = .sticky, .wire = "\"Sticky\"" },
+    };
+    for (cases) |case| {
+        const serialized = try toJson(allocator, case.value);
+        try testing.expectEqualStrings(case.wire, serialized);
+        const parsed = try json.fromSlice(Position, allocator, serialized);
+        try testing.expectEqual(case.value, parsed);
+    }
+
+    // An unknown variant is rejected rather than silently defaulting.
+    try testing.expectError(error.UnexpectedToken, json.fromSlice(Position, allocator, "\"Stickyy\""));
 }
 
 test "alignment wire names and rejection match Taffy" {

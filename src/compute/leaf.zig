@@ -2,15 +2,15 @@
 //!
 //! Direct port of Taffy's `src/compute/leaf.rs`. Keep the order of operations
 //! visible: resolve edge values, select sizing mode, reserve scroll gutters,
-//! build available-space constraints, invoke the measure callback, then clamp
+//! build available_space-space constraints, invoke the measure callback, then clamp
 //! and apply aspect ratio. Do not move style resolution into the caller: the
 //! same leaf function is used by flex, grid, block and absolute layout.
 
 const std = @import("std");
 const geometry = @import("../geometry.zig");
-const style = @import("../style/mod.zig");
-const available = @import("../style/available_space.zig");
-const tree_layout = @import("../tree/layout.zig");
+const style = @import("../style/root.zig");
+const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
+const layout = @import("../tree/layout.zig");
 const math = @import("../util/math.zig");
 
 /// Rust's measure closure `FnOnce(Size<Option<f32>>, Size<AvailableSpace>) -> Size<f32>`
@@ -18,7 +18,7 @@ const math = @import("../util/math.zig");
 pub const SizeMeasureFunc = *const fn (
     context: ?*anyopaque,
     known_dimensions: geometry.Size(?f32),
-    available_space: geometry.Size(available.AvailableSpace),
+    available_space: geometry.Size(AvailableSpace),
 ) geometry.Size(f32);
 
 const F32Size = geometry.Size(f32);
@@ -26,11 +26,11 @@ const OptionalSize = geometry.Size(?f32);
 
 /// Compute a leaf's output from a Taffy-style input and a size callback.
 pub fn compute_leaf_layout(
-    inputs: tree_layout.LayoutInput,
+    inputs: layout.LayoutInput,
     node_style: *const style.Style,
     context: ?*anyopaque,
     measure_function: ?SizeMeasureFunc,
-) tree_layout.LayoutOutput {
+) layout.LayoutOutput {
     const known_dimensions = inputs.known_dimensions;
     const parent_size = inputs.parent_size;
 
@@ -78,7 +78,7 @@ pub fn compute_leaf_layout(
     const has_styles_preventing_being_collapsed_through = !node_style.is_block() or
         node_style.overflow.x.is_scroll_container() or
         node_style.overflow.y.is_scroll_container() or
-        node_style.position == .absolute or
+        node_style.position.is_out_of_flow() or
         node_style.contain.establishes_independent_formatting_context() or
         padding.top > 0 or
         padding.bottom > 0 or
@@ -95,14 +95,14 @@ pub fn compute_leaf_layout(
                     math.optional_size_maybe_clamp(.{ .width = width, .height = height }, node_min_size, node_max_size),
                     .{ .width = pb_sum.width, .height = pb_sum.height },
                 );
-                return tree_layout.LayoutOutput.from_sizes(.{ .width = size.width.?, .height = size.height.? });
+                return layout.LayoutOutput.from_sizes(.{ .width = size.width.?, .height = size.height.? });
             }
         }
     }
 
     const content_inset_sum = F32Size{ .width = content_box_inset.horizontal_axis_sum(), .height = content_box_inset.vertical_axis_sum() };
     const margin_sum = F32Size{ .width = margin.horizontal_axis_sum(), .height = margin.vertical_axis_sum() };
-    const available_space = geometry.Size(available.AvailableSpace){
+    const available_space = geometry.Size(AvailableSpace){
         .width = availableForAxis(known_dimensions.width, node_size.width, inputs.available_space.width, node_min_size.width, node_max_size.width, margin_sum.width, content_inset_sum.width),
         .height = availableForAxis(known_dimensions.height, node_size.height, inputs.available_space.height, node_min_size.height, node_max_size.height, margin_sum.height, content_inset_sum.height),
     };
@@ -145,15 +145,15 @@ pub fn compute_leaf_layout(
     };
 }
 
-fn availableForAxis(known: ?f32, styled: ?f32, space: available.AvailableSpace, minimum: ?f32, maximum: ?f32, margin_sum: f32, inset_sum: f32) available.AvailableSpace {
-    var result: available.AvailableSpace = if (known) |value| .{ .definite = value } else space;
+fn availableForAxis(known: ?f32, styled: ?f32, space: AvailableSpace, minimum: ?f32, maximum: ?f32, margin_sum: f32, inset_sum: f32) AvailableSpace {
+    var result: AvailableSpace = if (known) |value| .{ .definite = value } else space;
     result = math.available_maybe_sub(result, margin_sum);
     if (known) |value| result = .{ .definite = value };
     if (styled) |value| result = .{ .definite = value };
     return mapDefinite(result, minimum, maximum, inset_sum);
 }
 
-fn mapDefinite(space: available.AvailableSpace, minimum: ?f32, maximum: ?f32, inset_sum: f32) available.AvailableSpace {
+fn mapDefinite(space: AvailableSpace, minimum: ?f32, maximum: ?f32, inset_sum: f32) AvailableSpace {
     return switch (space) {
         .definite => |value| .{ .definite = math.f32_maybe_clamp(value, minimum, maximum) - inset_sum },
         .min_content => .min_content,
@@ -213,7 +213,7 @@ fn addRect(a: geometry.Rect(f32), b: geometry.Rect(f32)) geometry.Rect(f32) {
 
 test "leaf sizing resolves known and measured axes" {
     const testing = std.testing;
-    const input = tree_layout.LayoutInput{
+    const input = layout.LayoutInput{
         .run_mode = .perform_layout,
         .sizing_mode = .inherent_size,
         .axis = .both,
@@ -231,7 +231,7 @@ test "leaf sizing resolves known and measured axes" {
 
 test "leaf min overrides max and respects padding floor" {
     const testing = std.testing;
-    const input = tree_layout.LayoutInput{
+    const input = layout.LayoutInput{
         .run_mode = .perform_layout,
         .sizing_mode = .inherent_size,
         .axis = .both,
@@ -252,7 +252,7 @@ test "leaf min overrides max and respects padding floor" {
 
 test "zero-height block leaves expose collapsible margins" {
     const testing = std.testing;
-    const input = tree_layout.LayoutInput{
+    const input = layout.LayoutInput{
         .run_mode = .perform_layout,
         .sizing_mode = .inherent_size,
         .axis = .both,

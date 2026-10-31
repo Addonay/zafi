@@ -1,7 +1,7 @@
 //! Direct port of Taffy's `compute/common/scrollable_overflow.rs`.
 
 const geometry = @import("../../geometry.zig");
-const style = @import("../../style/mod.zig");
+const style = @import("../../style/root.zig");
 
 /// Determine the rectangle a node contributes to its parent's scrollable
 /// overflow. `location` is measured from the parent's scroll origin. A

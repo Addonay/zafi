@@ -1,0 +1,1 @@
+fn main() { println!("Style={} Cache={} Layout={} NodeId={}", std::mem::size_of::<taffy::Style>(),std::mem::size_of::<taffy::Cache>(),std::mem::size_of::<taffy::Layout>(),std::mem::size_of::<taffy::NodeId>()); }

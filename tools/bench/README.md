@@ -20,10 +20,11 @@ tree at the end of each call; Zig resets a layout arena), after a warm-up call.
 ```sh
 zig build bench                              # Zig only (defaults to ReleaseFast)
 zig build bench-rust                         # Rust mirror only (LTO build)
+zig build bench-allocs                       # allocation census per layout pass
 zig build bench-compare                      # ratio table, both harnesses
 zig build bench-compare -- --filter grid     # one scenario
-zig build bench-compare -- --repeat 3 --out audit/bench_compare.txt
-zig build bench-compare -- --strict          # non-zero if the port is slower
+zig build bench-compare -- --repeat 5        # best-of-5 per side (default is 3)
+zig build bench-compare -- --strict          # non-zero on any regression or exclusion
 zig build bench-cpu                          # CPU-time mode (wall-clock immune)
 zig build bench-cpu -- --repeat 5 --cpu 2    # best-of-5 CPU-time ratio table
 ```
@@ -31,9 +32,18 @@ zig build bench-cpu -- --repeat 5 --cpu 2    # best-of-5 CPU-time ratio table
 The Zig binary is built by the build system and its path is passed to the
 comparison script, so `bench-compare` never nests a `zig build` invocation.
 `--bench-optimize=debug|safe|fast|small` overrides the default `fast` for the
-Zig side; the Rust side always uses its `release` profile
-(`opt-level = 3`, `lto = true`, `codegen-units = 1`) so Taffy is measured at
-its best.
+Zig side; the Rust side always uses its `release` profile (`opt-level = 3`,
+`lto = true`, `codegen-units = 1`) so Taffy is measured at its best.
+
+> **The library module is built at `bench-optimize`, not at the global
+> `-Doptimize`.** This is deliberate and load-bearing. `build.zig` creates a
+> separate module for the benchmark harness because reusing the default one
+> compiles the layout code at the global optimization level, which defaults to
+> `Debug` — the port would then be timed with safety checks and no
+> optimization while Taffy ran optimized. That mistake invalidated every
+> comparison before it was found; the symptom was `zig build bench` reporting
+> ~2.58 ms for `grid_50x50` where a direct `ReleaseFast` build of the same source
+> reported ~1.95 ms.
 
 ## Output format
 
@@ -51,102 +61,101 @@ bench|<scenario>|<iters>|<ns_per_iter>|<bytes>
 Use it for order-of-magnitude comparisons; the timing columns are the primary
 signal.
 
-## Baselines
+## Why the scripts are defensive
 
-### Round 2 (2026-09-12, current)
+Both harnesses are independent programs with independently maintained scenario
+lists, so a silent drift between them yields a table that looks authoritative
+while comparing different work.
 
-Two independent methods were used because the host (shared 4-CPU) is heavily
-loaded, and wall-clock single runs can vary by 2×:
+- `compare.py` reports a scenario present on only one side as `MISSING` and
+  excludes it from the mean, flags mismatched iteration counts, and rejects
+  non-positive or non-finite timings instead of computing an infinite ratio that
+  poisons the geometric mean. It has a dead zone around parity, so "faster" is
+  not claimed for a difference inside the noise band (`--tolerance`, default 5%).
+- `cpu_compare.py` subtracts a measured **process baseline** (a child run with a
+  filter matching no scenario). Without this, a child's `user+sys` total is
+  dominated by process startup for the fast scenarios: `block_nested_50` has
+  ~0.7 ms of real layout work behind ~1.9 ms of process init, and previously
+  reported 0.95× here while wall-clock measured the same scenario at 1.64×. A
+  scenario whose signal is under `MIN_SIGNAL` times its own baseline is reported
+  as `noise` and excluded rather than contributing a meaningless ratio.
 
-- **CPU time** (`zig build bench-cpu -- --repeat 3 --cpu 2`): each scenario runs
-  as its own child process; the ratio uses the child's `user+sys` time from
-  `getrusage(RUSAGE_CHILDREN)`. Immune to descheduling.
-- **Interleaved wall clock** (`zig build bench-compare -- --repeat 21 --cpu 2`):
-  Rust and Zig alternate, best-of-21 per side. Agrees closely with CPU time.
+## Round 3 (2026-10-03, Taffy pinned at `22f941e`)
 
-| Scenario | Taffy | Port | Wall ratio | CPU ratio | Note |
-|---|---:|---:|---:|---:|---|
-| tree_creation_10k | 11.53 ms | 7.19 ms | **0.62×** | **0.48×** | paged store + in-place leaf append |
-| flex_row_1000 | 555 µs | 607 µs | 1.09× | **0.92×** | near parity |
-| flex_wrap_500 | 197 µs | 226 µs | 1.15× | **0.89×** | near parity |
-| grid_50x50 | 4.62 ms | 3.94 ms | **0.85×** | 1.19× | roughly parity under load |
-| block_nested_50 | 7.7 µs | 4.4 µs | **0.57×** | **0.68×** | was 1.96× before round 2 |
-| mixed_flex_grid_block | 929 µs | 1.00 ms | 1.08× | 1.21× | was 1.49× before round 2 |
-| **geometric mean** | | | **0.862×** | **0.856×** | port is faster overall |
+Measured with `zig build bench-compare -- --repeat 5`. Ratios are
+`port_ns / taffy_ns`; below 1.0 means the port is faster. Absolute nanoseconds
+vary with host load, so treat the ratios as the result and the absolute columns
+as context.
 
-The dominant round-2 win is the block chain: Taffy's `Cache::clear` returns
-`AlreadyEmpty` and `mark_dirty` stops at the first already-dirty ancestor, which
-the port now mirrors (plus an in-place `NodeStore.appendLeaf` and small-child
-`BufferFirstAllocator`). See `report.md` §2.4 for the technique list.
-
-### Round 1 (2026-09-12, before round 2; kept for reference)
-
-`audit/bench_compare_round1.txt` — best of 15 runs per side, pinned to one CPU
-(`zig build bench-compare -- --repeat 15 --cpu 2`). The host is shared and
-noisy, so best-of-N is the meaningful statistic; single runs can vary by 2×.
-
-| Scenario | Taffy | Port | Ratio | Note |
+| Scenario | taffy ns | port ns | Wall ratio | Verdict |
 |---|---:|---:|---:|---|
-| tree_creation_10k | 6.74 ms | 1.79 ms | **0.26×** | paged node store + packed style |
-| flex_row_1000 | 672 µs | 537 µs | **0.80×** | faster |
-| flex_wrap_500 | 241 µs | 235 µs | **0.98×** | parity |
-| grid_50x50 | 2.12 ms | 2.06 ms | **0.97×** | parity |
-| block_nested_50 | 7.6 µs | 15.0 µs | **1.96×** | remaining outlier |
-| mixed_flex_grid_block | 641 µs | 953 µs | **1.49×** | block-heavy grid children |
-| **geometric mean** | | | **0.915×** | port is faster overall |
+| `tree_creation_10k` | 3,217,844 | 1,856,458 | **0.58×** | faster |
+| `flex_wrap_500` | 327,189 | 284,451 | **0.87×** | faster |
+| `flex_row_1000` | 629,355 | 578,215 | **0.92×** | faster |
+| `mixed_flex_grid_block` | 835,284 | 945,351 | 1.13× | slower |
+| `grid_50x50` | 1,501,336 | 1,900,861 | 1.27× | slower |
+| `block_nested_50` | 11,402 | 18,270 | 1.60× | slower |
+| **geometric mean** | | | **1.009×** | |
 
-Memory proxies (Rust peak live vs Zig arena capacity): tree creation
-21.2 MB → 15.8 MB, flex row 1.60 MB → 2.04 MB, grid 6.73 MB → 7.97 MB.
+Repeat runs land within about ±0.02 of these ratios; the ordering of the
+scenarios is stable across runs, the third decimal place is not.
 
-Round-1 optimizations (all behavior-gated by the 6,084 fixtures and the
-differential oracle):
+CPU-time mode over the five scenarios with signal above the process baseline
+reports a geometric mean of **0.90×** — the port is ahead on CPU time
+overall, and `grid_50x50` is at parity there (1.04×) while remaining 1.27× on
+wall clock. That gap is the signature of a memory-bound path rather than extra
+compute: `grid_50x50` is CPU-parity but loses wall-clock time, consistent with
+moving 312-byte `GridItem` records around.
 
-1. **Paged node store** (`NodeStore`, 64 nodes/page): O(1) insertion with no
-   doubling memcpy of ~1.5 KB nodes; tree creation and memory use dropped 4×.
-2. **Compact measure-cache entries**: measurement cache stores `Size<f32>`
-   only, matching Taffy (`Cache` 976 B → ~420 B).
-3. **Allocation-free occupancy paint**: grid `TrackIntervals.paint` merges
-   in place instead of rebuilding a scratch list on every mark.
-4. **No sorts in grid placement**: items carry `source_order`; the baseline
-   row scan is O(n) instead of two full sorts of 424-byte structs.
-5. **Style pointer passing**: hot grid/block/flex helpers take
-   `*const Style` instead of copying ~500-byte values per child/container.
-6. **Packed `CompactLength`**: 16 B tagged union → 8 B packed u64
-   (`Style` 712 → 512 B, `GridItem` 424 → 280 B); serde wire format
-   unchanged.
+### What changed in round 3
 
-Round-2 optimizations:
+1. **Interface forwarders marked `inline`.** The compute algorithms are generic
+   over `LayoutTree`, and each call went through a non-inlined wrapper
+   (`LayoutTree(Tree).get_style` was a real symbol in the ReleaseFast binary).
+   Marking the 22 trivial forwarders `inline` was worth 10–25% across every
+   scenario.
+2. **Grid item sorts reduced to a key array.** `GridItem` is 312 bytes, so both
+   `std.mem.sort` (WikiSort: a `[512]T` cache plus an 8-element sorting network)
+   and `std.mem.sortUnstable` (pdqsort) spend their time moving whole items;
+   pdqsort measured *worse*. Items are now reduced to one order-preserving
+   `u64` key plus an index, the 12-byte entries are sorted with the original
+   comparator order preserved via the index tiebreak (so the result is
+   identical to a stable sort, matching upstream's `sort_by_key`), and the items
+   are permuted once through a scratch buffer. Worth 19% on
+   `mixed_flex_grid_block`. Permuting by cycling through the entries instead of
+   using a buffer was tried and is markedly slower.
+3. **Harness optimization level fixed** (see the note above).
 
-7. **Dirty-propagation early-out**: `Cache` carries Taffy's `is_empty` flag;
-   `clear` reports `already_empty` and `mark_dirty` stops at the first dirty
-   ancestor. This alone removed ~10 µs of per-build cache clearing and closed
-   the block-chain gap (1.96× → 0.57×).
-8. **In-place leaf construction**: `NodeStore.appendLeaf` writes a new node
-   directly into its page slot instead of building and copying a ~1.2 KB
-   temporary.
-9. **Borrowed styles**: `TaffyTree.style_ptr`; per-child `style_of` copies
-   removed from flex item generation, hidden-child passes and grid in-flow
-   collection.
-10. **Hidden-children fast path**: flex tracks whether any child is
-    `display: none` during item generation and skips the full 512-byte-per-child
-    hidden post-pass when there is none.
-11. **Per-tree scratch arena**: layout-pass temporaries (flex lines/items, grid
-    placement/tracks/occupancy, balance buffers) come from
-    `TaffyTree.scratchAllocator()`, reset at each top-level compute with
-    capacity retained; re-entrant child computes keep the outer epoch alive.
-12. **Small-list stack buffer**: block item lists use
-    `std.heap.BufferFirstAllocator` and only spill to the tree allocator for
-    large child lists; flex item lists reserve capacity once.
+Round 3 also **removed** an earlier claim: round 2 reported the port at
+0.862× geometric mean. That number was measured with the library compiled at
+`Debug`, so it was not a like-for-like comparison and should be disregarded.
 
-Profiling notes (temporary instrumentation, since removed): for the mixed
-scenario the port now performs exactly Taffy's work volume — 2,319 child
-layout calls, 800 block layouts, 4 grid layouts, 1 flex layout per iteration —
-and does *fewer* measure calls (1,709 vs 2,110). Remaining wall gaps in
-flex/grid/mixed are small per-call overheads rather than extra work.
+### Known trade-off
 
-Remaining targets (from `audit/research-algorithms.md` and
-`audit/research-performance.md`): measure-result fingerprinting plus a larger
-sparse measure store, a consumer-supplied `calc()` resolver, field-level dirty
-tracking, parallel subtree layout, and batch SIMD helpers (measured to be a
-0–5% end-to-end opportunity, so it follows the structural items).
+The key-array sort allocates `n * sizeof(GridItem)` of scratch per
+`track_sizing_algorithm` call, and the layout arena does not reclaim on free.
+This raises `mixed_flex_grid_block`'s arena from 1.2 MB to 3.7 MB. Peak memory
+across the suite is unchanged (`grid_50x50` at 11.1 MB dominates either way), and
+the CPU-time/wall-clock disagreement above is unrelated to it.
 
+## Earlier rounds
+
+Rounds 1 and 2 (2026-09-12) are kept in `report.md` §2.4 together with the
+optimization list they produced. Their absolute numbers were taken on a
+less-loaded host and their ratios were computed with the `Debug` library
+described above, so they are recorded as history rather than as results.
+
+## Remaining targets
+
+From `audit/research-algorithms.md` and `audit/research-performance.md`:
+measure-result fingerprinting plus a larger sparse measure store, a
+consumer-supplied `calc()` resolver, field-level dirty tracking, parallel subtree
+layout, and batch SIMD helpers.
+
+The two measured gaps and where they point:
+
+- `grid_50x50` is CPU-parity but 1.27× on wall clock. The next thing to try is
+  shrinking what a sort or a list append moves, not removing work.
+- `block_nested_50` allocates **zero** scratch bytes, so its 1.63× is pure
+  compute in a 52-deep chain. It is also the smallest scenario (~18 µs), so it
+  is the noisiest; treat it as a direction, not a precise figure.

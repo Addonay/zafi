@@ -7,8 +7,8 @@
 
 const std = @import("std");
 const geometry = @import("../geometry.zig");
-const style = @import("../style/mod.zig");
-const available = @import("../style/available_space.zig");
+const style = @import("../style/root.zig");
+const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
 
 /// Tolerance used when checking whether a box fits in a horizontal space, to absorb `f32`
 /// rounding errors (e.g. percentage widths and margins that sum to exactly 100% may otherwise
@@ -42,7 +42,7 @@ pub const BfcSlot = struct {
     x: f32 = 0,
     /// The y position of the start of the slot
     y: f32 = 0,
-    /// The space available for the box's border box: the space between float edges
+    /// The space available_space for the box's border box: the space between float edges
     /// and the margin-inset containing block edges. The box fits in the slot if its
     /// border box width does not exceed this.
     border_width: f32 = 0,
@@ -166,7 +166,7 @@ const FloatFitter = struct {
 /// A context for placing floated boxes
 pub const FloatContext = struct {
     allocator: std.mem.Allocator = std.heap.page_allocator,
-    /// The available space constraint that applies to the root Block Formatting Context
+    /// The available_space space constraint that applies to the root Block Formatting Context
     /// for which this `FloatContext` manages floats.
     available_width: f32 = 0,
     /// Whether the float context contains any floats
@@ -176,7 +176,7 @@ pub const FloatContext = struct {
     /// A list of right-floated boxes within the context
     right_boxes: std.ArrayList(PlacedFloatedBox) = .empty,
     /// A list of non-overlapping horizontal "segments" within the context.
-    /// Each segment has the same available width for it's entire height.
+    /// Each segment has the same available_space width for it's entire height.
     segments: std.ArrayList(Segment) = .empty,
     /// A closed-open range indicating which segment the last placed float
     /// was placed (on each side).
@@ -676,8 +676,8 @@ pub const FloatContext = struct {
 
 /// Context for computing the intrinsic width contribution of a set of floats
 pub const FloatIntrinsicWidthCalculator = struct {
-    /// The available width of the container
-    available_width: available.AvailableSpace,
+    /// The available_space width of the container
+    available_width: AvailableSpace,
     /// The running sums of the widths of adjacent uncleared floats on each side (left, right)
     side_sums: [2]f32 = .{ 0, 0 },
     /// The running total intrinsic width contribution
@@ -686,16 +686,16 @@ pub const FloatIntrinsicWidthCalculator = struct {
     widest: f32 = 0,
 
     /// Create a new `FloatIntrinsicWidthCalculator`
-    pub fn new(available_width: available.AvailableSpace) FloatIntrinsicWidthCalculator {
+    pub fn new(available_width: AvailableSpace) FloatIntrinsicWidthCalculator {
         return .{ .available_width = available_width };
     }
 
     /// Add a float to the computation
     pub fn add_float(self: *FloatIntrinsicWidthCalculator, width: f32, direction: style.float.FloatDirection, clear: style.float.Clear) void {
         switch (self.available_width) {
-            // Definite available width means the container is being fit-content sized
+            // Definite available_space width means the container is being fit-content sized
             // (e.g. it is itself a float being shrink-to-fit sized). The floats' max-content
-            // contribution (widths summed) is clamped by the available width in `result`.
+            // contribution (widths summed) is clamped by the available_space width in `result`.
             .definite, .max_content => {
                 // A float that clears a side is placed below the floats on that side, so its
                 // width does not accumulate with theirs.
@@ -712,7 +712,7 @@ pub const FloatIntrinsicWidthCalculator = struct {
     /// Get the computed float contribution to intrinsic width
     pub fn result(self: *const FloatIntrinsicWidthCalculator) f32 {
         return switch (self.available_width) {
-            // Fit-content sizing: clamp the max-content contribution between the available
+            // Fit-content sizing: clamp the max-content contribution between the available_space
             // width and the min-content contribution (floats narrow by wrapping onto new
             // bands, but never below the widest single float).
             .definite => |available_width| @max(@min(self.contribution, available_width), self.widest),

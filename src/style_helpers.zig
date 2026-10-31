@@ -4,17 +4,6 @@ const dimension = @import("style/dimension.zig");
 const grid = @import("style/grid.zig");
 const std = @import("std");
 
-pub const TaffyZero = struct {};
-pub const TaffyAuto = struct {};
-pub const TaffyFitContent = struct {};
-pub const TaffyMinContent = struct {};
-pub const TaffyMaxContent = struct {};
-pub const TaffyGridLine = struct {};
-pub const TaffyGridSpan = struct {};
-pub const FromLength = struct {};
-pub const FromPercent = struct {};
-pub const FromFr = struct {};
-
 pub fn length(value: f32) dimension.Dimension {
     return dimension.Dimension.length(value);
 }

@@ -61,8 +61,8 @@ pub const GridTrack = struct {
     }
 
     pub fn flex_factor(self: GridTrack) f32 {
-        const compact = @import("../../../style/compact_length.zig");
-        return if (self.is_flexible()) compact.numericValue(self.max_track_sizing_function.value) else 0;
+        const compact_length = @import("../../../style/compact_length.zig");
+        return if (self.is_flexible()) compact_length.numericValue(self.max_track_sizing_function.value) else 0;
     }
 };
 

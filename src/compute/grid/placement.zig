@@ -5,17 +5,20 @@
 
 const std = @import("std");
 const geometry = @import("../../geometry.zig");
-const style_mod = @import("../../style/mod.zig");
-const grid_style = @import("../../style/grid.zig");
-const taffy_tree = @import("../../tree/taffy_tree.zig");
+const style = @import("../../style/root.zig");
+const grid = @import("../../style/grid.zig");
+const NodeId = @import("../../tree/node.zig").NodeId;
+const LayoutTree = @import("../../tree/interfaces.zig").LayoutTree;
+const tree = @import("../../tree/tree.zig");
 const coordinates = @import("types/coordinates.zig");
 const cell_occupancy = @import("types/cell_occupancy.zig");
-const grid_item_mod = @import("types/grid_item.zig");
+const grid_item = @import("types/grid_item.zig");
 const named = @import("types/named.zig");
 
 const OriginZeroLine = coordinates.OriginZeroLine;
-const GridItem = grid_item_mod.GridItem;
-const GridPlacement = grid_style.GridPlacement;
+const GridItem = grid_item.GridItem;
+const InFlowChild = grid_item.InFlowChild;
+const GridPlacement = grid.GridPlacement;
 const CellOccupancyState = cell_occupancy.CellOccupancyState;
 const CellOccupancyMatrix = cell_occupancy.CellOccupancyMatrix;
 const NamedLineResolver = named.NamedLineResolver;
@@ -48,23 +51,27 @@ fn placement_get(placement: AxisPlacement, axis: geometry.AbsoluteAxis) geometry
 
 /// `Line<OriginZeroGridPlacement>::is_definite` — definite if either edge is a line.
 fn placement_definite(placement: geometry.Line(GridPlacement)) bool {
-    return grid_style.origin_zero_line_is_definite(placement);
+    return grid.origin_zero_line_is_definite(placement);
 }
 
 /// 8.5. Grid Item Placement Algorithm
 /// Place items into the grid, generating new rows/column into the implicit grid as required.
 pub fn place_grid_items(
+    comptime Tree: type,
     allocator: std.mem.Allocator,
     cell_occupancy_matrix: *CellOccupancyMatrix,
     items: *std.ArrayList(GridItem),
-    child_ids: []const taffy_tree.NodeId,
-    tree: *const taffy_tree.TaffyTree,
-    grid_auto_flow: grid_style.GridAutoFlow,
-    align_items: style_mod.alignment.AlignItems,
-    justify_items: style_mod.alignment.AlignItems,
+    /// In-flow children paired with their index in the container's *full* child list,
+    /// so `GridItem.source_order` is the document child index.
+    in_flow_children: []const InFlowChild,
+    tree_ref: *Tree,
+    grid_auto_flow: grid.GridAutoFlow,
+    align_items: style.alignment.AlignItems,
+    justify_items: style.alignment.AlignItems,
     named_line_resolver: *const NamedLineResolver,
 ) !void {
-    const primary_axis = grid_style.primary_axis(grid_auto_flow);
+    const TreeApi = LayoutTree(Tree);
+    const primary_axis = grid.primary_axis(grid_auto_flow);
     const secondary_axis = primary_axis.other_axis();
     const explicit_col_count = cell_occupancy_matrix.track_counts(.horizontal).explicit;
     const explicit_row_count = cell_occupancy_matrix.track_counts(.vertical).explicit;
@@ -73,27 +80,24 @@ pub fn place_grid_items(
     // placement passes below are pure with respect to occupancy, and the
     // literal port re-resolved (a map lookup plus a ~700-byte style copy) per
     // child per pass. Node pointers are stable in the paged node store.
-    const child_count = child_ids.len;
+    const child_count = in_flow_children.len;
     // Every child produces exactly one grid item; reserving once avoids the
     // ArrayList doubling copies of the 424-byte GridItem struct.
     try items.ensureTotalCapacity(allocator, child_count);
     const placements = try allocator.alloc(AxisPlacement, child_count);
     defer allocator.free(placements);
-    const styles = try allocator.alloc(?*const style_mod.Style, child_count);
+    const styles = try allocator.alloc(*const style.Style, child_count);
     defer allocator.free(styles);
-    for (child_ids, 0..) |child_id, child_index| {
-        const node_data = tree.node_const(child_id) orelse {
-            styles[child_index] = null;
-            placements[child_index] = .{ .horizontal = .{ .start = .auto, .end = .auto }, .vertical = .{ .start = .auto, .end = .auto } };
-            continue;
-        };
-        styles[child_index] = &node_data.style;
-        placements[child_index] = resolve_child_placement(named_line_resolver, &node_data.style, explicit_col_count, explicit_row_count);
+    for (in_flow_children, 0..) |entry, child_index| {
+        const child_id = entry.node;
+        const node_style = TreeApi.get_style(tree_ref, child_id);
+        styles[child_index] = node_style;
+        placements[child_index] = resolve_child_placement(named_line_resolver, node_style, explicit_col_count, explicit_row_count);
     }
 
     // 1. Place children with definite positions
-    for (child_ids, 0..) |child_id, child_index| {
-        const child_style = styles[child_index] orelse continue;
+    for (in_flow_children, 0..) |entry, child_index| {
+        const child_style = styles[child_index];
         const placement = placements[child_index];
         if (!placement_definite(placement.horizontal) or !placement_definite(placement.vertical)) continue;
         const spans = place_definite_grid_item(placement, primary_axis);
@@ -101,8 +105,8 @@ pub fn place_grid_items(
             cell_occupancy_matrix,
             items,
             allocator,
-            child_id,
-            @intCast(child_index),
+            entry.node,
+            entry.source_order,
             child_style,
             align_items,
             justify_items,
@@ -114,8 +118,8 @@ pub fn place_grid_items(
     }
 
     // 2. Place remaining children with definite secondary axis positions
-    for (child_ids, 0..) |child_id, child_index| {
-        const child_style = styles[child_index] orelse continue;
+    for (in_flow_children, 0..) |entry, child_index| {
+        const child_style = styles[child_index];
         const placement = placements[child_index];
         if (!placement_definite(placement_get(placement, secondary_axis)) or placement_definite(placement_get(placement, primary_axis))) continue;
         const spans = place_definite_secondary_axis_item(cell_occupancy_matrix, placement, grid_auto_flow);
@@ -123,8 +127,8 @@ pub fn place_grid_items(
             cell_occupancy_matrix,
             items,
             allocator,
-            child_id,
-            @intCast(child_index),
+            entry.node,
+            entry.source_order,
             child_style,
             align_items,
             justify_items,
@@ -143,8 +147,8 @@ pub fn place_grid_items(
     const secondary_axis_grid_start_line = cell_occupancy_matrix.track_counts(secondary_axis).implicit_start_line();
     const grid_start_position = .{ primary_axis_grid_start_line, secondary_axis_grid_start_line };
     var grid_position = grid_start_position;
-    for (child_ids, 0..) |child_id, child_index| {
-        const child_style = styles[child_index] orelse continue;
+    for (in_flow_children, 0..) |entry, child_index| {
+        const child_style = styles[child_index];
         const placement = placements[child_index];
         if (placement_definite(placement_get(placement, secondary_axis))) continue;
         const spans = place_indefinitely_positioned_item(cell_occupancy_matrix, placement, grid_auto_flow, grid_position);
@@ -152,8 +156,8 @@ pub fn place_grid_items(
             cell_occupancy_matrix,
             items,
             allocator,
-            child_id,
-            @intCast(child_index),
+            entry.node,
+            entry.source_order,
             child_style,
             align_items,
             justify_items,
@@ -166,7 +170,7 @@ pub fn place_grid_items(
         // If using the "dense" placement algorithm then reset the grid position back to
         // grid_start_position ready for the next item; otherwise set it to the position
         // of the current item so that the next item is placed after it.
-        grid_position = if (grid_style.is_dense(grid_auto_flow))
+        grid_position = if (grid.is_dense(grid_auto_flow))
             grid_start_position
         else
             .{ spans.primary.end, spans.secondary.start };
@@ -175,7 +179,7 @@ pub fn place_grid_items(
 
 fn resolve_child_placement(
     named_line_resolver: *const NamedLineResolver,
-    child_style: *const style_mod.Style,
+    child_style: *const style.Style,
     explicit_col_count: u16,
     explicit_row_count: u16,
 ) AxisPlacement {
@@ -183,12 +187,12 @@ fn resolve_child_placement(
     const resolved_v = named_line_resolver.resolve_row_names(child_style.grid_row);
     return .{
         .horizontal = .{
-            .start = grid_style.into_origin_zero_placement(resolved_h.start, explicit_col_count),
-            .end = grid_style.into_origin_zero_placement(resolved_h.end, explicit_col_count),
+            .start = grid.into_origin_zero_placement(resolved_h.start, explicit_col_count),
+            .end = grid.into_origin_zero_placement(resolved_h.end, explicit_col_count),
         },
         .vertical = .{
-            .start = grid_style.into_origin_zero_placement(resolved_v.start, explicit_row_count),
-            .end = grid_style.into_origin_zero_placement(resolved_v.end, explicit_row_count),
+            .start = grid.into_origin_zero_placement(resolved_v.start, explicit_row_count),
+            .end = grid.into_origin_zero_placement(resolved_v.end, explicit_row_count),
         },
     };
 }
@@ -200,8 +204,8 @@ const GridItemSpans = struct {
 
 /// Place a single definitely placed item into the grid
 fn place_definite_grid_item(placement: AxisPlacement, primary_axis: geometry.AbsoluteAxis) GridItemSpans {
-    const primary_span = grid_style.origin_zero_line_resolve_definite_grid_lines(placement_get(placement, primary_axis));
-    const secondary_span = grid_style.origin_zero_line_resolve_definite_grid_lines(placement_get(placement, primary_axis.other_axis()));
+    const primary_span = grid.origin_zero_line_resolve_definite_grid_lines(placement_get(placement, primary_axis));
+    const secondary_span = grid.origin_zero_line_resolve_definite_grid_lines(placement_get(placement, primary_axis.other_axis()));
     return .{
         .primary = .{ .start = .{ .value = primary_span.start }, .end = .{ .value = primary_span.end } },
         .secondary = .{ .start = .{ .value = secondary_span.start }, .end = .{ .value = secondary_span.end } },
@@ -209,21 +213,21 @@ fn place_definite_grid_item(placement: AxisPlacement, primary_axis: geometry.Abs
 }
 
 /// Step 2. Place remaining children with definite secondary axis positions
-fn place_definite_secondary_axis_item(matrix: *const CellOccupancyMatrix, placement: AxisPlacement, auto_flow: grid_style.GridAutoFlow) GridItemSpans {
-    const primary_axis = grid_style.primary_axis(auto_flow);
+fn place_definite_secondary_axis_item(matrix: *const CellOccupancyMatrix, placement: AxisPlacement, auto_flow: grid.GridAutoFlow) GridItemSpans {
+    const primary_axis = grid.primary_axis(auto_flow);
     const secondary_axis = primary_axis.other_axis();
     const primary_axis_grid_start_line = matrix.track_counts(primary_axis).implicit_start_line();
 
-    const secondary_axis_lines = grid_style.origin_zero_line_resolve_definite_grid_lines(placement_get(placement, secondary_axis));
+    const secondary_axis_lines = grid.origin_zero_line_resolve_definite_grid_lines(placement_get(placement, secondary_axis));
     const secondary_axis_placement = geometry.Line(OriginZeroLine){
         .start = .{ .value = secondary_axis_lines.start },
         .end = .{ .value = secondary_axis_lines.end },
     };
-    const starting_position = if (grid_style.is_dense(auto_flow))
+    const starting_position = if (grid.is_dense(auto_flow))
         primary_axis_grid_start_line
     else
         matrix.last_of_type(primary_axis, secondary_axis_placement.start, .auto_placed) orelse primary_axis_grid_start_line;
-    const primary_axis_span = grid_style.origin_zero_line_indefinite_span(placement_get(placement, primary_axis));
+    const primary_axis_span = grid.origin_zero_line_indefinite_span(placement_get(placement, primary_axis));
 
     var position = starting_position;
     while (true) {
@@ -241,16 +245,16 @@ fn place_definite_secondary_axis_item(matrix: *const CellOccupancyMatrix, placem
 fn place_indefinitely_positioned_item(
     matrix: *const CellOccupancyMatrix,
     placement: AxisPlacement,
-    auto_flow: grid_style.GridAutoFlow,
+    auto_flow: grid.GridAutoFlow,
     grid_position: struct { OriginZeroLine, OriginZeroLine },
 ) GridItemSpans {
-    const primary_axis = grid_style.primary_axis(auto_flow);
+    const primary_axis = grid.primary_axis(auto_flow);
     const secondary_axis = primary_axis.other_axis();
 
     const primary_placement_style = placement_get(placement, primary_axis);
     const secondary_placement_style = placement_get(placement, secondary_axis);
 
-    const secondary_span_count = grid_style.origin_zero_line_indefinite_span(secondary_placement_style);
+    const secondary_span_count = grid.origin_zero_line_indefinite_span(secondary_placement_style);
     const has_definite_primary_axis_position = placement_definite(primary_placement_style);
     const primary_axis_grid_start_line = matrix.track_counts(primary_axis).implicit_start_line();
     const primary_axis_grid_end_line = matrix.track_counts(primary_axis).implicit_end_line();
@@ -260,14 +264,14 @@ fn place_indefinitely_positioned_item(
     var secondary_idx = grid_position[1];
 
     if (has_definite_primary_axis_position) {
-        const primary_axis_lines = grid_style.origin_zero_line_resolve_definite_grid_lines(primary_placement_style);
+        const primary_axis_lines = grid.origin_zero_line_resolve_definite_grid_lines(primary_placement_style);
         const primary_span = geometry.Line(OriginZeroLine){
             .start = .{ .value = primary_axis_lines.start },
             .end = .{ .value = primary_axis_lines.end },
         };
 
         // Compute secondary axis starting position for search
-        secondary_idx = if (grid_style.is_dense(auto_flow))
+        secondary_idx = if (grid.is_dense(auto_flow))
             secondary_axis_grid_start_line
         else if (primary_span.start.value < primary_idx.value)
             advance_position(secondary_idx)
@@ -289,7 +293,7 @@ fn place_indefinitely_positioned_item(
             return .{ .primary = primary_span, .secondary = secondary_span };
         }
     } else {
-        const primary_span_count = grid_style.origin_zero_line_indefinite_span(primary_placement_style);
+        const primary_span_count = grid.origin_zero_line_indefinite_span(primary_placement_style);
 
         // Whether the item spans every track in the primary axis. Such an item can only be
         // placed at the primary axis grid start, in a stripe of entirely unoccupied tracks.
@@ -350,11 +354,11 @@ fn record_grid_placement(
     matrix: *CellOccupancyMatrix,
     items: *std.ArrayList(GridItem),
     allocator: std.mem.Allocator,
-    node: taffy_tree.NodeId,
+    node: NodeId,
     source_order: u16,
-    item_style: *const style_mod.Style,
-    parent_align_items: style_mod.alignment.AlignItems,
-    parent_justify_items: style_mod.alignment.AlignItems,
+    item_style: *const style.Style,
+    parent_align_items: style.alignment.AlignItems,
+    parent_justify_items: style.alignment.AlignItems,
     primary_axis: geometry.AbsoluteAxis,
     primary_span_unclamped: geometry.Line(OriginZeroLine),
     secondary_span_unclamped: geometry.Line(OriginZeroLine),
@@ -384,37 +388,38 @@ fn record_grid_placement(
 
 test "placement algorithm handles definite and auto placement" {
     const testing = @import("std").testing;
-    var tree = taffy_tree.TaffyTree.init(testing.allocator);
-    defer tree.deinit();
+    var grid_tree = tree.Tree.init(testing.allocator);
+    defer grid_tree.deinit();
 
-    const columns = [_]grid_style.GridTemplateComponent{
-        .{ .single = grid_style.TrackSizingFunction.from_length(40) },
-        .{ .single = grid_style.TrackSizingFunction.from_length(40) },
+    const columns = [_]grid.GridTemplateComponent{
+        .{ .single = grid.TrackSizingFunction.from_length(40) },
+        .{ .single = grid.TrackSizingFunction.from_length(40) },
     };
-    const rows = [_]grid_style.GridTemplateComponent{
-        .{ .single = grid_style.TrackSizingFunction.from_length(40) },
-        .{ .single = grid_style.TrackSizingFunction.from_length(40) },
+    const rows = [_]grid.GridTemplateComponent{
+        .{ .single = grid.TrackSizingFunction.from_length(40) },
+        .{ .single = grid.TrackSizingFunction.from_length(40) },
     };
-    const root = try tree.new_leaf(.{ .display = .grid, .grid_template_columns = &columns, .grid_template_rows = &rows });
-    const a = try tree.new_leaf(.{ .size = .{ .width = .length(10), .height = .length(10) } });
-    const b = try tree.new_leaf(.{ .size = .{ .width = .length(10), .height = .length(10) }, .grid_column = .{ .start = .{ .line = 2 }, .end = .auto } });
-    const c = try tree.new_leaf(.{ .size = .{ .width = .length(10), .height = .length(10) } });
+    const root = try grid_tree.new_leaf(.{ .display = .grid, .grid_template_columns = &columns, .grid_template_rows = &rows });
+    const a = try grid_tree.new_leaf(.{ .size = .{ .width = .length(10), .height = .length(10) } });
+    const b = try grid_tree.new_leaf(.{ .size = .{ .width = .length(10), .height = .length(10) }, .grid_column = .{ .start = .{ .line = 2 }, .end = .auto } });
+    const c = try grid_tree.new_leaf(.{ .size = .{ .width = .length(10), .height = .length(10) } });
     _ = root;
-    const child_ids = [_]taffy_tree.NodeId{ a, b, c };
+    const child_ids = [_]NodeId{ a, b, c };
+    const in_flow = [_]InFlowChild{ .{ .node = a, .source_order = 0 }, .{ .node = b, .source_order = 1 }, .{ .node = c, .source_order = 2 } };
 
-    const estimate = @import("implicit_grid.zig").compute_grid_size_estimate(2, 2, &child_ids, &tree);
+    const estimate = @import("implicit_grid.zig").compute_grid_size_estimate(tree.Tree, 2, 2, &child_ids, &grid_tree);
     var matrix = CellOccupancyMatrix.with_track_counts_using_allocator(testing.allocator, estimate.columns, estimate.rows);
     defer matrix.deinit();
     var items = std.ArrayList(GridItem).empty;
     defer items.deinit(testing.allocator);
 
-    const resolver_style = style_mod.Style{ .display = .grid, .grid_template_columns = &columns, .grid_template_rows = &rows };
+    const resolver_style = style.Style{ .display = .grid, .grid_template_columns = &columns, .grid_template_rows = &rows };
     var resolver = try NamedLineResolver.init(testing.allocator, &resolver_style, 0, 0);
     defer resolver.deinit();
     resolver.set_explicit_column_count(2);
     resolver.set_explicit_row_count(2);
 
-    try place_grid_items(testing.allocator, &matrix, &items, &child_ids, &tree, .row, .stretch, .stretch, &resolver);
+    try place_grid_items(tree.Tree, testing.allocator, &matrix, &items, &in_flow, &grid_tree, .row, .stretch, .stretch, &resolver);
     try testing.expectEqual(@as(usize, 3), items.items.len);
     // Item 1 is definite in column 2, so items are placed: a (0,0), b (1,0), c (0,1)
     try testing.expectEqual(@as(i16, 0), items.items[0].column.start.value);

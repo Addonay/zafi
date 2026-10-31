@@ -1,0 +1,11 @@
+fixtures: 6192 total, 6114 passed, 78 failed
+  block          966/1000  passed
+  blockflex       44/48    passed
+  blockgrid       56/56    passed
+  contain         32/32    passed
+  flex          2668/2696  passed
+  float           92/92    passed
+  grid          2172/2184  passed
+  gridflex        28/28    passed
+  leaf            56/56    passed
+failure details: audit/review-2026-10-03/fixture-current-failures.txt

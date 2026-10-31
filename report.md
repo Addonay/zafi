@@ -1,29 +1,41 @@
 # zlay — Taffy feature-parity report
 
-**Status: behavioral parity achieved.** The port passes every executable
-Taffy 0.14 verification layer that does not require Rust-only machinery:
+**Status: behavioral parity achieved** against the tracked Taffy revision, on
+its full generated fixture corpus.
 
 | Gate | Result |
 |---|---|
-| Taffy generated XML fixtures (`tests/xml/**`) | **6,084 / 6,084** |
+| Taffy generated XML fixtures, current pin | **6,192 / 6,192** |
 | Including scroll extents and resolved grid track lists | yes |
-| Zig package unit tests (`zig build test`) | **87 / 87** (97 / 97 with `-Dserde=true`) |
+| Taffy generated XML fixtures, older baseline pin | **6,076 / 6,084** — the 8 are fixtures whose expectations upstream deliberately changed (`align_baseline_child_margin_percent`, `rounding_fractial_input_6/7`); the port matches the *new* expectations |
+| Zig package unit tests (`zig build test`) | **92 / 92** (103 / 103 with `-Dserde=true`) |
+| Host-genericity differential test | a second independent `LayoutTree` implementor yields identical layouts |
 | Differential oracle vs real Taffy (`zig build parity`) | **36 / 36 nodes** |
-| Tree/measure/cache probes vs real Taffy | all compared values equal |
 | Taffy `serde` wire format | validated against Rust-generated JSON |
+| Matched benchmarks | geomean **1.01×** wall / **0.90×** CPU (±0.02 run to run) — see `tools/bench/README.md` |
 
-Remaining differences are **API-shape and Rust-ecosystem features**, not
-layout behavior: the custom-tree trait API, pluggable calc resolvers,
-generational node IDs, `print_tree` formatting and Rust-only tooling (serde
-JSON is implemented; see §5 and §6.4). They are listed with severity in §6.
+Remaining differences are **API-shape and Rust-ecosystem features**, not layout
+behavior: a pluggable `calc()` resolver (§6.2, the one real functional gap),
+`print_tree` formatting, and Rust-only tooling. The custom-tree API is no longer
+a gap — it is delivered and tested (§6.1).
 
 - **Port:** `src/` — extracted byte-for-byte from ZUI's `zui/src/layout`
   at extraction time, then advanced to parity in place.
-- **Reference:** Taffy `1b918bafcab101dd234ebeb27da0443e24fd9de2`
-  (`v0.14.0-7-g1b918ba`, 2026-09-03), checked out in
-  `.ports/zlay/.references/taffy`.
-- **Toolchain:** Zig `0.17.0-dev.2122+3e15e99e6`; Rust `1.98.1` for the oracle.
-- **Dates:** extraction/audit 2026-09-11; parity campaign 2026-09-12.
+- **Reference:** Taffy `22f941e19e05d1b29621703b4f3a9d96d7839886`
+  (upstream `main`, 2026-10-03), checked out in `.references/taffy`. The older
+  `1b918ba` revision is retained as a baseline fixture corpus; `tools/pin.env`
+  records both.
+- **Toolchain:** Zig `0.17.0` floor; Rust `1.98.1` for the oracle.
+- **Dates:** extraction/audit 2026-09-11; parity campaign 2026-09-12; genericization,
+  host-genericity and benchmark-methodology work 2026-10-03.
+
+> **Correction to the 2026-09-12 figures.** The benchmark numbers in earlier
+> revisions of this report were measured with the layout library compiled at
+> `Debug`, because the benchmark harness reused the package's default module
+> instead of one built at the benchmark optimization level. They were not a
+> like-for-like comparison against optimized Rust. The corrected figures are
+> above and in `tools/bench/README.md`; the older ones are retained in §2.4 as
+> history only.
 
 ## 1. How parity was reached
 
@@ -40,9 +52,9 @@ The original revision of this report (2026-09-11) found the port at
    - compute-time measure callback
      `fn(context, LayoutInput, NodeId, *const Style) -> LayoutOutput`,
      installed by `compute_layout_with_measure`
-     (`tree/traits.zig`, `tree/taffy_tree.zig`);
-   - dispatcher exactly like `TaffyView::compute_child_layout`, with the
-     pre-pass deleted (`compute/mod.zig`);
+     (`tree/interfaces.zig`, `tree/tree.zig`);
+   - dispatcher exactly like `compute_child_layout`, with the
+     pre-pass deleted (`compute/root.zig`);
    - cache contract: algorithm child requests route through
      `compute_cached_layout`, cache key normalization fixed
      (`tree/cache.zig`);
@@ -70,7 +82,7 @@ The original revision of this report (2026-09-11) found the port at
    (`Display`/`Position`/`BoxSizing`/`Overflow`/`Direction`), `Contain`
    validation, `flow-root` BFC handling, component grid templates with
    `repeat()`, `DetailedGridInfo` population + lifecycle (arena-owned,
-   freed on recompute/remove/deinit), calc resolution matching TaffyTree's
+   freed on recompute/remove/deinit), calc resolution matching `Tree`'s
    default (0), `taffyRound` (`floor(x + 0.5)`), available-space `Npx`
    parsing, fixture `writing-mode` mapping, dirty = `cache.is_empty()`, and
    root/prelude exports.
@@ -165,13 +177,13 @@ default tests / 97 serde tests, and the tree probes):
    it exactly. This is the dominant block-chain win.
 2. **In-place leaf construction** — `NodeStore.appendLeaf` initializes the node
    in its page slot; `new_leaf` no longer builds and copies a ~1.2 KB temporary.
-3. **Borrowed styles** — `TaffyTree.style_ptr` replaces per-child `Style` (512 B)
+3. **Borrowed styles** — `Tree.style_ptr` replaces per-child `Style` (512 B)
    copies in flex item generation, the hidden post-pass and grid in-flow
    collection.
 4. **Hidden-child fast path** — flex records during item generation whether any
    child is `display: none` (including absolute children) and skips the hidden
    post-pass entirely when none is.
-5. **Per-tree scratch arena** — `TaffyTree.scratchAllocator()` serves pass-local
+5. **Per-tree scratch arena** — `Tree.scratch_allocator()` serves pass-local
    temporaries (flex items/lines, grid placement/tracks/occupancy, balance
    buffers), reset with capacity retained at every top-level compute; an
    `in_layout_pass` epoch guard keeps re-entrant child computes from
@@ -179,6 +191,36 @@ default tests / 97 serde tests, and the tree probes):
 6. **Small-list stack buffer** — block item lists use
    `std.heap.BufferFirstAllocator` (8 inline items) and spill to the tree
    allocator only for large child lists; flex item lists reserve once.
+
+### 2.5 Genericization round (2026-10-03)
+
+The compute algorithms were made generic over `LayoutTree` (§6.1). Three
+performance consequences, measured:
+
+1. **Interface forwarders had to be marked `inline`.** The genericization put a
+   call layer between every algorithm and the tree, and LLVM left the trivial
+   forwarders out of line — `LayoutTree(Tree).get_style` was a real symbol in
+   the ReleaseFast binary. Marking the 22 forwarders `inline` was worth
+   10–25% on every scenario.
+2. **Grid item sorts moved to a key array.** `GridItem` is 312 bytes; both
+   `std.mem.sort` and `std.mem.sortUnstable` spend their time moving whole
+   items, and pdqsort measured *worse* than WikiSort. Items are now reduced to
+   an order-preserving `u64` key plus an index (the index is the tiebreak, so
+   the order still matches upstream's stable `sort_by_key`), the 12-byte entries
+   are sorted, and the items are permuted once. Worth 19% on
+   `mixed_flex_grid_block`.
+3. **The benchmark harness was measuring a Debug build.** `build.zig` created
+   one `zlay` module at the global `-Doptimize` and reused it for the harness,
+   so the library ran with safety checks and no optimization while Taffy ran
+   optimized. Fixing this is what moved the geometric mean from a meaningless
+   1.293× to a real ~1.01×.
+
+The benchmark scripts were also made defensive: `compare.py` now rejects
+non-finite timings, flags scenario-set drift between the two harnesses and
+mismatched iteration counts, and has a dead zone around parity; `cpu_compare.py`
+subtracts a measured process baseline, without which the fast scenarios reported
+process-startup ratios rather than layout ratios (`block_nested_50` read 0.95×
+there while wall clock measured 1.63×).
 
 Profiling (temporary in-process phase counters and a temporarily instrumented
 Taffy reference, both removed afterwards) established that on the mixed
@@ -205,7 +247,7 @@ port faster overall — but the margin is host-dependent (0.958× here vs
 0.856× on the measured host above); the tables above remain the archived
 reference for that host.
 
-### 2.5 Size probes (after optimization)
+### 2.6 Size probes (after optimization)
 
 `@sizeOf` / `size_of` measurements from the same toolchain:
 
@@ -232,12 +274,12 @@ green.
 | Child requests | cached `compute_cached_layout` | same |
 | Leaf sizing | `compute/leaf.rs` | `compute/leaf.zig` (faithful) |
 | Math | `MaybeMath`/`MaybeResolve` traits | free functions with identical semantics |
-| Algorithms | generic over tree traits | concrete `*TaffyTree` |
+| Algorithms | generic over tree traits | generic over `LayoutTree(comptime Self)` (`tree/interfaces.zig`) |
 | Cache | per-node 9-entry cache + final entry | same |
 | Detailed info | `Box<DetailedGridInfo>` | arena-owned `DetailedGridInfo` freed on replace/remove/deinit |
 | Rounding | `(v + 0.5).floor()` | `taffyRound` |
-| Node IDs | slotmap generational keys | dense index + `alive` flag |
-| Calc | `resolve_calc_value` closure; TaffyTree returns 0 | returns 0 through the same paths; no pluggable resolver |
+| Node IDs | slotmap generational keys | generational `u64` (24-bit index / 40-bit generation) in a paged `NodeStore` |
+| Calc | `calc_resolver` closure threaded through `resolved_percentage_size` | `LayoutTree.calc` exists and returns `?f32`, but **nothing calls it yet**; `calc()` lengths resolve to 0 (see §6.2) |
 | Serde | feature-gated derive + custom impls | `-Dserde=true` + pinned serde.zig hooks; same JSON wire format |
 
 ## 4. Source and test volume
@@ -262,15 +304,15 @@ behavioral surface is present. The remaining true omissions are §6.
 
 | Taffy feature | Port status |
 |---|---|
-| `taffy_tree` | Present; dense-node storage (§6.3) |
-| `flexbox` | Faithful; 2,664+ fixtures green |
+| high-level tree | Present; paged generational node store |
+| `flexbox` | Faithful; 2,696 fixtures green |
 | `flexbox_balance` | Faithful (DP + tie-breaks; oracle test in-tree) |
-| `grid` | Faithful; 2,164+ fixtures green incl. track-list output |
-| `block_layout` | Faithful; 948 block fixtures green |
+| `grid` | Faithful; 2,184 fixtures green incl. track-list output |
+| `block_layout` | Faithful; 1,000 block fixtures green |
 | `float_layout` | Faithful; 92 float fixtures green |
 | `content_size` | `scrollable_overflow_rect` asserted by fixtures |
 | `detailed_layout_info` | Populated for grid and asserted via `resolved-*` |
-| `calc` | Resolves to 0 as TaffyTree does; no pluggable resolver |
+| `calc` | **Gap.** Lengths carry the pointer and `LayoutTree.calc` is defined, but resolution still returns 0 |
 | `parse` | Most `FromStr`; keyword parsers added; compound flex-wrap |
 | `serde` | Implemented behind `-Dserde=true` via pinned serde.zig; Taffy wire format validated against Rust output |
 | `debug`/`profile` | Stubs |
@@ -279,19 +321,43 @@ behavioral surface is present. The remaining true omissions are §6.
 
 ## 6. Remaining gaps (non-behavioral, prioritized)
 
-### 6.1 Custom-tree / low-level trait API — MAJOR (structural)
-Taffy's algorithms are generic over `LayoutPartialTree`, `CacheTree`,
-`RoundTree` and friends, so embedders can lay out their own storage. The port's
-algorithms take `*TaffyTree`; the vtable structs in `tree/traits.zig` are not
-used by them. Closing this means making every algorithm generic over a
-function-table tree interface — a large refactor with no behavioral gain for
-the standard tree. Recommend deferring until an embedder needs it.
+### 6.1 Custom-tree / low-level trait API — CLOSED
 
-### 6.2 Calc resolvers — MODERATE
-Default `TaffyTree` semantics (calc → 0) now match and are unit-tested.
-Custom resolvers are not pluggable because style resolution has no tree
-callback. If needed, thread an optional resolver through
-`Dimension.resolve`/`LengthPercentage.resolve` (or adopt the trait API above).
+Every algorithm is now generic over `LayoutTree(comptime Self)`
+(`tree/interfaces.zig`), a comptime contract rather than a vtable: a missing or
+mistyped method is a compile error at the call site instead of a null callback
+that panics mid-layout. It covers traversal, style access, `calc()`, cache
+access, layout read/write, and the out-of-flow containing-block bookkeeping.
+
+`src/tree/interfaces_test.zig` is what makes this claim checkable. It implements
+the contract a second time from scratch — arena-allocated nodes, `u32` ids,
+plain slices, nothing shared with `Tree` — and asserts that flex, grid, block
+and out-of-flow layouts come out identical to `Tree`'s for the same input.
+
+That test earned its keep immediately: it found eight places where the
+algorithms reached past the interface into `Tree` internals (`in_layout_pass`,
+`reset_scratch`, `raw_node`, direct `NodeData` field writes, direct
+`measure_child_size*`, `set_detailed_grid_info`). All now route through the
+contract. It also prompted two contract changes: `begin_layout_pass` /
+`end_layout_pass` became **required** rather than defaulted, because a host that
+omitted them would grow its scratch arena unboundedly with no symptom; and
+`calc` returns `?f32` rather than an error tag, because a host-specific error
+cannot travel through the algorithms' fixed `ComputeError`.
+
+### 6.2 Calc resolvers — MODERATE (the one real functional gap)
+A `calc()` length carries its handle (`CompactLength.calc(pointer)`, packed into
+the 58-bit payload) and the contract point exists — `LayoutTree.calc` — but
+**no algorithm calls it**, so such a length resolves to `0`.
+
+Upstream solves this by threading a resolver into the resolution call itself:
+`CompactLength::resolved_percentage_size(parent_size, calc_resolver)`
+(`.references/taffy/src/style/compact_length.rs:497`). Closing the gap means
+doing the equivalent here: giving `resolved_percentage_size` /
+`resolve` / `resolve_to_option` a resolver parameter and sourcing it from the
+tree at every resolution site. That is a wide change across every style
+resolution helper, so it is deliberately left undone rather than half-done —
+`calc` is declared to return `?f32` so that a host can already decline
+explicitly rather than being handed a plausible-looking zero.
 
 ### 6.3 Node identity — MODERATE
 `NodeId` is a dense `u32` index with an `alive` flag instead of slotmap
@@ -320,7 +386,7 @@ match.
 ### 6.5 API polish — MINOR
 - `print_tree` output/indentation differs from `util/print.rs`.
 - `debug`/`profile` hooks are inert.
-- `TaffyConfig` is public (Rust `pub(crate)`); `remove_last_node` is Zig-only.
+- `TreeConfig` is public (Rust `pub(crate)`); `remove_last_node` is Zig-only.
 - Root/prelude exports cover the common surface; helper "trait marker"
   exports (`TaffyAuto`, `FromFr`, ...) are absent by design.
 - `MaxTrackSizingFunction`/`MinTrackSizingFunction` predicates are localized
@@ -391,13 +457,14 @@ Correctness/API follow-ups (unchanged):
 6. **Feature expansion** (optional, behind build options so Taffy parity stays
    provable): vertical writing modes, sticky positioning, subgrid/masonry,
    pluggable calc resolvers, incremental layout APIs, tracing/snapshots,
-   comptime-generic custom trees, no-panic error API.
-7. **Custom-tree API** (6.1) if the ZUI adapter or an external embedder needs
-   non-`TaffyTree` storage.
+   comptime-generic custom trees, no-panic error API. (The custom-tree half of
+   this is done — see §6.1.)
+7. ~~**Custom-tree API**~~ — **closed** (§6.1). An embedder can now supply its
+   own node store against `LayoutTree`.
 8. **Port a slice of hand-written tests** where they test behavior fixtures
    cannot express cleanly (cache eviction/churn, dirty propagation chains,
    `disable_rounding`, hidden-input contracts).
-9. **Node-id contract**: either document dense-index semantics in `NodeData`
+9. **Node-id contract**: either document the generational-index semantics in `NodeData`
    or adopt generational keys when stale-ID safety matters.
 10. **ZUI integration**: the M3 adapter can now proceed — behavior matches
     Taffy, including RTL, baselines, absolute positioning and content sizes.

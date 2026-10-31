@@ -7,7 +7,7 @@
 
 const geometry = @import("../geometry.zig");
 const dimension = @import("dimension.zig");
-const compact = @import("compact_length.zig");
+const compact_length = @import("compact_length.zig");
 const std = @import("std");
 
 const serde_support = @import("../serde_support.zig");
@@ -180,12 +180,16 @@ pub fn primary_axis(flow: GridAutoFlow) geometry.AbsoluteAxis {
 /// style, exactly as a borrowed Rust style does.
 /// Named grid line placement payload: serialized as `["name", index]`
 /// (Rust's tuple variant `NamedLine(S, i16)`).
+///
+/// The only reason this needs a hook is the tuple shape: serde.zig renders a
+/// struct as a JSON object, so `{"name":...,"index":...}` is the only other
+/// option it can produce.
 pub const NamedLine = struct {
     name: []const u8,
     index: i16,
 
-    pub const zerdeSerialize = serde_support.serialize;
-    pub const zerdeDeserialize = serde_support.deserialize;
+    pub const zerdeSerialize = serde_support.serializeNamedLine;
+    pub const zerdeDeserialize = serde_support.deserializeNamedLine;
 };
 
 /// Named span placement payload: serialized as `["name", count]`
@@ -194,15 +198,26 @@ pub const NamedSpan = struct {
     name: []const u8,
     count: u16,
 
-    pub const zerdeSerialize = serde_support.serialize;
-    pub const zerdeDeserialize = serde_support.deserialize;
+    pub const zerdeSerialize = serde_support.serializeNamedSpan;
+    pub const zerdeDeserialize = serde_support.deserializeNamedSpan;
 };
 
+/// Taffy derives serde here: external tagging over a union with one void
+/// variant, which serde.zig handles natively (a void variant serializes as its
+/// bare name, a payload variant as a single-key object). Only the renames are
+/// needed, so no custom hooks.
 pub const GridPlacement = union(enum) {
-    /// Taffy-compatible serde: PascalCase variant names.
-    pub const serde = serde_options;
-    pub const zerdeSerialize = serde_serialize;
-    pub const zerdeDeserialize = serde_deserialize;
+    // `.tag` is omitted because external tagging is serde.zig's default; naming
+    // it would mean importing serde.zig here for one enum value.
+    pub const serde = .{
+        .rename = .{
+            .auto = "Auto",
+            .line = "Line",
+            .named_line = "NamedLine",
+            .span = "Span",
+            .named_span = "NamedSpan",
+        },
+    };
 
     auto,
     line: i16,
@@ -405,7 +420,7 @@ pub fn line_resolve_definite_grid_lines(value: geometry.Line(GridPlacement), exp
 
 /// `NonNamedGridPlacement::into_origin_zero_placement`: CSS line numbers become
 /// OriginZero lines (clamped to the limited grid); zero lines fall back to auto;
-/// spans are clamped to `1..MAX_GRID_TRACKS`.
+/// spans are clamped to `1.std.MAX_GRID_TRACKS`.
 pub fn into_origin_zero_placement(value: GridPlacement, explicit_track_count: u16) GridPlacement {
     return switch (value) {
         .auto => .auto,
@@ -506,21 +521,21 @@ pub const MinTrackSizingFunction = struct {
     pub const zerdeSerialize = serde_serialize;
     pub const zerdeDeserialize = serde_deserialize;
 
-    value: compact.CompactLength,
+    value: compact_length.CompactLength,
 
-    pub const zero: MinTrackSizingFunction = .{ .value = compact.CompactLength.length(0) };
-    pub const auto: MinTrackSizingFunction = .{ .value = compact.CompactLength.auto() };
-    pub const min_content: MinTrackSizingFunction = .{ .value = compact.CompactLength.min_content() };
-    pub const max_content: MinTrackSizingFunction = .{ .value = compact.CompactLength.max_content() };
+    pub const zero: MinTrackSizingFunction = .{ .value = compact_length.CompactLength.length(0) };
+    pub const auto: MinTrackSizingFunction = .{ .value = compact_length.CompactLength.auto() };
+    pub const min_content: MinTrackSizingFunction = .{ .value = compact_length.CompactLength.min_content() };
+    pub const max_content: MinTrackSizingFunction = .{ .value = compact_length.CompactLength.max_content() };
 
     pub fn length(value: f32) MinTrackSizingFunction {
-        return .{ .value = compact.CompactLength.length(value) };
+        return .{ .value = compact_length.CompactLength.length(value) };
     }
     pub fn percent(value: f32) MinTrackSizingFunction {
-        return .{ .value = compact.CompactLength.percent(value) };
+        return .{ .value = compact_length.CompactLength.percent(value) };
     }
     pub fn calc(value: *const anyopaque) MinTrackSizingFunction {
-        return .{ .value = compact.CompactLength.calc(value) };
+        return .{ .value = compact_length.CompactLength.calc(value) };
     }
     pub fn from_length_percentage(value: dimension.LengthPercentage) MinTrackSizingFunction {
         return .{ .value = value.value };
@@ -579,14 +594,14 @@ pub const MinTrackSizingFunction = struct {
         return switch (self.value.tag()) {
             .length => self.value.value(),
             .percent => if (parent_size) |basis| basis * self.value.value() else null,
-            // TaffyTree's default calc resolver returns 0 and still requires a
+            // Tree's default calc resolver returns 0 and still requires a
             // definite parent size to be considered definite.
             .calc => if (parent_size != null) 0 else null,
             else => null,
         };
     }
 
-    pub fn into_raw(self: MinTrackSizingFunction) compact.CompactLength {
+    pub fn into_raw(self: MinTrackSizingFunction) compact_length.CompactLength {
         return self.value;
     }
     pub fn has_definite_value(self: MinTrackSizingFunction, parent_size: ?f32) bool {
@@ -620,27 +635,27 @@ pub const MaxTrackSizingFunction = struct {
     pub const zerdeSerialize = serde_serialize;
     pub const zerdeDeserialize = serde_deserialize;
 
-    value: compact.CompactLength,
+    value: compact_length.CompactLength,
 
-    pub const zero: MaxTrackSizingFunction = .{ .value = compact.CompactLength.length(0) };
-    pub const auto: MaxTrackSizingFunction = .{ .value = compact.CompactLength.auto() };
-    pub const min_content: MaxTrackSizingFunction = .{ .value = compact.CompactLength.min_content() };
-    pub const max_content: MaxTrackSizingFunction = .{ .value = compact.CompactLength.max_content() };
+    pub const zero: MaxTrackSizingFunction = .{ .value = compact_length.CompactLength.length(0) };
+    pub const auto: MaxTrackSizingFunction = .{ .value = compact_length.CompactLength.auto() };
+    pub const min_content: MaxTrackSizingFunction = .{ .value = compact_length.CompactLength.min_content() };
+    pub const max_content: MaxTrackSizingFunction = .{ .value = compact_length.CompactLength.max_content() };
 
     pub fn length(value: f32) MaxTrackSizingFunction {
-        return .{ .value = compact.CompactLength.length(value) };
+        return .{ .value = compact_length.CompactLength.length(value) };
     }
     pub fn percent(value: f32) MaxTrackSizingFunction {
-        return .{ .value = compact.CompactLength.percent(value) };
+        return .{ .value = compact_length.CompactLength.percent(value) };
     }
     pub fn fr(value: f32) MaxTrackSizingFunction {
-        return .{ .value = compact.CompactLength.fr(value) };
+        return .{ .value = compact_length.CompactLength.fr(value) };
     }
     pub fn fit_content_length(value: f32) MaxTrackSizingFunction {
-        return .{ .value = compact.CompactLength.fit_content_length(value) };
+        return .{ .value = compact_length.CompactLength.fit_content_length(value) };
     }
     pub fn fit_content_percent(value: f32) MaxTrackSizingFunction {
-        return .{ .value = compact.CompactLength.fit_content_percent(value) };
+        return .{ .value = compact_length.CompactLength.fit_content_percent(value) };
     }
     pub fn fit_content(value: dimension.LengthPercentage) MaxTrackSizingFunction {
         return switch (value.value.tag()) {
@@ -735,7 +750,7 @@ pub const MaxTrackSizingFunction = struct {
         return self.definite_value(parent_size);
     }
 
-    pub fn into_raw(self: MaxTrackSizingFunction) compact.CompactLength {
+    pub fn into_raw(self: MaxTrackSizingFunction) compact_length.CompactLength {
         return self.value;
     }
     pub fn has_definite_value(self: MaxTrackSizingFunction, parent_size: ?f32) bool {
@@ -745,7 +760,7 @@ pub const MaxTrackSizingFunction = struct {
         return self.value.resolved_percentage_size(parent_size);
     }
     pub fn calc(value: *const anyopaque) MaxTrackSizingFunction {
-        return .{ .value = compact.CompactLength.calc(value) };
+        return .{ .value = compact_length.CompactLength.calc(value) };
     }
     pub fn expand(self: MaxTrackSizingFunction) ExpandedMaxTrackSizingFunction {
         return switch (self.value.tag()) {
@@ -814,7 +829,7 @@ pub const TrackSizingFunction = struct {
     }
 
     pub fn fit_content(value: dimension.LengthPercentage) TrackSizingFunction {
-        return .{ .min = .auto, .max = if (value.value.tag() == .length) .{ .value = compact.CompactLength.fit_content_length(value.value.numericValue()) } else .{ .value = compact.CompactLength.fit_content_percent(value.value.numericValue()) } };
+        return .{ .min = .auto, .max = if (value.value.tag() == .length) .{ .value = compact_length.CompactLength.fit_content_length(value.value.numericValue()) } else .{ .value = compact_length.CompactLength.fit_content_percent(value.value.numericValue()) } };
     }
 
     pub fn from_dimension(value: dimension.Dimension) TrackSizingFunction {
@@ -853,11 +868,15 @@ pub const RepetitionCount = union(enum) {
     auto_fit,
     auto_fill,
 
-    /// Taffy-compatible serde: explicit hooks, because serde.zig does not
-    /// rename void union variants (`auto_fit`/`auto_fill`).
-    pub const serde = serde_options;
-    pub const zerdeSerialize = serde_serialize;
-    pub const zerdeDeserialize = serde_deserialize;
+    /// Taffy derives serde here; external tagging with two void variants is
+    /// native serde.zig, so only the renames are needed.
+    pub const serde = .{
+        .rename = .{
+            .count = "Count",
+            .auto_fit = "AutoFit",
+            .auto_fill = "AutoFill",
+        },
+    };
 };
 
 pub const InvalidStringRepetitionValue = error{InvalidRepetitionValue};

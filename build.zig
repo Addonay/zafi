@@ -99,13 +99,25 @@ pub fn build(b: *std.Build) !void {
     // ReleaseFast because comparing debug builds against Rust release builds
     // would be meaningless; override with -Dbench-optimize=... if needed.
     const bench_optimize = b.option(std.builtin.OptimizeMode, "bench-optimize", "Optimize mode for benchmarks (default fast)") orelse .fast;
+    // The harness needs its own copy of the library module at the benchmark
+    // optimization level. Reusing `zlay_mod` would compile the layout code at
+    // the *global* `-Doptimize` level, which defaults to Debug: the port would
+    // then be timed with safety checks and no optimization while Taffy ran
+    // optimized, which compares nothing. Same reasoning applies to the
+    // fixtures runner.
+    const bench_zlay_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = bench_optimize,
+        .imports = module_imports[0..import_count],
+    });
     const bench_exe = b.addExecutable(.{
         .name = "bench",
         .root_module = b.createModule(.{
             .root_source_file = b.path("tools/bench/main.zig"),
             .target = target,
             .optimize = bench_optimize,
-            .imports = &.{.{ .name = "zlay", .module = zlay_mod }},
+            .imports = &.{.{ .name = "zlay", .module = bench_zlay_mod }},
         }),
     });
     const bench_run = b.addRunArtifact(bench_exe);
@@ -117,6 +129,22 @@ pub fn build(b: *std.Build) !void {
     const bench_rust_step = b.step("bench-rust", "Run the Rust Taffy benchmark mirror");
     const bench_rust = b.addSystemCommand(&.{ "cargo", "run", "--release", "--quiet", "--manifest-path", "tools/bench/rust/Cargo.toml" });
     bench_rust_step.dependOn(&bench_rust.step);
+
+    // Allocation census: runs each scenario once with a counting allocator, so
+    // a regression in per-pass allocation volume is visible even when wall time
+    // is dominated by compute.
+    const alloc_probe_exe = b.addExecutable(.{
+        .name = "alloc_probe",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/bench/alloc_probe.zig"),
+            .target = target,
+            .optimize = bench_optimize,
+            .imports = &.{.{ .name = "zlay", .module = bench_zlay_mod }},
+        }),
+    });
+    const alloc_probe_run = b.addRunArtifact(alloc_probe_exe);
+    const alloc_probe_step = b.step("bench-allocs", "Report allocation counts per layout pass");
+    alloc_probe_step.dependOn(&alloc_probe_run.step);
 
     // Matched comparison: runs both harnesses and prints a ratio table
     // (`zig build bench-compare [-- --filter flex] [-- --strict]`).

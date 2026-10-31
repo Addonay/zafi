@@ -8,21 +8,25 @@
 
 const std = @import("std");
 const geometry = @import("../geometry.zig");
-const style = @import("../style/mod.zig");
+const style = @import("../style/root.zig");
 const dimension = @import("../style/dimension.zig");
-const available_mod = @import("../style/available_space.zig");
-const flex_style = @import("../style/flex.zig");
-const tree = @import("../tree/taffy_tree.zig");
-const tree_layout = @import("../tree/layout.zig");
+const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
+const flex = @import("../style/flex.zig");
+const NodeId = @import("../tree/node.zig").NodeId;
+const layout = @import("../tree/layout.zig");
 const math = @import("../util/math.zig");
 const alignment = @import("common/alignment.zig");
+const alignment_common = alignment;
 const scrollable_overflow = @import("common/scrollable_overflow.zig");
 const sizing_keyword = @import("common/sizing_keyword.zig");
+const oof = @import("oof.zig");
+const LayoutTree = @import("../tree/interfaces.zig").LayoutTree;
+const tree = @import("../tree/tree.zig");
 
 const Size = geometry.Size;
+const F32Size = geometry.F32Size;
 const Rect = geometry.Rect;
 const Point = geometry.Point;
-const AvailableSpace = available_mod.AvailableSpace;
 const LengthPercentage = dimension.LengthPercentage;
 const LengthPercentageAuto = dimension.LengthPercentageAuto;
 const Dimension = dimension.Dimension;
@@ -33,7 +37,7 @@ const SIZE_NONE: Size(?f32) = .{ .width = null, .height = null };
 /// The intermediate results of a flexbox calculation for a single item
 pub const FlexItem = struct {
     /// The identifier for the associated node
-    node: tree.NodeId,
+    node: NodeId,
 
     /// The order of the node relative to it's siblings
     order: u32,
@@ -69,8 +73,9 @@ pub const FlexItem = struct {
     /// takes into account content based automatic minimum sizes
     resolved_minimum_main_size: f32,
 
-    /// The final offset of this item
-    inset: Rect(?f32),
+    /// The `position: relative` offset of this item, resolved to (width, height) in the
+    /// container's coordinate space (zero for non-relative items)
+    relative_inset: F32Size,
     /// The margin of this item
     margin: Rect(f32),
     /// Whether each margin is an auto margin or not
@@ -116,6 +121,10 @@ pub const FlexItem = struct {
     /// relative position values, alignment, and justification. Does not include margin/padding/border.
     offset_cross: f32,
 
+    /// Out-of-flow candidates bubbled out of this item's subtree, with anchors
+    /// already translated to be relative to the container's border box.
+    oof_candidates: layout.OofCandidates,
+
     /// Returns true if the item is a <https://www.w3.org/TR/css-overflow-3/#scroll-container>
     pub fn is_scroll_container(self: FlexItem) bool {
         return self.overflow.x.is_scroll_container() or self.overflow.y.is_scroll_container();
@@ -124,7 +133,7 @@ pub const FlexItem = struct {
     /// Returns true if the item participates in baseline alignment: it has `align-self: baseline`
     /// and neither of its cross-axis margins are `auto`.
     /// See <https://www.w3.org/TR/css-flexbox-1/#baseline-participation>
-    pub fn participates_in_baseline_alignment(self: FlexItem, dir: flex_style.FlexDirection) bool {
+    pub fn participates_in_baseline_alignment(self: FlexItem, dir: flex.FlexDirection) bool {
         return is_baseline_alignment(self.align_self) and
             !self.margin_is_auto.cross_start(dir) and
             !self.margin_is_auto.cross_end(dir);
@@ -144,7 +153,7 @@ pub const FlexLine = struct {
 /// Values that can be cached during the flexbox algorithm
 pub const AlgoConstants = struct {
     /// The direction of the current segment being laid out
-    dir: flex_style.FlexDirection,
+    dir: flex.FlexDirection,
     /// The layout direction of the current segment being laid out
     layout_direction: style.Direction,
     /// Is this segment a row
@@ -224,10 +233,11 @@ pub const AlgoConstants = struct {
 };
 
 /// Computes the layout of a box according to the flexbox algorithm
-pub fn compute_flexbox_layout(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, inputs: tree_layout.LayoutInput) !tree_layout.LayoutOutput {
+pub fn compute_flexbox_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId, inputs: layout.LayoutInput) !layout.LayoutOutput {
+    const TreeApi = LayoutTree(Tree);
     const known_dimensions = inputs.known_dimensions;
     const parent_size = inputs.parent_size;
-    const node_style = try tree_ref.style_of(node_id);
+    const node_style = TreeApi.get_style(tree_ref, node_id);
 
     // Pull these out earlier to avoid borrowing issues
     const contain = node_style.contain;
@@ -239,21 +249,17 @@ pub fn compute_flexbox_layout(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, i
 
     const min_size = size_maybe_add(
         resolve_auto_size(node_style.min_size, parent_size).maybe_apply_aspect_ratio(aspect_ratio),
-        box_sizing_adjustment,
-    );
+        box_sizing_adjustment);
     const max_size = size_maybe_add(
         resolve_auto_size(node_style.max_size, parent_size).maybe_apply_aspect_ratio(aspect_ratio),
-        box_sizing_adjustment,
-    );
+        box_sizing_adjustment);
     const clamped_style_size = if (inputs.sizing_mode == .inherent_size)
         math.optional_size_maybe_clamp(
             size_maybe_add(
                 resolve_dimension_size(node_style.size, parent_size).maybe_apply_aspect_ratio(aspect_ratio),
-                box_sizing_adjustment,
-            ),
+                box_sizing_adjustment),
             min_size,
-            max_size,
-        )
+            max_size)
     else
         geometry.SIZE_OPTIONAL_F32_NONE;
 
@@ -266,22 +272,21 @@ pub fn compute_flexbox_layout(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, i
     // The size of the container should be floored by the padding and border
     const styled_based_known_dimensions = optional_size_or(
         known_dimensions,
-        math.optional_size_maybe_max(optional_size_or(min_max_definite_size, clamped_style_size), to_optional_size(padding_border_sum)),
-    );
+        math.optional_size_maybe_max(optional_size_or(min_max_definite_size, clamped_style_size), to_optional_size(padding_border_sum)));
 
     // Short-circuit layout if the container's size is fully determined by the container's size and the run mode
     // is ComputeSize (and thus the container's size is all that we're interested in)
     if (inputs.run_mode == .compute_size) {
         if (styled_based_known_dimensions.width) |width| {
             if (styled_based_known_dimensions.height) |height| {
-                return tree_layout.LayoutOutput.from_outer_size(.{ .width = width, .height = height });
+                return layout.LayoutOutput.from_outer_size(.{ .width = width, .height = height });
             }
         }
 
         // We can also short-circuit if the width is known and only the width has been requested.
         if (inputs.axis == .horizontal) {
             if (styled_based_known_dimensions.width) |width| {
-                return tree_layout.LayoutOutput.from_outer_size(.{ .width = width, .height = 0.0 });
+                return layout.LayoutOutput.from_outer_size(.{ .width = width, .height = 0.0 });
             }
         }
     }
@@ -291,7 +296,7 @@ pub fn compute_flexbox_layout(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, i
     if (inputs.run_mode == .compute_size) {
         if (styled_based_known_dimensions.width) |width| {
             if (styled_based_known_dimensions.height) |height| {
-                return tree_layout.LayoutOutput.from_outer_size(.{ .width = width, .height = height });
+                return layout.LayoutOutput.from_outer_size(.{ .width = width, .height = height });
             }
         }
     }
@@ -301,9 +306,10 @@ pub fn compute_flexbox_layout(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, i
     const known_dimensions_are_definite = inputs.known_dimensions_are_definite.zip_map(known_dimensions, bool, normalize_definiteness);
 
     var output = try compute_preliminary(
+        Tree,
         tree_ref,
         node_id,
-        tree_layout.LayoutInput{
+        layout.LayoutInput{
             .known_dimensions = styled_based_known_dimensions,
             .known_dimensions_are_definite = known_dimensions_are_definite,
             .run_mode = inputs.run_mode,
@@ -312,32 +318,32 @@ pub fn compute_flexbox_layout(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, i
             .parent_size = inputs.parent_size,
             .available_space = inputs.available_space,
             .vertical_margins_are_collapsible = inputs.vertical_margins_are_collapsible,
-        },
-    );
+        });
 
     // Layout containment suppresses the box's baseline for baseline-alignment purposes
     if (contain.suppresses_baseline()) {
-        output.baselines = tree_layout.Baselines.NONE;
+        output.baselines = layout.Baselines.NONE;
     }
 
     return output;
 }
 
 /// Compute a preliminary size for an item
-fn compute_preliminary(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, inputs: tree_layout.LayoutInput) !tree_layout.LayoutOutput {
+fn compute_preliminary(comptime Tree: type, tree_ref: *Tree, node_id: NodeId, inputs: layout.LayoutInput) !layout.LayoutOutput {
+    const TreeApi = LayoutTree(Tree);
     const known_dimensions = inputs.known_dimensions;
     const parent_size = inputs.parent_size;
-    const node_style = try tree_ref.style_of(node_id);
+    const node_style = TreeApi.get_style(tree_ref, node_id);
 
     // Define some general constants we will need for the remainder of the algorithm.
     var constants = try compute_constants(
-        tree_ref,
-        &node_style,
+        Tree,
+tree_ref,
+        node_style,
         known_dimensions,
         inputs.known_dimensions_are_definite,
         parent_size,
-        inputs.available_space,
-    );
+        inputs.available_space);
 
     // 9. Flex Layout Algorithm
 
@@ -345,8 +351,8 @@ fn compute_preliminary(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, inputs: 
 
     // 1. Generate anonymous flex items as described in §4 Flex Items.
     var has_hidden_children = false;
-    var flex_items = try generate_anonymous_flex_items(tree_ref, node_id, &constants, &has_hidden_children);
-    defer flex_items.deinit(tree_ref.scratchAllocator());
+    var flex_items = try generate_anonymous_flex_items(Tree, tree_ref, node_id, &constants, &has_hidden_children);
+    defer flex_items.deinit(TreeApi.scratch_allocator(tree_ref));
 
     // 9.2. Line Length Determination
 
@@ -354,7 +360,7 @@ fn compute_preliminary(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, inputs: 
     const available_space = determine_available_space(known_dimensions, inputs.available_space, &constants);
 
     // 3. Determine the flex base size and hypothetical main size of each item.
-    try determine_flex_base_size(tree_ref, &constants, available_space, flex_items.items);
+    try determine_flex_base_size(Tree, tree_ref, &constants, available_space, flex_items.items);
 
     // 4. Determine the main size of the flex container
     // This has already been done as part of compute_constants. The inner size is exposed as constants.node_inner_size.
@@ -362,7 +368,7 @@ fn compute_preliminary(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, inputs: 
     // 9.3. Main Size Determination
 
     // 5. Collect flex items into flex lines.
-    const scratch = tree_ref.scratchAllocator();
+    const scratch = TreeApi.scratch_allocator(tree_ref);
     var flex_lines = if (constants.is_balance)
         try collect_balanced_flex_lines(scratch, &constants, available_space, flex_items.items)
     else
@@ -377,7 +383,7 @@ fn compute_preliminary(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, inputs: 
         constants.container_size.set_main(constants.dir, outer_main_size);
     } else {
         // Sets constants.container_size and constants.outer_container_size
-        try determine_container_main_size(tree_ref, available_space, flex_lines, &constants);
+        try determine_container_main_size(Tree, tree_ref, available_space, flex_lines, &constants);
         constants.node_inner_size.set_main(constants.dir, constants.inner_container_size.main(constants.dir));
         constants.node_outer_size.set_main(constants.dir, constants.container_size.main(constants.dir));
 
@@ -396,12 +402,12 @@ fn compute_preliminary(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, inputs: 
 
     // 7. Determine the hypothetical cross size of each item.
     for (flex_lines) |*line| {
-        try determine_hypothetical_cross_size(tree_ref, line, &constants, available_space);
+        try determine_hypothetical_cross_size(Tree, tree_ref, line, &constants, available_space);
     }
 
     // Calculate child baselines. This function is internally smart and only computes child baselines
     // if they are necessary.
-    try calculate_children_base_lines(tree_ref, known_dimensions, available_space, flex_lines, &constants);
+    try calculate_children_base_lines(Tree, tree_ref, known_dimensions, available_space, flex_lines, &constants);
 
     // 8. Calculate the cross size of each flex line.
     calculate_cross_size(flex_lines, known_dimensions, &constants);
@@ -425,7 +431,7 @@ fn compute_preliminary(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, inputs: 
     // TODO implement once (if ever) we support visibility:collapse
 
     // 11. Determine the used cross size of each flex item.
-    try determine_used_cross_size(tree_ref, flex_lines, &constants);
+    try determine_used_cross_size(Tree, tree_ref, flex_lines, &constants);
 
     // 9.5. Main-Axis Alignment
 
@@ -443,34 +449,44 @@ fn compute_preliminary(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, inputs: 
     // We have the container size.
     // If our caller does not care about performing layout we are done now.
     if (inputs.run_mode == .compute_size) {
-        return tree_layout.LayoutOutput.from_outer_size(constants.container_size);
+        return layout.LayoutOutput.from_outer_size(constants.container_size);
     }
 
     // 16. Align all flex lines per align-content.
     align_flex_lines_per_align_content(flex_lines, &constants, total_line_cross_size);
 
     // Do a final layout pass and gather the resulting layouts
-    const inflow_overflow_rect = try final_layout_pass(tree_ref, flex_lines, &constants);
+    const inflow_overflow_rect = try final_layout_pass(Tree, tree_ref, flex_lines, &constants);
 
-    // Before returning we perform absolute layout on all absolutely positioned children
-    const absolute_overflow_rect = try perform_absolute_layout_on_absolute_children(tree_ref, node_id, &constants);
+    // Collect out-of-flow candidates in document order (direct out-of-flow children
+    // interleaved with candidates bubbled from in-flow children's subtrees). These are
+    // laid out by the out-of-flow positioning pass (`oof.compute_oof_layout`), which runs
+    // after this algorithm.
+    var candidates: layout.OofCandidates = .empty;
+    try collect_oof_candidates(Tree, tree_ref, node_id, &constants, flex_lines, &candidates);
+
+    const absolute_position_inset = constants.border.add(Rect(f32){
+        .left = if (constants.layout_direction.is_rtl()) constants.scrollbar_gutter.x else 0.0,
+        .right = if (constants.layout_direction.is_rtl()) 0.0 else constants.scrollbar_gutter.x,
+        .top = 0.0,
+        .bottom = constants.scrollbar_gutter.y,
+    });
 
     if (has_hidden_children) {
-        const len = try tree_ref.child_count(node_id);
+        const len = try TreeApi.child_count(tree_ref, node_id);
         var hidden_order: usize = 0;
         while (hidden_order < len) : (hidden_order += 1) {
-            const child = try tree_ref.get_child_id(node_id, hidden_order);
-            const hidden_style = tree_ref.style_ptr(child) orelse continue;
+            const child = try TreeApi.child_at(tree_ref, node_id, hidden_order);
+            const hidden_style = TreeApi.get_style(tree_ref, child);
             if (hidden_style.box_generation_mode() == .none) {
-                try tree_ref.set_unrounded_layout(child, tree_layout.Layout.with_order(@intCast(hidden_order)));
-                _ = try tree_ref.perform_child_layout(
+                try TreeApi.set_unrounded_layout(tree_ref, child, layout.Layout.with_order(@intCast(hidden_order)));
+                _ = try TreeApi.perform_child_layout(tree_ref, 
                     child,
                     SIZE_NONE,
                     SIZE_NONE,
                     .{ .width = .max_content, .height = .max_content },
                     .content_size,
-                    LINE_FALSE,
-                );
+                    LINE_FALSE);
             }
         }
     }
@@ -508,20 +524,176 @@ fn compute_preliminary(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, inputs: 
 
     return .{
         .size = constants.container_size,
-        .scrollable_overflow_rect = geometry.rect_union(inflow_overflow_rect, absolute_overflow_rect),
-        .baselines = tree_layout.Baselines.from_first(first_vertical_baseline),
+        .scrollable_overflow_rect = inflow_overflow_rect,
+        .baselines = layout.Baselines.from_first(first_vertical_baseline),
+        .oof_candidates = candidates,
+        .oof_positioning_area = .{
+            .size = constants.container_size.sub(absolute_position_inset.sum_axes()),
+            .offset = .{ .x = absolute_position_inset.left, .y = absolute_position_inset.top },
+        },
+    };
+}
+
+/// Emit out-of-flow (`position: absolute` / `position: fixed`) children as
+/// candidates for the out-of-flow positioning pass, in document order.
+///
+/// Direct out-of-flow children and candidates bubbled out of in-flow children's
+/// subtrees are interleaved by child index, which keeps the containing block's
+/// hoisted-children list in document order.
+fn collect_oof_candidates(comptime Tree: type, tree_ref: *Tree,
+    node: NodeId,
+    constants: *const AlgoConstants,
+    flex_lines: []FlexLine,
+    candidates: *layout.OofCandidates) !void {
+    const TreeApi = LayoutTree(Tree);
+    const scratch = TreeApi.scratch_allocator(tree_ref);
+
+    const dir = constants.dir;
+    const container_size = constants.container_size;
+    const content_box_inset = constants.content_box_inset;
+
+    const main_axis_is_horizontal = constants.is_row;
+    const cross_axis_is_horizontal = !constants.is_row;
+    const main_is_rtl = main_axis_is_horizontal and constants.layout_direction.is_rtl();
+    const cross_is_rtl = cross_axis_is_horizontal and constants.layout_direction.is_rtl();
+    const main_axis_flex_start_reversed = dir.is_reverse() != main_is_rtl;
+    const cross_axis_flex_start_reversed = constants.is_wrap_reverse != cross_is_rtl;
+
+    // The static-position area in each axis is the container's content box
+    const main_area = geometry.Line(f32){
+        .start = content_box_inset.main_start(dir),
+        .end = container_size.main(dir) - content_box_inset.main_end(dir),
+    };
+    const cross_area = geometry.Line(f32){
+        .start = content_box_inset.cross_start(dir),
+        .end = container_size.cross(dir) - content_box_inset.cross_end(dir),
+    };
+
+    // Flex lines are contiguous slices of the items in document order (reversal is
+    // applied to positions, not storage), so a single monotonically advancing cursor
+    // visits every in-flow item exactly once, in child-index order.
+    var line_index: usize = 0;
+    var item_index: usize = 0;
+    while (line_index < flex_lines.len and flex_lines[line_index].items.len == 0) line_index += 1;
+
+    const child_count = try TreeApi.child_count(tree_ref, node);
+    var order: usize = 0;
+    while (order < child_count) : (order += 1) {
+        const child = try TreeApi.child_at(tree_ref, node, order);
+        const child_style = TreeApi.get_style(tree_ref, child);
+        const position = child_style.position;
+
+        if (child_style.box_generation_mode() == .none) continue;
+        // In-flow item: merge the candidates bubbled out of its subtree
+        if (!position.is_out_of_flow()) {
+            if (line_index < flex_lines.len) {
+                const line = &flex_lines[line_index];
+                if (item_index < line.items.len and line.items[item_index].order == @as(u32, @intCast(order))) {
+                    try oof.appendCandidates(scratch, candidates, &line.items[item_index].oof_candidates);
+                    item_index += 1;
+                    if (item_index >= line.items.len) {
+                        line_index += 1;
+                        item_index = 0;
+                        while (line_index < flex_lines.len and flex_lines[line_index].items.len == 0) line_index += 1;
+                    }
+                }
+            }
+            continue;
+        }
+
+        const align_self = resolve_self_relative(
+            child_style.align_self orelse constants.align_items,
+            child_style.direction,
+            constants.layout_direction,
+            constants.is_column);
+
+        // Main-axis static position (justify-content).
+        //
+        // Stretch is an invalid value for justify_content in the flexbox algorithm, so we
+        // treat it as if it wasn't set (and thus we default to FlexStart behaviour).
+        //
+        // The `safe` overflow-position keyword is intentionally NOT applied here, even when
+        // the abs-positioned item would overflow the main axis: Chrome does not apply safe
+        // fallback to `justify-content` on absolutely-positioned flex items (only the
+        // cross-axis `align-self` does so). Matching the layout authority over a strict
+        // spec read keeps gentest fixtures green; reconsider if Chromium changes behavior.
+        //
+        // `start`/`end` are writing-mode relative (they flip for RTL but not for
+        // reversed flex-directions), whereas `flex-start`/`flex-end` and the
+        // distributed keywords' fallbacks are flex-relative.
+        const main_keyword = (constants.justify_content orelse style.alignment.JustifyContent.FLEX_START).keyword_value();
+        const main_start_position = switch (main_keyword) {
+            .start => !main_is_rtl,
+            .end => main_is_rtl,
+            else => true,
+        };
+        const main_edge: layout.AxisStaticEdge = switch (main_keyword) {
+            .space_between, .stretch, .flex_start => if (!main_axis_flex_start_reversed) .start else .end,
+            .flex_end => if (main_axis_flex_start_reversed) .start else .end,
+            .start, .end => if (main_start_position) .start else .end,
+            .space_evenly, .space_around, .center => .center,
+        };
+
+        // Cross-axis static position (align-self).
+        //
+        // `start`/`end` (and `baseline`, whose static-position fallback is `start`) are
+        // writing-mode relative: they flip for RTL but not for `wrap-reverse`.
+        // `flex-start`/`flex-end` and the `stretch` fallback are flex-relative.
+        const cross = layout.AxisStaticAlign{
+            .keyword = crossEdgeFor(align_self.keyword, cross_axis_flex_start_reversed, cross_is_rtl),
+            .safety = align_self.safety,
+            .fallback = crossEdgeFor(alignment_common.resolve_self_alignment_safety(align_self, true), cross_axis_flex_start_reversed, cross_is_rtl),
+        };
+        const main = layout.AxisStaticAlign.from_keyword(main_edge);
+
+        const static_position = if (constants.is_row)
+            Point(layout.AxisStaticPosition){
+                .x = .{ .area = main_area, .alignment = main },
+                .y = .{ .area = cross_area, .alignment = cross },
+            }
+        else
+            Point(layout.AxisStaticPosition){
+                .x = .{ .area = cross_area, .alignment = cross },
+                .y = .{ .area = main_area, .alignment = main },
+            };
+        try candidates.append(scratch, .{
+            .node = child,
+            .order = @intCast(order),
+            .position = position,
+            .static_position = static_position,
+        });
+    }
+}
+
+/// Resolve a resolved `align-self` keyword to the physical edge used for an
+/// out-of-flow box's static position, honouring flex-relative vs writing-mode
+/// relative alignment and `wrap-reverse`.
+fn crossEdgeFor(keyword: style.alignment.AlignItemsKeyword, cross_axis_flex_start_reversed: bool, cross_is_rtl: bool) layout.AxisStaticEdge {
+    const start_position = switch (keyword) {
+        .start, .baseline => !cross_is_rtl,
+        .end => cross_is_rtl,
+        else => true,
+    };
+    return switch (keyword) {
+        // Stretch alignment does not apply to absolutely positioned items
+        // See "Example 3" at https://www.w3.org/TR/css-flexbox-1/#abspos-items
+        .start, .end, .baseline => if (start_position) .start else .end,
+        .stretch, .flex_start => if (!cross_axis_flex_start_reversed) .start else .end,
+        .flex_end => if (cross_axis_flex_start_reversed) .start else .end,
+        .center => .center,
+        // SelfStart/SelfEnd are resolved to Start/End against the item's own
+        // direction where `align_self` is read.
+        .self_start, .self_end => unreachable,
     };
 }
 
 /// Compute constants that can be reused during the flexbox algorithm.
-inline fn compute_constants(
-    tree_ref: *tree.TaffyTree,
+inline fn compute_constants(comptime Tree: type, tree_ref: *Tree,
     node_style: *const style.Style,
     known_dimensions: Size(?f32),
     known_dimensions_are_definite: Size(bool),
     parent_size: Size(?f32),
-    available_space: Size(AvailableSpace),
-) !AlgoConstants {
+    available_space: Size(AvailableSpace)) !AlgoConstants {
     _ = tree_ref;
     const dir = node_style.flex_direction;
     const is_row = dir.is_row();
@@ -586,12 +758,10 @@ inline fn compute_constants(
         .line_count = line_count,
         .min_size = size_maybe_add(
             resolve_auto_size(node_style.min_size, parent_size).maybe_apply_aspect_ratio(aspect_ratio),
-            box_sizing_adjustment,
-        ),
+            box_sizing_adjustment),
         .max_size = size_maybe_add(
             resolve_auto_size(node_style.max_size, parent_size).maybe_apply_aspect_ratio(aspect_ratio),
-            box_sizing_adjustment,
-        ),
+            box_sizing_adjustment),
         .margin = margin,
         .border = border,
         .gap = gap,
@@ -612,12 +782,35 @@ inline fn compute_constants(
     };
 }
 
+/// Resolve a `position: relative` item's inset to a single offset in the container's flex
+/// axes, accounting for flex direction and writing direction. Every input is fixed before
+/// items are generated, so this is resolved once at item-generation time rather than being
+/// recomputed per item in `calculate_flex_item`.
+fn resolve_relative_inset(inset: Rect(?f32), constants: *const AlgoConstants) F32Size {
+    const direction = constants.dir;
+    const is_rtl_row = direction.is_row() and constants.layout_direction.is_rtl();
+    const is_rtl_column = direction.is_column() and constants.layout_direction.is_rtl();
+    const main: f32 = if (is_rtl_row)
+        (inset.main_end(direction) orelse (if (inset.main_start(direction)) |pos| -pos else null)) orelse 0.0
+    else
+        (inset.main_start(direction) orelse (if (inset.main_end(direction)) |pos| -pos else null)) orelse 0.0;
+    const cross: f32 = if (is_rtl_column)
+        ((if (inset.cross_end(direction)) |pos| -pos else null) orelse inset.cross_start(direction)) orelse 0.0
+    else
+        (inset.cross_start(direction) orelse (if (inset.cross_end(direction)) |pos| -pos else null)) orelse 0.0;
+    var out = geometry.SIZE_F32_ZERO;
+    out.set_main(direction, main);
+    out.set_cross(direction, cross);
+    return out;
+}
+
 /// Generate anonymous flex items.
 ///
 /// # [9.1. Initial Setup](https://www.w3.org/TR/css-flexbox-1/#box-manip)
 ///
 /// - [**Generate anonymous flex items**](https://www.w3.org/TR/css-flexbox-1/#algo-anon-box) as described in [§4 Flex Items](https://www.w3.org/TR/css-flexbox-1/#flex-items).
-inline fn generate_anonymous_flex_items(tree_ref: *tree.TaffyTree, node_id: tree.NodeId, constants: *const AlgoConstants, has_hidden_children: *bool) !std.ArrayList(FlexItem) {
+inline fn generate_anonymous_flex_items(comptime Tree: type, tree_ref: *Tree, node_id: NodeId, constants: *const AlgoConstants, has_hidden_children: *bool) !std.ArrayList(FlexItem) {
+    const TreeApi = LayoutTree(Tree);
     // Percentage sizes of items resolve against the container's inner size, but only if that size
     // is definite. A known main size which is derived from the container's own content is treated
     // as indefinite here.
@@ -626,16 +819,16 @@ inline fn generate_anonymous_flex_items(tree_ref: *tree.TaffyTree, node_id: tree
     else
         constants.node_inner_size.with_main(constants.dir, null);
 
-    const allocator = tree_ref.scratchAllocator();
+    const allocator = TreeApi.scratch_allocator(tree_ref);
     var items = std.ArrayList(FlexItem).empty;
     errdefer items.deinit(allocator);
     // Every in-flow child produces one flex item; reserve once so the list
     // never has to grow (and copy) through the scratch arena.
-    try items.ensureTotalCapacity(allocator, try tree_ref.child_count(node_id));
+    try items.ensureTotalCapacity(allocator, try TreeApi.child_count(tree_ref, node_id));
 
-    const child_ids = try tree_ref.children(node_id);
+    const child_ids = try TreeApi.child_ids(tree_ref, node_id);
     for (child_ids, 0..) |child, index| {
-        const child_style = tree_ref.style_ptr(child) orelse continue;
+        const child_style = TreeApi.get_style(tree_ref, child);
         // The hidden post-pass (below) visits every `display: none` child,
         // including absolutely positioned ones, so record the flag before the
         // absolute check.
@@ -643,7 +836,7 @@ inline fn generate_anonymous_flex_items(tree_ref: *tree.TaffyTree, node_id: tree
             has_hidden_children.* = true;
             continue;
         }
-        if (child_style.position == .absolute) continue;
+        if (child_style.position.is_out_of_flow()) continue;
 
         const aspect_ratio = child_style.aspect_ratio;
         const padding = resolve_length_rect(child_style.padding, constants.node_inner_size.width);
@@ -656,20 +849,22 @@ inline fn generate_anonymous_flex_items(tree_ref: *tree.TaffyTree, node_id: tree
             .order = @intCast(index),
             .size = size_maybe_add(
                 resolve_dimension_size(child_style.size, percent_resolution_size).maybe_apply_aspect_ratio(aspect_ratio),
-                box_sizing_adjustment,
-            ),
+                box_sizing_adjustment),
             .size_style = child_style.size,
             .min_size = size_maybe_add(
                 resolve_auto_size(child_style.min_size, percent_resolution_size),
-                box_sizing_adjustment,
-            ),
+                box_sizing_adjustment),
             .max_size = size_maybe_add(
                 resolve_auto_size(child_style.max_size, percent_resolution_size),
-                box_sizing_adjustment,
-            ),
+                box_sizing_adjustment),
             .aspect_ratio = aspect_ratio,
 
-            .inset = resolve_auto_rect_size_to_option(child_style.inset, constants.node_inner_size),
+            .relative_inset = if (child_style.position == .relative)
+                resolve_relative_inset(
+                    resolve_auto_rect_size_to_option(child_style.inset, constants.node_inner_size),
+                    constants)
+            else
+                geometry.SIZE_F32_ZERO,
             .margin = resolve_auto_rect(child_style.margin, constants.node_inner_size.width),
             .margin_is_auto = auto_rect(child_style.margin),
             .padding = padding,
@@ -678,8 +873,7 @@ inline fn generate_anonymous_flex_items(tree_ref: *tree.TaffyTree, node_id: tree
                 child_style.align_self orelse constants.align_items,
                 child_style.direction,
                 constants.layout_direction,
-                constants.is_column,
-            ),
+                constants.is_column),
             .overflow = child_style.overflow,
             .contain = child_style.contain,
             .scrollbar_width = child_style.scrollbar_width,
@@ -702,6 +896,8 @@ inline fn generate_anonymous_flex_items(tree_ref: *tree.TaffyTree, node_id: tree
 
             .offset_main = 0.0,
             .offset_cross = 0.0,
+
+            .oof_candidates = .empty,
         });
     }
     return items;
@@ -720,8 +916,7 @@ inline fn generate_anonymous_flex_items(tree_ref: *tree.TaffyTree, node_id: tree
 inline fn determine_available_space(
     known_dimensions: Size(?f32),
     outer_available_space: Size(AvailableSpace),
-    constants: *const AlgoConstants,
-) Size(AvailableSpace) {
+    constants: *const AlgoConstants) Size(AvailableSpace) {
     // Note: min/max/preferred size styles have already been applied to known_dimensions in the `compute` function above
     const width: AvailableSpace = if (known_dimensions.width) |node_width|
         .{ .definite = @max(node_width - constants.content_box_inset.horizontal_axis_sum(), 0.0) }
@@ -729,10 +924,8 @@ inline fn determine_available_space(
         math.available_maybe_max(
             math.available_maybe_sub(
                 math.available_maybe_sub(outer_available_space.width, constants.margin.horizontal_axis_sum()),
-                constants.content_box_inset.horizontal_axis_sum(),
-            ),
-            0.0,
-        );
+                constants.content_box_inset.horizontal_axis_sum()),
+            0.0);
 
     const height: AvailableSpace = if (known_dimensions.height) |node_height|
         .{ .definite = @max(node_height - constants.content_box_inset.vertical_axis_sum(), 0.0) }
@@ -740,10 +933,8 @@ inline fn determine_available_space(
         math.available_maybe_max(
             math.available_maybe_sub(
                 math.available_maybe_sub(outer_available_space.height, constants.margin.vertical_axis_sum()),
-                constants.content_box_inset.vertical_axis_sum(),
-            ),
-            0.0,
-        );
+                constants.content_box_inset.vertical_axis_sum()),
+            0.0);
 
     return .{ .width = width, .height = height };
 }
@@ -772,16 +963,15 @@ inline fn determine_available_space(
 ///   Furthermore, the sizing calculations that floor the content box size at zero when applying box-sizing are also ignored.
 ///   (For example, an item with a specified size of zero, positive padding, and box-sizing: border-box will have an
 ///   outer flex base size of zero—and hence a negative inner flex base size.)
-inline fn determine_flex_base_size(
-    tree_ref: *tree.TaffyTree,
+inline fn determine_flex_base_size(comptime Tree: type, tree_ref: *Tree,
     constants: *const AlgoConstants,
     available_space: Size(AvailableSpace),
-    flex_items: []FlexItem,
-) !void {
+    flex_items: []FlexItem) !void {
+    const TreeApi = LayoutTree(Tree);
     const dir = constants.dir;
 
     for (flex_items) |*child| {
-        const child_style = tree_ref.style_ptr(child.node) orelse continue;
+        const child_style = TreeApi.get_style(tree_ref, child.node);
 
         // Parent size for child sizing
         const cross_axis_parent_size = constants.node_inner_size.cross(dir);
@@ -801,8 +991,7 @@ inline fn determine_flex_base_size(
             .definite => |val| .{ .definite = math.f32_maybe_clamp(
                 constants.divided_cross_space(cross_axis_parent_size orelse val),
                 child_min_cross,
-                child_max_cross,
-            ) },
+                child_max_cross) },
             .min_content => if (child_min_cross) |min| AvailableSpace{ .definite = min } else .min_content,
             .max_content => if (child_max_cross) |max| AvailableSpace{ .definite = max } else .max_content,
         };
@@ -819,9 +1008,7 @@ inline fn determine_flex_base_size(
                 math.option_maybe_clamp(
                     child_known_dimensions.cross(dir),
                     transferred_min_size.cross(dir),
-                    transferred_max_size.cross(dir),
-                ),
-            );
+                    transferred_max_size.cross(dir)));
             if (is_stretch_alignment(child.align_self) and
                 !child.margin_is_auto.cross_start(constants.dir) and
                 !child.margin_is_auto.cross_end(constants.dir) and
@@ -832,11 +1019,8 @@ inline fn determine_flex_base_size(
                     math.maybe_max(
                         math.option_maybe_sub(
                             cross_axis_available_space.into_option(),
-                            child.margin.cross_axis_sum(dir),
-                        ),
-                        0.0,
-                    ),
-                );
+                            child.margin.cross_axis_sum(dir)),
+                        0.0));
                 // The cross size of a stretched item is definite if the container has a definite
                 // cross size (https://www.w3.org/TR/css-flexbox-1/#definite-sizes)
                 child_cross_size_is_definite =
@@ -844,7 +1028,9 @@ inline fn determine_flex_base_size(
             }
         }
 
-        const container_width = constants.node_inner_size.main(dir);
+        // Percentage padding and border resolve against the container's inline size (its
+        // width), whichever axis is the main axis.
+        const container_width = constants.node_inner_size.width;
         const box_sizing_adjustment = if (child_style.box_sizing == .content_box) blk: {
             const padding = resolve_length_rect(child_style.padding, container_width);
             const border = resolve_length_rect(child_style.border, container_width);
@@ -858,8 +1044,7 @@ inline fn determine_flex_base_size(
         const flex_basis_style = child_style.flex_basis;
         const resolved_flex_basis = math.maybe_add(
             flex_basis_style.resolve(percent_resolution_main_size),
-            box_sizing_adjustment,
-        );
+            box_sizing_adjustment);
 
         child.flex_basis = flex_basis: {
             // A. If the item has a definite used flex basis, that's the flex base size.
@@ -873,8 +1058,7 @@ inline fn determine_flex_base_size(
             const main_size = child.size.main(dir);
             const main_stretch_size = math.maybe_max(
                 math.option_maybe_sub(percent_resolution_main_size, child.margin.main_axis_sum(dir)),
-                0.0,
-            );
+                0.0);
 
             // A flex basis that is a sizing keyword (min-content, max-content, fit-content,
             // fit-content(...), stretch) is used in place of the main size property: `stretch`
@@ -907,8 +1091,7 @@ inline fn determine_flex_base_size(
                 const resolution = sizing_keyword.resolve_sizing_keyword(
                     child.size_style.main(dir),
                     main_stretch_size,
-                    percent_resolution_main_size,
-                );
+                    percent_resolution_main_size);
                 if (resolution) |resolved| switch (resolved) {
                     .exact => |size| {
                         child.flex_basis_is_definite = true;
@@ -963,15 +1146,14 @@ inline fn determine_flex_base_size(
             child_available_space.set_main(dir, main_space);
             child_available_space.set_cross(dir, cross_axis_available_space);
 
-            break :flex_basis try tree_ref.measure_child_size(
+            break :flex_basis try TreeApi.measure_child_size(tree_ref, 
                 child.node,
                 child_known_dimensions,
                 child_parent_size,
                 child_available_space,
                 .content_size,
                 dir.main_axis(),
-                LINE_FALSE,
-            );
+                LINE_FALSE);
         };
 
         // Floor flex-basis by the padding_border_sum (floors inner_flex_basis at zero)
@@ -1008,15 +1190,14 @@ inline fn determine_flex_base_size(
                 var child_available_space = Size(AvailableSpace){ .width = .min_content, .height = .max_content };
                 child_available_space.set_cross(dir, cross_axis_available_space);
 
-                break :blk2 try tree_ref.measure_child_size(
+                break :blk2 try TreeApi.measure_child_size(tree_ref, 
                     child.node,
                     child_known_dimensions,
                     child_parent_size,
                     child_available_space,
                     .content_size,
                     dir.main_axis(),
-                    LINE_FALSE,
-                );
+                    LINE_FALSE);
             };
 
             // 4.5. Automatic Minimum Size of Flex Items
@@ -1031,8 +1212,7 @@ inline fn determine_flex_base_size(
         // https://github.com/w3c/csswg-drafts/issues/10997
         const hypothetical_inner_min_main = math.f32_maybe_max(
             math.f32_maybe_max(child.resolved_minimum_main_size, transferred_min_size.main(constants.dir)),
-            padding_border_axes_sums.main(constants.dir),
-        );
+            padding_border_axes_sums.main(constants.dir));
         const hypothetical_inner_size =
             math.f32_maybe_clamp(child.flex_basis, hypothetical_inner_min_main, transferred_max_size.main(constants.dir));
         const hypothetical_outer_size = hypothetical_inner_size + child.margin.main_axis_sum(constants.dir);
@@ -1063,8 +1243,7 @@ inline fn collect_flex_lines(
     allocator: std.mem.Allocator,
     constants: *const AlgoConstants,
     available_space: Size(AvailableSpace),
-    flex_items: []FlexItem,
-) ![]FlexLine {
+    flex_items: []FlexItem) ![]FlexLine {
     // Wrapping into multiple lines requires a definite main size. If the container's known main size
     // is derived from its own content (and is thus indefinite) then all items are collected into a
     // single flex line, matching how the container was sized under a min/max-content constraint.
@@ -1144,8 +1323,7 @@ fn collect_balanced_flex_lines(
     allocator: std.mem.Allocator,
     constants: *const AlgoConstants,
     available_space: Size(AvailableSpace),
-    flex_items: []FlexItem,
-) ![]FlexLine {
+    flex_items: []FlexItem) ![]FlexLine {
     if (flex_items.len == 0) {
         return allocator.alloc(FlexLine, 0);
     }
@@ -1194,8 +1372,7 @@ fn collect_balanced_flex_lines(
         item_sizes,
         line_break_size,
         constants.gap.main(constants.dir),
-        min_line_count,
-    );
+        min_line_count);
     defer allocator.free(item_counts);
 
     var lines = try allocator.alloc(FlexLine, item_counts.len);
@@ -1239,12 +1416,11 @@ inline fn item_known_dimension_definiteness(constants: *const AlgoConstants, ite
 }
 
 /// Determine the container's main size (if not already known)
-fn determine_container_main_size(
-    tree_ref: *tree.TaffyTree,
+fn determine_container_main_size(comptime Tree: type, tree_ref: *Tree,
     available_space: Size(AvailableSpace),
     lines: []FlexLine,
-    constants: *AlgoConstants,
-) !void {
+    constants: *AlgoConstants) !void {
+    const TreeApi = LayoutTree(Tree);
     const dir = constants.dir;
     const main_content_box_inset = constants.content_box_inset.main_axis_sum(constants.dir);
 
@@ -1270,7 +1446,7 @@ fn determine_container_main_size(
                     var item_count: usize = 0;
                     for (lines) |line| item_count += line.items.len;
                     if (item_count == 0) break :blk size;
-                    const scratch = tree_ref.scratchAllocator();
+                    const scratch = TreeApi.scratch_allocator(tree_ref);
                     var item_lengths = try scratch.alloc(f32, item_count);
                     defer scratch.free(item_lengths);
                     var length_index: usize = 0;
@@ -1285,8 +1461,7 @@ fn determine_container_main_size(
                         item_lengths,
                         std.math.inf(f32),
                         main_axis_gap,
-                        @max(min_line_count, 1),
-                    );
+                        @max(min_line_count, 1));
                     defer scratch.free(item_counts);
                     var widest_line_length: f32 = 0.0;
                     var index: usize = 0;
@@ -1317,17 +1492,16 @@ fn determine_container_main_size(
                     }
                     break :blk longest_line_length + main_content_box_inset;
                 } else {
-                    break :blk try container_max_content_size(tree_ref, available_space, lines, constants);
+                    break :blk try container_max_content_size(Tree, tree_ref, available_space, lines, constants);
                 }
             },
-            .max_content => break :blk try container_max_content_size(tree_ref, available_space, lines, constants),
+            .max_content => break :blk try container_max_content_size(Tree, tree_ref, available_space, lines, constants),
         }
     };
 
     const clamped_outer_main_size = @max(
         math.f32_maybe_clamp(outer_main_size, constants.min_size.main(constants.dir), constants.max_size.main(constants.dir)),
-        main_content_box_inset - constants.scrollbar_gutter.main(constants.dir),
-    );
+        main_content_box_inset - constants.scrollbar_gutter.main(constants.dir));
 
     // let outer_main_size = inner_main_size + constants.padding_border.main_axis_sum(constants.dir);
     const inner_main_size = math.f32_max(clamped_outer_main_size - main_content_box_inset, 0.0);
@@ -1339,7 +1513,8 @@ fn determine_container_main_size(
 /// The spec formula used for the MinContent/MaxContent branch of
 /// `determine_container_main_size`: the flex container's max-content size is the largest
 /// sum of the items' max-content contributions within a single line.
-fn container_max_content_size(tree_ref: *tree.TaffyTree, available_space: Size(AvailableSpace), lines: []FlexLine, constants: *AlgoConstants) !f32 {
+fn container_max_content_size(comptime Tree: type, tree_ref: *Tree, available_space: Size(AvailableSpace), lines: []FlexLine, constants: *AlgoConstants) !f32 {
+    const TreeApi = LayoutTree(Tree);
     const dir = constants.dir;
     const main_content_box_inset = constants.content_box_inset.main_axis_sum(constants.dir);
 
@@ -1361,14 +1536,20 @@ fn container_max_content_size(tree_ref: *tree.TaffyTree, available_space: Size(A
             // Spec modification: https://www.w3.org/TR/css-flexbox-1/#change-2016-max-contribution
             // Issue: https://github.com/w3c/csswg-drafts/issues/1435
             // Gentest: padding_border_overrides_size_flex_basis_0.html
-            const clamping_basis: ?f32 = math.maybe_max(item.flex_basis, style_preferred);
+            // For column containers the flex base size alone is the clamping basis (as the
+            // spec says): a column item's `height` must not inflate the container's
+            // max-content size beyond the item's flex-basis.
+            // Gentest: blockflex_min_content_ignores_own_height_as_percentage_basis.html
+            const clamping_basis: ?f32 = if (constants.is_row)
+                math.maybe_max(item.flex_basis, style_preferred)
+            else
+                item.flex_basis;
             const flex_basis_min: ?f32 = if (item.flex_shrink == 0.0) clamping_basis else null;
             const flex_basis_max: ?f32 = if (item.flex_grow == 0.0) clamping_basis else null;
 
             const min_main_size = @max(
                 math.option_maybe_max(style_min, flex_basis_min) orelse flex_basis_min orelse item.resolved_minimum_main_size,
-                item.resolved_minimum_main_size,
-            );
+                item.resolved_minimum_main_size);
             const max_main_size =
                 math.option_maybe_min(style_max, flex_basis_max) orelse flex_basis_max orelse std.math.inf(f32);
 
@@ -1396,14 +1577,12 @@ fn container_max_content_size(tree_ref: *tree.TaffyTree, available_space: Size(A
                         break :content_contribution math.f32_maybe_clamp(
                             inner_main_size + item.margin.main_axis_sum(constants.dir),
                             style_min,
-                            style_max,
-                        );
+                            style_max);
                     } else {
                         break :content_contribution math.f32_maybe_clamp(
                             @max(inner_main_size, item.flex_basis) + item.margin.main_axis_sum(constants.dir),
                             style_min,
-                            style_max,
-                        );
+                            style_max);
                     }
                 }
 
@@ -1426,27 +1605,37 @@ fn container_max_content_size(tree_ref: *tree.TaffyTree, available_space: Size(A
 
                 // Known dimensions for child sizing
                 var child_known_dimensions = item.size.with_main(dir, null);
+                {
+                    // Clamp the definite cross size by the cross min/max sizes, as
+                    // `determine_flex_base_size` does: an item measured wider than its
+                    // max-width wraps onto fewer lines and under-reports its height.
+                    const transferred_min_size = item.min_size.maybe_apply_aspect_ratio(item.aspect_ratio);
+                    const transferred_max_size = item.max_size.maybe_apply_aspect_ratio(item.aspect_ratio);
+                    child_known_dimensions.set_cross(
+                        dir,
+                        math.option_maybe_clamp(
+                            child_known_dimensions.cross(dir),
+                            transferred_min_size.cross(dir),
+                            transferred_max_size.cross(dir)));
+                }
                 if (is_stretch_alignment(item.align_self) and child_known_dimensions.cross(dir) == null) {
                     child_known_dimensions.set_cross(
                         dir,
                         math.maybe_max(
                             math.option_maybe_sub(clamped_cross.into_option(), item.margin.cross_axis_sum(dir)),
-                            0.0,
-                        ),
-                    );
+                            0.0));
                 }
 
                 // Either the min- or max- content size depending on which constraint we are sizing under.
                 // TODO: Optimise by using already computed values where available
-                const measured_main_size = try tree_ref.measure_child_size(
+                const measured_main_size = try TreeApi.measure_child_size(tree_ref, 
                     item.node,
                     child_known_dimensions,
                     constants.node_inner_size,
                     child_available_space,
                     .content_size,
                     dir.main_axis(),
-                    LINE_FALSE,
-                );
+                    LINE_FALSE);
 
                 // A known cross size is transferred through the item's aspect-ratio
                 // and floors the measured content size
@@ -1473,14 +1662,12 @@ fn container_max_content_size(tree_ref: *tree.TaffyTree, available_space: Size(A
                     break :content_contribution math.f32_maybe_clamp(
                         inner_main_size + item.margin.main_axis_sum(constants.dir),
                         style_min,
-                        style_max,
-                    );
+                        style_max);
                 } else {
                     break :content_contribution math.f32_maybe_clamp(
                         @max(inner_main_size, item.flex_basis) + item.margin.main_axis_sum(constants.dir),
                         style_min,
-                        style_max,
-                    );
+                        style_max);
                 }
             };
 
@@ -1646,13 +1833,11 @@ inline fn resolve_flexible_lengths(line: *FlexLine, constants: *const AlgoConsta
         const free_space: f32 = if (growing and sum_flex_grow < 1.0)
             math.f32_maybe_min(
                 initial_free_space * sum_flex_grow - total_main_axis_gap,
-                math.maybe_sub(constants.node_inner_size.main(constants.dir), used_space),
-            )
+                math.maybe_sub(constants.node_inner_size.main(constants.dir), used_space))
         else if (shrinking and sum_flex_shrink < 1.0)
             math.f32_maybe_max(
                 initial_free_space * sum_flex_shrink - total_main_axis_gap,
-                math.maybe_sub(constants.node_inner_size.main(constants.dir), used_space),
-            )
+                math.maybe_sub(constants.node_inner_size.main(constants.dir), used_space))
         else
             math.maybe_sub(constants.node_inner_size.main(constants.dir), used_space) orelse (used_flex_factor - used_space);
 
@@ -1694,8 +1879,7 @@ inline fn resolve_flexible_lengths(line: *FlexLine, constants: *const AlgoConsta
                             const scaled_shrink_factor = child.inner_flex_basis * child.flex_shrink;
                             child.target_size.set_main(
                                 constants.dir,
-                                child.flex_basis + free_space * (scaled_shrink_factor / sum_scaled_shrink_factor),
-                            );
+                                child.flex_basis + free_space * (scaled_shrink_factor / sum_scaled_shrink_factor));
                         }
                     }
                 }
@@ -1717,8 +1901,7 @@ inline fn resolve_flexible_lengths(line: *FlexLine, constants: *const AlgoConsta
             child.target_size.set_main(constants.dir, clamped);
             child.outer_target_size.set_main(
                 constants.dir,
-                child.target_size.main(constants.dir) + child.margin.main_axis_sum(constants.dir),
-            );
+                child.target_size.main(constants.dir) + child.margin.main_axis_sum(constants.dir));
 
             total_violation += child.violation;
         }
@@ -1753,12 +1936,11 @@ inline fn resolve_flexible_lengths(line: *FlexLine, constants: *const AlgoConsta
 ///
 /// - [**Determine the hypothetical cross size of each item**](https://www.w3.org/TR/css-flexbox-1/#algo-cross-item)
 ///   by performing layout with the used main size and the available space, treating auto as fit-content.
-inline fn determine_hypothetical_cross_size(
-    tree_ref: *tree.TaffyTree,
+inline fn determine_hypothetical_cross_size(comptime Tree: type, tree_ref: *Tree,
     line: *FlexLine,
     constants: *const AlgoConstants,
-    available_space: Size(AvailableSpace),
-) !void {
+    available_space: Size(AvailableSpace)) !void {
+    const TreeApi = LayoutTree(Tree);
     for (line.items) |*child| {
         const padding_border_sum = child.padding.cross_axis_sum(constants.dir) + child.border.cross_axis_sum(constants.dir);
 
@@ -1771,8 +1953,7 @@ inline fn determine_hypothetical_cross_size(
 
         const child_cross = math.maybe_max(
             math.option_maybe_clamp(child.size.cross(constants.dir), transferred_min_cross, transferred_max_cross),
-            padding_border_sum,
-        );
+            padding_border_sum);
 
         const child_available_cross_base: AvailableSpace = switch (available_space.cross(constants.dir)) {
             .definite => |val| .{ .definite = constants.divided_cross_space(val) },
@@ -1781,8 +1962,7 @@ inline fn determine_hypothetical_cross_size(
         };
         var child_available_cross = math.available_maybe_max(
             math.available_maybe_clamp(child_available_cross_base, transferred_min_cross, transferred_max_cross),
-            padding_border_sum,
-        );
+            padding_border_sum);
 
         // A cross size that is a sizing keyword (min-content, max-content, fit-content,
         // fit-content(...)) determines the available space constraint the item is measured under.
@@ -1791,24 +1971,21 @@ inline fn determine_hypothetical_cross_size(
         const cross_stretch_size = math.maybe_max(
             math.option_maybe_sub(
                 if (constants.node_inner_size.cross(constants.dir)) |val| constants.divided_cross_space(val) else null,
-                child.margin.cross_axis_sum(constants.dir),
-            ),
-            0.0,
-        );
+                child.margin.cross_axis_sum(constants.dir)),
+            0.0);
         if (sizing_keyword.resolve_sizing_keyword(
             child.size_style.cross(constants.dir),
             cross_stretch_size,
-            constants.node_inner_size.cross(constants.dir),
-        )) |resolution| switch (resolution) {
+            constants.node_inner_size.cross(constants.dir))) |resolution| switch (resolution) {
             .measure => |available| child_available_cross = available,
             .exact => {},
         };
 
         const child_inner_cross = child_cross orelse blk: {
-            const input = tree_layout.LayoutInput{
+            const input = layout.LayoutInput{
                 .run_mode = .compute_size,
                 .sizing_mode = .content_size,
-                .axis = tree_layout.requested_axis_from_absolute(constants.dir.cross_axis()),
+                .axis = layout.requested_axis_from_absolute(constants.dir.cross_axis()),
                 .known_dimensions = Size(?f32){
                     .width = if (constants.is_row) child.target_size.width else child_cross,
                     .height = if (constants.is_row) child_cross else child.target_size.height,
@@ -1821,15 +1998,13 @@ inline fn determine_hypothetical_cross_size(
                 },
                 .vertical_margins_are_collapsible = LINE_FALSE,
             };
-            const measured = try tree_ref.compute_child_layout(child.node, input);
+            const measured = try TreeApi.compute_child_layout(tree_ref, child.node, input);
             break :blk @max(
                 math.f32_maybe_clamp(
                     measured.size.get_abs(constants.dir.cross_axis()),
                     transferred_min_cross,
-                    transferred_max_cross,
-                ),
-                padding_border_sum,
-            );
+                    transferred_max_cross),
+                padding_border_sum);
         };
         const child_outer_cross = child_inner_cross + child.margin.cross_axis_sum(constants.dir);
 
@@ -1839,13 +2014,12 @@ inline fn determine_hypothetical_cross_size(
 }
 
 /// Calculate the base lines of the children.
-inline fn calculate_children_base_lines(
-    tree_ref: *tree.TaffyTree,
+inline fn calculate_children_base_lines(comptime Tree: type, tree_ref: *Tree,
     node_size: Size(?f32),
     available_space: Size(AvailableSpace),
     flex_lines: []FlexLine,
-    constants: *const AlgoConstants,
-) !void {
+    constants: *const AlgoConstants) !void {
+    const TreeApi = LayoutTree(Tree);
     // Only compute baselines for flex rows because we only support baseline alignment in the cross axis
     // where that axis is also the inline axis
     // TODO: this may need revisiting if/when we support vertical writing modes
@@ -1869,9 +2043,9 @@ inline fn calculate_children_base_lines(
                 continue;
             }
 
-            const measured_size_and_baselines = try tree_ref.compute_child_layout(
+            const measured_size_and_baselines = try TreeApi.compute_child_layout(tree_ref, 
                 child.node,
-                tree_layout.LayoutInput{
+                layout.LayoutInput{
                     .run_mode = .perform_layout,
                     .sizing_mode = .content_size,
                     .axis = .both,
@@ -1892,8 +2066,7 @@ inline fn calculate_children_base_lines(
                             .{ .definite = constants.container_size.height },
                     },
                     .vertical_margins_are_collapsible = LINE_FALSE,
-                },
-            );
+                });
 
             const baseline = measured_size_and_baselines.baselines.first;
             const height = measured_size_and_baselines.size.height;
@@ -1927,10 +2100,8 @@ inline fn calculate_cross_size(flex_lines: []FlexLine, node_size: Size(?f32), co
             math.maybe_max(
                 math.option_maybe_sub(
                     math.option_maybe_clamp(node_size.cross(constants.dir), cross_min_size, cross_max_size),
-                    cross_axis_padding_border,
-                ),
-                0.0,
-            ) orelse 0.0;
+                    cross_axis_padding_border),
+                0.0) orelse 0.0;
     } else {
         // Otherwise, for each flex line:
         //
@@ -1968,8 +2139,7 @@ inline fn calculate_cross_size(flex_lines: []FlexLine, node_size: Size(?f32), co
             flex_lines[0].cross_size = math.f32_maybe_clamp(
                 flex_lines[0].cross_size,
                 math.option_maybe_sub(cross_min_size, cross_axis_padding_border),
-                math.option_maybe_sub(cross_max_size, cross_axis_padding_border),
-            );
+                math.option_maybe_sub(cross_max_size, cross_axis_padding_border));
         }
     }
 }
@@ -1992,12 +2162,9 @@ inline fn handle_align_content_stretch(flex_lines: []FlexLine, node_size: Size(?
                     math.option_maybe_clamp(
                         node_size.cross(constants.dir) orelse cross_min_size,
                         cross_min_size,
-                        cross_max_size,
-                    ),
-                    cross_axis_padding_border,
-                ),
-                0.0,
-            ) orelse 0.0;
+                        cross_max_size),
+                    cross_axis_padding_border),
+                0.0) orelse 0.0;
 
         const total_cross_axis_gap = sum_axis_gaps(constants.gap.cross(constants.dir), flex_lines.len);
         var lines_total_cross: f32 = total_cross_axis_gap;
@@ -2022,16 +2189,15 @@ inline fn handle_align_content_stretch(flex_lines: []FlexLine, node_size: Size(?
 ///   If the flex item has align-self: stretch, redo layout for its contents, treating this used size as its definite cross size so that percentage-sized children can be resolved.
 ///
 ///   **Note that this step does not affect the main size of the flex item, even if it has an intrinsic aspect ratio**.
-inline fn determine_used_cross_size(
-    tree_ref: *tree.TaffyTree,
+inline fn determine_used_cross_size(comptime Tree: type, tree_ref: *Tree,
     flex_lines: []FlexLine,
-    constants: *const AlgoConstants,
-) !void {
+    constants: *const AlgoConstants) !void {
+    const TreeApi = LayoutTree(Tree);
     for (flex_lines) |*line| {
         const line_cross_size = line.cross_size;
 
         for (line.items) |*child| {
-            const child_style = tree_ref.style_ptr(child.node) orelse continue;
+            const child_style = TreeApi.get_style(tree_ref, child.node);
             // A cross size of `stretch` stretches to the flex line like align-self: stretch
             // (but regardless of the alignment style)
             const cross_is_stretch = child.size_style.cross(constants.dir).is_stretch();
@@ -2045,28 +2211,27 @@ inline fn determine_used_cross_size(
                     // For some reason this particular usage of max_width is an exception to the rule that max_width's transfer
                     // using the aspect_ratio (if set). Both Chrome and Firefox agree on this. And reading the spec, it seems like
                     // a reasonable interpretation. Although it seems to me that the spec *should* apply aspect_ratio here.
-                    const padding = resolve_length_rect_size(child_style.padding, constants.node_inner_size);
-                    const border = resolve_length_rect_size(child_style.border, constants.node_inner_size);
+                    // Percentage padding and border resolve against the container's inline
+                    // size (its width) on all four sides, not against its height for the
+                    // top/bottom sides.
+                    const padding = resolve_length_rect(child_style.padding, constants.node_inner_size.width);
+                    const border = resolve_length_rect(child_style.border, constants.node_inner_size.width);
                     const pb_sum = padding.sum_axes().add(border.sum_axes());
                     const box_sizing_adjustment = if (child_style.box_sizing == .content_box) pb_sum else geometry.SIZE_F32_ZERO;
 
                     const max_size_ignoring_aspect_ratio = size_maybe_add(
                         resolve_auto_size(child_style.max_size, constants.node_inner_size),
-                        box_sizing_adjustment,
-                    );
+                        box_sizing_adjustment);
 
                     break :blk math.f32_maybe_clamp(
                         @max(line_cross_size - child.margin.cross_axis_sum(constants.dir), 0.0),
                         child.min_size.cross(constants.dir),
-                        max_size_ignoring_aspect_ratio.cross(constants.dir),
-                    );
-                } else child.hypothetical_inner_size.cross(constants.dir),
-            );
+                        max_size_ignoring_aspect_ratio.cross(constants.dir));
+                } else child.hypothetical_inner_size.cross(constants.dir));
 
             child.outer_target_size.set_cross(
                 constants.dir,
-                child.target_size.cross(constants.dir) + child.margin.cross_axis_sum(constants.dir),
-            );
+                child.target_size.cross(constants.dir) + child.margin.cross_axis_sum(constants.dir));
         }
     }
 }
@@ -2168,8 +2333,7 @@ inline fn resolve_cross_axis_auto_margins(flex_lines: []FlexLine, constants: *co
             if (child.participates_in_baseline_alignment(constants.dir)) {
                 max_baseline_to_bottom_distance = @max(
                     max_baseline_to_bottom_distance,
-                    child.outer_target_size.cross(constants.dir) - child.baseline,
-                );
+                    child.outer_target_size.cross(constants.dir) - child.baseline);
             }
         }
 
@@ -2203,8 +2367,7 @@ inline fn resolve_cross_axis_auto_margins(flex_lines: []FlexLine, constants: *co
                     free_space,
                     max_baseline,
                     max_baseline_to_bottom_distance,
-                    constants,
-                );
+                    constants);
             }
         }
     }
@@ -2221,8 +2384,7 @@ inline fn align_flex_items_along_cross_axis(
     free_space: f32,
     max_baseline: f32,
     max_baseline_to_bottom_distance: f32,
-    constants: *const AlgoConstants,
-) f32 {
+    constants: *const AlgoConstants) f32 {
     const cross_axis_should_reverse = constants.is_column and constants.layout_direction == .rtl;
 
     // If align-self uses a "safe" overflow-position keyword and the item would overflow its
@@ -2275,8 +2437,7 @@ inline fn align_flex_items_along_cross_axis(
 inline fn determine_container_cross_size(
     flex_lines: []const FlexLine,
     node_size: Size(?f32),
-    constants: *AlgoConstants,
-) f32 {
+    constants: *AlgoConstants) f32 {
     const total_cross_axis_gap = sum_axis_gaps(constants.gap.cross(constants.dir), flex_lines.len);
     var total_line_cross_size: f32 = 0.0;
     for (flex_lines) |line| total_line_cross_size += line.cross_size;
@@ -2289,10 +2450,8 @@ inline fn determine_container_cross_size(
         math.f32_maybe_clamp(
             node_size.cross(constants.dir) orelse (total_line_cross_size + total_cross_axis_gap + padding_border_sum),
             min_cross_size,
-            max_cross_size,
-        ),
-        padding_border_sum - cross_scrollbar_gutter,
-    );
+            max_cross_size),
+        padding_border_sum - cross_scrollbar_gutter);
     const inner_container_size = math.f32_max(outer_container_size - padding_border_sum, 0.0);
 
     constants.container_size.set_cross(constants.dir, outer_container_size);
@@ -2332,24 +2491,23 @@ inline fn align_flex_lines_per_align_content(flex_lines: []FlexLine, constants: 
 }
 
 /// Calculates the layout for a flex-item
-fn calculate_flex_item(
-    tree_ref: *tree.TaffyTree,
+fn calculate_flex_item(comptime Tree: type, tree_ref: *Tree,
     item: *FlexItem,
     total_offset_main: *f32,
     total_offset_cross: f32,
     line_offset_cross: f32,
     total_overflow_rect: *Rect(f32),
     border: Rect(f32),
-    constants: *const AlgoConstants,
-) !void {
+    constants: *const AlgoConstants) !void {
+    const TreeApi = LayoutTree(Tree);
     const container_size = constants.container_size;
     const node_inner_size = constants.node_inner_size;
     const direction = constants.dir;
     const layout_direction = constants.layout_direction;
     const item_definiteness = item_known_dimension_definiteness(constants, item);
-    const layout_output = try tree_ref.compute_child_layout(
+    var layout_output = try TreeApi.compute_child_layout(tree_ref, 
         item.node,
-        tree_layout.LayoutInput{
+        layout.LayoutInput{
             .run_mode = .perform_layout,
             .sizing_mode = .content_size,
             .axis = .both,
@@ -2361,20 +2519,13 @@ fn calculate_flex_item(
                 .height = .{ .definite = container_size.height },
             },
             .vertical_margins_are_collapsible = LINE_FALSE,
-        },
-    );
+        });
     const size = layout_output.size;
 
     const is_rtl_row = direction.is_row() and layout_direction.is_rtl();
     const is_rtl_column = direction.is_column() and layout_direction.is_rtl();
-    const main_relative_inset: f32 = if (is_rtl_row)
-        (item.inset.main_end(direction) orelse (if (item.inset.main_start(direction)) |pos| -pos else null)) orelse 0.0
-    else
-        (item.inset.main_start(direction) orelse (if (item.inset.main_end(direction)) |pos| -pos else null)) orelse 0.0;
-    const cross_relative_inset: f32 = if (is_rtl_column)
-        ((if (item.inset.cross_end(direction)) |pos| -pos else null) orelse item.inset.cross_start(direction)) orelse 0.0
-    else
-        (item.inset.cross_start(direction) orelse (if (item.inset.cross_end(direction)) |pos| -pos else null)) orelse 0.0;
+    const main_relative_inset: f32 = item.relative_inset.main(direction);
+    const cross_relative_inset: f32 = item.relative_inset.cross(direction);
     const effective_line_offset_cross = if (is_rtl_column) 0.0 else line_offset_cross;
 
     const offset_main = if (is_rtl_row)
@@ -2417,7 +2568,7 @@ fn calculate_flex_item(
         .height = if (item.overflow.x == .scroll) item.scrollbar_width else 0.0,
     };
 
-    try tree_ref.set_unrounded_layout(item.node, tree_layout.Layout{
+    try TreeApi.set_unrounded_layout(tree_ref, item.node, layout.Layout{
         .order = item.order,
         .size = size,
         .scrollable_overflow_rect = layout_output.scrollable_overflow_rect,
@@ -2427,7 +2578,17 @@ fn calculate_flex_item(
         .border = item.border,
         .margin = item.margin,
     });
-    if (tree_ref.node(item.node)) |node_data| node_data.final_layout = node_data.unrounded_layout;
+    // Taffy mirrors the unrounded layout into the final layout here so the item is
+    // readable before the rounding pass rewrites it.
+    try TreeApi.set_final_layout(tree_ref, item.node, (try TreeApi.unrounded_layout(tree_ref, item.node)));
+
+    // Keep out-of-flow candidates from the item's subtree, translating anchors from
+    // item-relative to container-relative coordinates
+    item.oof_candidates = layout_output.oof_candidates;
+    layout_output.oof_candidates = .empty;
+    if (item.oof_candidates.items.len != 0) {
+        oof.translateCandidates(&item.oof_candidates, location);
+    }
 
     if (is_rtl_row) {
         total_offset_main.* -= item.offset_main + item.margin.main_axis_sum(direction) + size.main(direction);
@@ -2446,20 +2607,17 @@ fn calculate_flex_item(
             layout_output.scrollable_overflow_rect,
             item.overflow,
             item.contain,
-            constants.is_scroll_container,
-        ));
+            constants.is_scroll_container));
     }
 }
 
 /// Calculates the layout line
-fn calculate_layout_line(
-    tree_ref: *tree.TaffyTree,
+fn calculate_layout_line(comptime Tree: type, tree_ref: *Tree,
     line: *FlexLine,
     total_offset_cross: *f32,
     overflow_rect: *Rect(f32),
     border: Rect(f32),
-    constants: *const AlgoConstants,
-) !void {
+    constants: *const AlgoConstants) !void {
     const container_size = constants.container_size;
     const padding_border = constants.content_box_inset;
     const direction = constants.dir;
@@ -2480,28 +2638,28 @@ fn calculate_layout_line(
         while (index > 0) {
             index -= 1;
             try calculate_flex_item(
-                tree_ref,
+                Tree,
+tree_ref,
                 &line.items[index],
                 &total_offset_main,
                 total_offset_cross.*,
                 line_offset_cross,
                 overflow_rect,
                 border,
-                constants,
-            );
+                constants);
         }
     } else {
         for (line.items) |*item| {
             try calculate_flex_item(
-                tree_ref,
+                Tree,
+tree_ref,
                 item,
                 &total_offset_main,
                 total_offset_cross.*,
                 line_offset_cross,
                 overflow_rect,
                 border,
-                constants,
-            );
+                constants);
         }
     }
 
@@ -2511,11 +2669,9 @@ fn calculate_layout_line(
 }
 
 /// Do a final layout pass and collect the resulting layouts.
-inline fn final_layout_pass(
-    tree_ref: *tree.TaffyTree,
+inline fn final_layout_pass(comptime Tree: type, tree_ref: *Tree,
     flex_lines: []FlexLine,
-    constants: *const AlgoConstants,
-) !Rect(f32) {
+    constants: *const AlgoConstants) !Rect(f32) {
     var total_offset_cross: f32 = if (constants.is_column and constants.layout_direction.is_rtl())
         constants.container_size.width - constants.content_box_inset.cross_end(constants.dir)
     else
@@ -2528,24 +2684,24 @@ inline fn final_layout_pass(
         while (index > 0) {
             index -= 1;
             try calculate_layout_line(
-                tree_ref,
+                Tree,
+tree_ref,
                 &flex_lines[index],
                 &total_offset_cross,
                 &overflow_rect,
                 constants.border,
-                constants,
-            );
+                constants);
         }
     } else {
         for (flex_lines) |*line| {
             try calculate_layout_line(
-                tree_ref,
+                Tree,
+tree_ref,
                 line,
                 &total_offset_cross,
                 &overflow_rect,
                 constants.border,
-                constants,
-            );
+                constants);
         }
     }
 
@@ -2566,25 +2722,22 @@ inline fn final_layout_pass(
 /// Resolve the sizing keywords (`min-content`, `max-content`, `fit-content`, `fit-content(...)`,
 /// and `stretch`) on the size styles of an absolutely positioned item, filling in the
 /// corresponding `known_dimensions` axes.
-fn resolve_absolute_sizing_keywords(
-    tree_ref: *tree.TaffyTree,
-    node_id: tree.NodeId,
+fn resolve_absolute_sizing_keywords(comptime Tree: type, tree_ref: *Tree,
+    node_id: NodeId,
     known_dimensions: *Size(?f32),
     size_style: Size(Dimension),
     area_size: Size(f32),
     inset: Rect(?f32),
     margin: Rect(?f32),
-    sizing_mode: tree_layout.SizingMode,
-) !void {
+    sizing_mode: layout.SizingMode) !void {
+    const TreeApi = LayoutTree(Tree);
     const stretch_size = Size(f32){
         .width = @max(
             area_size.width - (inset.left orelse 0.0) - (inset.right orelse 0.0) - (margin.left orelse 0.0) - (margin.right orelse 0.0),
-            0.0,
-        ),
+            0.0),
         .height = @max(
             area_size.height - (inset.top orelse 0.0) - (inset.bottom orelse 0.0) - (margin.top orelse 0.0) - (margin.bottom orelse 0.0),
-            0.0,
-        ),
+            0.0),
     };
 
     const keyword_width: ?sizing_keyword.SizingKeywordResolution = if (known_dimensions.width == null)
@@ -2615,446 +2768,46 @@ fn resolve_absolute_sizing_keywords(
             .measure => |available| available,
             .exact => unreachable,
         };
-        const measured_size = try tree_ref.measure_child_size_both(
+        const measured_size = try TreeApi.measure_child_size_both(tree_ref, 
             node_id,
             SIZE_NONE,
             to_optional_size(area_size),
             .{ .width = available_width, .height = available_height },
             sizing_mode,
-            LINE_FALSE,
-        );
+            LINE_FALSE);
         known_dimensions.* = to_optional_size(measured_size);
     } else {
         if (keyword_width) |resolution| {
             known_dimensions.width = switch (resolution) {
                 .exact => |width| width,
-                .measure => |available_width| try tree_ref.measure_child_size(
+                .measure => |available_width| try TreeApi.measure_child_size(tree_ref, 
                     node_id,
                     known_dimensions.*,
                     to_optional_size(area_size),
                     .{ .width = available_width, .height = .{ .definite = stretch_size.height } },
                     sizing_mode,
                     .horizontal,
-                    LINE_FALSE,
-                ),
+                    LINE_FALSE),
             };
         }
         if (keyword_height) |resolution| {
             const width_space: AvailableSpace = if (known_dimensions.width) |width| .{ .definite = width } else .{ .definite = stretch_size.width };
             known_dimensions.height = switch (resolution) {
                 .exact => |height| height,
-                .measure => |available_height| try tree_ref.measure_child_size(
+                .measure => |available_height| try TreeApi.measure_child_size(tree_ref, 
                     node_id,
                     known_dimensions.*,
                     to_optional_size(area_size),
                     .{ .width = width_space, .height = available_height },
                     sizing_mode,
                     .vertical,
-                    LINE_FALSE,
-                ),
+                    LINE_FALSE),
             };
         }
     }
 }
 
-/// Perform absolute layout on all absolutely positioned children.
-inline fn perform_absolute_layout_on_absolute_children(
-    tree_ref: *tree.TaffyTree,
-    node_id: tree.NodeId,
-    constants: *const AlgoConstants,
-) !Rect(f32) {
-    const container_width = constants.container_size.width;
-    const container_height = constants.container_size.height;
-    const inset_relative_size = Size(f32){
-        .width = constants.container_size.width - constants.border.horizontal_axis_sum() - constants.scrollbar_gutter.x,
-        .height = constants.container_size.height - constants.border.vertical_axis_sum() - constants.scrollbar_gutter.y,
-    };
 
-    var overflow_rect = geometry.RECT_F32_ZERO;
-
-    const child_ids = try tree_ref.children(node_id);
-    for (child_ids, 0..) |child, order| {
-        const child_style = tree_ref.style_ptr(child) orelse continue;
-
-        // Skip items that are display:none or are not position:absolute
-        if (child_style.box_generation_mode() == .none or child_style.position != .absolute) {
-            continue;
-        }
-
-        const overflow = child_style.overflow;
-        const contain = child_style.contain;
-        const scrollbar_width = child_style.scrollbar_width;
-        const aspect_ratio = child_style.aspect_ratio;
-        const align_self = resolve_self_relative(
-            child_style.align_self orelse constants.align_items,
-            child_style.direction,
-            constants.layout_direction,
-            constants.is_column,
-        );
-        const margin = resolve_auto_rect_to_option(child_style.margin, inset_relative_size.width);
-        const padding = resolve_length_rect(child_style.padding, inset_relative_size.width);
-        const border = resolve_length_rect(child_style.border, inset_relative_size.width);
-        const padding_border_sum = padding.sum_axes().add(border.sum_axes());
-        const box_sizing_adjustment = if (child_style.box_sizing == .content_box) padding_border_sum else geometry.SIZE_F32_ZERO;
-
-        // Resolve inset
-        // Insets are resolved against the container size minus border
-        const left = child_style.inset.left.resolve_to_option(inset_relative_size.width);
-        const right = child_style.inset.right.resolve_to_option(inset_relative_size.width);
-        const top = child_style.inset.top.resolve_to_option(inset_relative_size.height);
-        const bottom = child_style.inset.bottom.resolve_to_option(inset_relative_size.height);
-
-        // Compute known dimensions from min/max/inherent size styles
-        const size_style = child_style.size;
-        const style_size = size_maybe_add(
-            resolve_dimension_size(size_style, to_optional_size(inset_relative_size)).maybe_apply_aspect_ratio(aspect_ratio),
-            box_sizing_adjustment,
-        );
-        const min_size = math.optional_size_maybe_max(
-            optional_size_maybe_or(
-                size_maybe_add(
-                    resolve_auto_size(child_style.min_size, to_optional_size(inset_relative_size)).maybe_apply_aspect_ratio(aspect_ratio),
-                    box_sizing_adjustment,
-                ),
-                to_optional_size(padding_border_sum),
-            ),
-            to_optional_size(padding_border_sum),
-        );
-        const max_size = size_maybe_add(
-            resolve_auto_size(child_style.max_size, to_optional_size(inset_relative_size)).maybe_apply_aspect_ratio(aspect_ratio),
-            box_sizing_adjustment,
-        );
-        var known_dimensions = math.optional_size_maybe_clamp(style_size, min_size, max_size);
-
-        // Resolve any sizing keywords (min-content, max-content, fit-content, fit-content(...),
-        // stretch) in the size styles. An explicitly sized axis takes precedence over the
-        // inset-derived size below.
-        if (size_style.width.is_sizing_keyword() or size_style.height.is_sizing_keyword()) {
-            try resolve_absolute_sizing_keywords(
-                tree_ref,
-                child,
-                &known_dimensions,
-                size_style,
-                inset_relative_size,
-                Rect(?f32){ .left = left, .right = right, .top = top, .bottom = bottom },
-                margin,
-                .content_size,
-            );
-            known_dimensions = math.optional_size_maybe_clamp(
-                known_dimensions.maybe_apply_aspect_ratio(aspect_ratio),
-                min_size,
-                max_size,
-            );
-        }
-
-        // Fill in width from left/right and reapply aspect ratio if:
-        //   - Width is not already known
-        //   - Item has both left and right inset properties set
-        if (known_dimensions.width == null and left != null and right != null) {
-            const new_width_raw = inset_relative_size.width -
-                (margin.left orelse 0.0) -
-                (margin.right orelse 0.0) -
-                left.? -
-                right.?;
-            known_dimensions.width = @max(new_width_raw, 0.0);
-            known_dimensions = math.optional_size_maybe_clamp(
-                known_dimensions.maybe_apply_aspect_ratio(aspect_ratio),
-                min_size,
-                max_size,
-            );
-        }
-
-        // Fill in height from top/bottom and reapply aspect ratio if:
-        //   - Height is not already known
-        //   - Item has both top and bottom inset properties set
-        if (known_dimensions.height == null and top != null and bottom != null) {
-            const new_height_raw = inset_relative_size.height -
-                (margin.top orelse 0.0) -
-                (margin.bottom orelse 0.0) -
-                top.? -
-                bottom.?;
-            known_dimensions.height = @max(new_height_raw, 0.0);
-            known_dimensions = math.optional_size_maybe_clamp(
-                known_dimensions.maybe_apply_aspect_ratio(aspect_ratio),
-                min_size,
-                max_size,
-            );
-        }
-
-        const definite_size = Size(AvailableSpace){
-            .width = .{ .definite = math.f32_maybe_clamp(container_width, min_size.width, max_size.width) },
-            .height = .{ .definite = math.f32_maybe_clamp(container_height, min_size.height, max_size.height) },
-        };
-
-        var final_size: Size(f32) = undefined;
-        if (known_dimensions.width != null and known_dimensions.height != null) {
-            final_size = .{ .width = known_dimensions.width.?, .height = known_dimensions.height.? };
-        } else {
-            const measured_size = try tree_ref.measure_child_size_both(
-                child,
-                known_dimensions,
-                constants.node_inner_size,
-                definite_size,
-                .content_size,
-                LINE_FALSE,
-            );
-            final_size = geometry.optional_size_unwrap_or(known_dimensions, measured_size);
-        }
-        final_size = .{
-            .width = math.f32_maybe_clamp(final_size.width, min_size.width, max_size.width),
-            .height = math.f32_maybe_clamp(final_size.height, min_size.height, max_size.height),
-        };
-
-        const layout_output = try tree_ref.perform_child_layout(
-            child,
-            Size(?f32){ .width = final_size.width, .height = final_size.height },
-            constants.node_inner_size,
-            definite_size,
-            .content_size,
-            LINE_FALSE,
-        );
-
-        const non_auto_margin = Rect(f32){
-            .left = margin.left orelse 0.0,
-            .right = margin.right orelse 0.0,
-            .top = margin.top orelse 0.0,
-            .bottom = margin.bottom orelse 0.0,
-        };
-
-        const free_space = Size(f32){
-            .width = @max(constants.container_size.width - final_size.width - non_auto_margin.horizontal_axis_sum(), 0.0),
-            .height = @max(constants.container_size.height - final_size.height - non_auto_margin.vertical_axis_sum(), 0.0),
-        };
-
-        // Expand auto margins to fill available space. Auto margins only absorb free space
-        // when the box is inset-constrained in that axis (both insets set); otherwise they
-        // resolve to zero and the box is statically positioned (CSS2 §10.3.7 / §10.6.4).
-        const resolved_margin = blk: {
-            const auto_margin_size = Size(f32){
-                .width = blk2: {
-                    const auto_margin_count: u8 = @as(u8, @intFromBool(margin.left == null)) + @as(u8, @intFromBool(margin.right == null));
-                    if (auto_margin_count > 0 and left != null and right != null) {
-                        break :blk2 free_space.width / @as(f32, @floatFromInt(auto_margin_count));
-                    }
-                    break :blk2 0.0;
-                },
-                .height = blk2: {
-                    const auto_margin_count: u8 = @as(u8, @intFromBool(margin.top == null)) + @as(u8, @intFromBool(margin.bottom == null));
-                    if (auto_margin_count > 0 and top != null and bottom != null) {
-                        break :blk2 free_space.height / @as(f32, @floatFromInt(auto_margin_count));
-                    }
-                    break :blk2 0.0;
-                },
-            };
-
-            break :blk Rect(f32){
-                .left = margin.left orelse auto_margin_size.width,
-                .right = margin.right orelse auto_margin_size.width,
-                .top = margin.top orelse auto_margin_size.height,
-                .bottom = margin.bottom orelse auto_margin_size.height,
-            };
-        };
-
-        // Determine flex-relative insets
-        const start_main = if (constants.is_row) left else top;
-        const end_main = if (constants.is_row) right else bottom;
-        const start_cross = if (constants.is_row) top else left;
-        const end_cross = if (constants.is_row) bottom else right;
-        const main_axis_is_horizontal = constants.is_row;
-        const cross_axis_is_horizontal = !constants.is_row;
-        const main_is_rtl = main_axis_is_horizontal and constants.layout_direction.is_rtl();
-        const cross_is_rtl = cross_axis_is_horizontal and constants.layout_direction.is_rtl();
-        const main_axis_flex_start_reversed = constants.dir.is_reverse() != main_is_rtl;
-        const cross_axis_flex_start_reversed = constants.is_wrap_reverse != cross_is_rtl;
-        const main_start_scrollbar_offset = if (main_is_rtl) constants.scrollbar_gutter.main(constants.dir) else 0.0;
-        const cross_start_scrollbar_offset = if (cross_is_rtl) constants.scrollbar_gutter.cross(constants.dir) else 0.0;
-        const main_end_scrollbar_offset = if (main_is_rtl) 0.0 else constants.scrollbar_gutter.main(constants.dir);
-        const cross_end_scrollbar_offset = if (cross_is_rtl) 0.0 else constants.scrollbar_gutter.cross(constants.dir);
-
-        // Apply main-axis alignment
-        const offset_main = if (start_main != null or end_main != null) blk: {
-            if (main_is_rtl and end_main != null) {
-                break :blk constants.container_size.main(constants.dir) -
-                    constants.border.main_end(constants.dir) -
-                    main_end_scrollbar_offset -
-                    final_size.main(constants.dir) -
-                    end_main.? -
-                    resolved_margin.main_end(constants.dir);
-            } else if (start_main) |start| {
-                break :blk start +
-                    constants.border.main_start(constants.dir) +
-                    main_start_scrollbar_offset +
-                    resolved_margin.main_start(constants.dir);
-            } else {
-                break :blk constants.container_size.main(constants.dir) -
-                    constants.border.main_end(constants.dir) -
-                    main_end_scrollbar_offset -
-                    final_size.main(constants.dir) -
-                    end_main.? -
-                    resolved_margin.main_end(constants.dir);
-            }
-        } else blk: {
-            // Stretch is an invalid value for justify_content in the flexbox algorithm, so we
-            // treat it as if it wasn't set (and thus we default to FlexStart behaviour).
-            //
-            // The `safe` overflow-position keyword is intentionally NOT applied here, even when
-            // the abs-positioned item would overflow the main axis: Chrome does not apply safe
-            // fallback to `justify-content` on absolutely-positioned flex items (only the
-            // cross-axis `align-self` does so). Matching the layout authority over a strict
-            // spec read keeps gentest fixtures green; reconsider if Chromium changes behavior.
-            // `start`/`end` are writing-mode relative (they flip for RTL but not for
-            // reversed flex-directions), whereas `flex-start`/`flex-end` and the
-            // distributed keywords' fallbacks are flex-relative.
-            const justify = constants.justify_content orelse style.alignment.JustifyContent.FLEX_START;
-            const start_position = switch (justify.keyword) {
-                .start => !main_is_rtl,
-                .end => main_is_rtl,
-                else => true,
-            };
-            break :blk switch (justify.keyword) {
-                .space_between, .stretch, .flex_start => if (!main_axis_flex_start_reversed)
-                    constants.content_box_inset.main_start(constants.dir) + resolved_margin.main_start(constants.dir)
-                else
-                    constants.container_size.main(constants.dir) -
-                        constants.content_box_inset.main_end(constants.dir) -
-                        final_size.main(constants.dir) -
-                        resolved_margin.main_end(constants.dir),
-                .flex_end => if (main_axis_flex_start_reversed)
-                    constants.content_box_inset.main_start(constants.dir) + resolved_margin.main_start(constants.dir)
-                else
-                    constants.container_size.main(constants.dir) -
-                        constants.content_box_inset.main_end(constants.dir) -
-                        final_size.main(constants.dir) -
-                        resolved_margin.main_end(constants.dir),
-                .start, .end => if (start_position)
-                    constants.content_box_inset.main_start(constants.dir) + resolved_margin.main_start(constants.dir)
-                else
-                    constants.container_size.main(constants.dir) -
-                        constants.content_box_inset.main_end(constants.dir) -
-                        final_size.main(constants.dir) -
-                        resolved_margin.main_end(constants.dir),
-                .space_evenly, .space_around, .center => (constants.container_size.main(constants.dir) +
-                    constants.content_box_inset.main_start(constants.dir) -
-                    constants.content_box_inset.main_end(constants.dir) -
-                    final_size.main(constants.dir) +
-                    resolved_margin.main_start(constants.dir) -
-                    resolved_margin.main_end(constants.dir)) / 2.0,
-            };
-        };
-
-        // Apply cross-axis alignment
-        const offset_cross = if (start_cross != null or end_cross != null) blk: {
-            if (cross_is_rtl and end_cross != null) {
-                break :blk constants.container_size.cross(constants.dir) -
-                    constants.border.cross_end(constants.dir) -
-                    cross_end_scrollbar_offset -
-                    final_size.cross(constants.dir) -
-                    end_cross.? -
-                    resolved_margin.cross_end(constants.dir);
-            } else if (start_cross) |start| {
-                break :blk start +
-                    constants.border.cross_start(constants.dir) +
-                    cross_start_scrollbar_offset +
-                    resolved_margin.cross_start(constants.dir);
-            } else {
-                break :blk constants.container_size.cross(constants.dir) -
-                    constants.border.cross_end(constants.dir) -
-                    cross_end_scrollbar_offset -
-                    final_size.cross(constants.dir) -
-                    end_cross.? -
-                    resolved_margin.cross_end(constants.dir);
-            }
-        } else blk: {
-            const cross_overflows = final_size.cross(constants.dir) + resolved_margin.cross_axis_sum(constants.dir) >
-                constants.container_size.cross(constants.dir) - constants.content_box_inset.cross_axis_sum(constants.dir);
-            const cross_keyword = alignment.resolve_self_alignment_safety(align_self, cross_overflows);
-            // `start`/`end` (and `baseline`, whose static-position fallback is `start`) are
-            // writing-mode relative: they flip for RTL but not for `wrap-reverse`.
-            // `flex-start`/`flex-end` and the `stretch` fallback are flex-relative.
-            const start_position = switch (cross_keyword) {
-                .start, .baseline => !cross_is_rtl,
-                .end => cross_is_rtl,
-                else => true,
-            };
-            const end_aligned = blk2: {
-                break :blk2 constants.container_size.cross(constants.dir) -
-                    constants.content_box_inset.cross_end(constants.dir) -
-                    final_size.cross(constants.dir) -
-                    resolved_margin.cross_end(constants.dir);
-            };
-            const start_aligned = blk2: {
-                break :blk2 constants.content_box_inset.cross_start(constants.dir) + resolved_margin.cross_start(constants.dir);
-            };
-            break :blk switch (cross_keyword) {
-                // Stretch alignment does not apply to absolutely positioned items
-                // See "Example 3" at https://www.w3.org/TR/css-flexbox-1/#abspos-items
-                // Note: Stretch should be FlexStart not Start when we support both
-                .start, .end, .baseline => if (start_position) start_aligned else end_aligned,
-                .stretch, .flex_start => if (!cross_axis_flex_start_reversed) start_aligned else end_aligned,
-                .flex_end => if (cross_axis_flex_start_reversed) start_aligned else end_aligned,
-                .center => (constants.container_size.cross(constants.dir) +
-                    constants.content_box_inset.cross_start(constants.dir) -
-                    constants.content_box_inset.cross_end(constants.dir) -
-                    final_size.cross(constants.dir) +
-                    resolved_margin.cross_start(constants.dir) -
-                    resolved_margin.cross_end(constants.dir)) / 2.0,
-                // SelfStart/SelfEnd are resolved to Start/End against the item's own direction
-                // where `align_self` is read above.
-                .self_start, .self_end => unreachable,
-            };
-        };
-
-        const location = if (constants.is_row)
-            Point(f32){ .x = offset_main, .y = offset_cross }
-        else
-            Point(f32){ .x = offset_cross, .y = offset_main };
-        const scrollbar_size = Size(f32){
-            .width = if (overflow.y == .scroll) scrollbar_width else 0.0,
-            .height = if (overflow.x == .scroll) scrollbar_width else 0.0,
-        };
-        try tree_ref.set_unrounded_layout(child, tree_layout.Layout{
-            .order = @intCast(order),
-            .size = final_size,
-            .scrollable_overflow_rect = layout_output.scrollable_overflow_rect,
-            .scrollbar_size = scrollbar_size,
-            .location = location,
-            .padding = padding,
-            .border = border,
-            .margin = resolved_margin,
-        });
-        if (tree_ref.node(child)) |node_data| node_data.final_layout = node_data.unrounded_layout;
-
-        {
-            // Location is measured from the scroll origin (the inline-start edge: right side in RTL)
-            const absolute_area_offset = Point(f32){
-                .x = constants.border.left + (if (constants.layout_direction.is_rtl()) constants.scrollbar_gutter.x else 0.0),
-                .y = constants.border.top,
-            };
-            const relative_location = Point(f32){
-                .x = location.x - absolute_area_offset.x,
-                .y = location.y - absolute_area_offset.y,
-            };
-            const contribution_location = if (constants.layout_direction.is_rtl())
-                Point(f32){ .x = inset_relative_size.width - relative_location.x - final_size.width, .y = relative_location.y }
-            else
-                relative_location;
-            overflow_rect = geometry.rect_union(overflow_rect, scrollable_overflow.compute_scrollable_overflow_contribution(
-                contribution_location,
-                final_size,
-                layout_output.scrollable_overflow_rect,
-                overflow,
-                contain,
-                constants.is_scroll_container,
-            ));
-        }
-    }
-
-    return overflow_rect;
-}
-
-/// Computes the total space taken up by gaps in an axis given:
-///   - The size of each gap
-///   - The number of items (children or flex-lines) between which there are gaps
 inline fn sum_axis_gaps(gap: f32, num_items: usize) f32 {
     // Gaps only exist between items, so...
     if (num_items <= 1) {
@@ -3224,8 +2977,7 @@ const balance = struct {
         start_lo: usize,
         start_hi: usize,
         col_lo: usize,
-        col_hi: usize,
-    ) void {
+        col_hi: usize) void {
         if (start_lo > start_hi) {
             return;
         }
@@ -3297,8 +3049,7 @@ const balance = struct {
         item_sizes: []const f32,
         line_limit: f32,
         gap_between_items: f32,
-        min_line_count: usize,
-    ) ![]usize {
+        min_line_count: usize) ![]usize {
         const item_count = item_sizes.len;
         std.debug.assert(item_count > 0);
         const gap = to_size(gap_between_items);
@@ -3458,21 +3209,7 @@ inline fn is_stretch_content(value: style.alignment.AlignContent) bool {
 /// `AlignSelf.resolve_self_relative` implemented locally with an explicit result
 /// type (`src/style/alignment.zig`'s version fails to compile under Zig 0.17's
 /// enum-literal rules when reached at runtime; this is the same logic).
-inline fn resolve_self_relative(
-    alignment_value: style.alignment.AlignItems,
-    item_direction: style.Direction,
-    container_direction: style.Direction,
-    axis_is_inline: bool,
-) style.alignment.AlignItems {
-    const flip = axis_is_inline and item_direction != container_direction;
-    const resolved: style.alignment.AlignItemsKeyword = switch (alignment_value.keyword) {
-        .self_start => if (flip) style.alignment.AlignItemsKeyword.end else style.alignment.AlignItemsKeyword.start,
-        .self_end => if (flip) style.alignment.AlignItemsKeyword.start else style.alignment.AlignItemsKeyword.end,
-        else => alignment_value.keyword,
-    };
-    return .{ .keyword = resolved, .safety = alignment_value.safety };
-}
-
+const resolve_self_relative = alignment_common.resolve_self_relative;
 /// `Size<f32>` -> `Size<?f32>` (Rust's `.map(Some)`).
 inline fn to_optional_size(value: Size(f32)) Size(?f32) {
     return .{ .width = value.width, .height = value.height };
@@ -3608,7 +3345,6 @@ test "flex records hold a basis and violation" {
         .flex_grow = 0,
         .flex_basis_is_definite = false,
         .resolved_minimum_main_size = 0,
-        .inset = .{ .left = null, .right = null, .top = null, .bottom = null },
         .margin = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
         .margin_is_auto = .{ .left = false, .right = false, .top = false, .bottom = false },
         .padding = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
@@ -3625,6 +3361,8 @@ test "flex records hold a basis and violation" {
         .baseline = 0,
         .offset_main = 0,
         .offset_cross = 0,
+        .relative_inset = geometry.SIZE_F32_ZERO,
+        .oof_candidates = .empty,
     };
     item.violation = 3;
     try testing.expectEqual(@as(f32, 20), item.flex_basis);
@@ -3633,12 +3371,12 @@ test "flex records hold a basis and violation" {
 
 test "flex wrap creates independent cross-axis lines" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const child_style = style.Style{ .size = .{ .width = .length(30), .height = .length(10) } };
     const first = try tree_ref.new_leaf(child_style);
     const second = try tree_ref.new_leaf(child_style);
-    const root = try tree_ref.new_with_children(.{ .flex_wrap = .wrap, .size = .{ .width = .length(50), .height = .length(40) } }, &[_]tree.NodeId{ first, second });
+    const root = try tree_ref.new_with_children(.{ .flex_wrap = .wrap, .size = .{ .width = .length(50), .height = .length(40) } }, &[_]NodeId{ first, second });
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 50 }, .height = .{ .definite = 40 } });
     const first_layout = try tree_ref.layout_of(first);
     const second_layout = try tree_ref.layout_of(second);
@@ -3648,11 +3386,11 @@ test "flex wrap creates independent cross-axis lines" {
 
 test "flex child layout receives used size for percentage descendants" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const grandchild = try tree_ref.new_leaf(.{ .size = .{ .width = .percent(1), .height = .length(10) } });
-    const child = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .percent(0.5), .height = .length(20) } }, &[_]tree.NodeId{grandchild});
-    const root = try tree_ref.new_with_children(.{ .size = .{ .width = .length(80), .height = .length(30) } }, &[_]tree.NodeId{child});
+    const child = try tree_ref.new_with_children(.{ .display = .block, .size = .{ .width = .percent(0.5), .height = .length(20) } }, &[_]NodeId{grandchild});
+    const root = try tree_ref.new_with_children(.{ .size = .{ .width = .length(80), .height = .length(30) } }, &[_]NodeId{child});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 80 }, .height = .{ .definite = 30 } });
     try testing.expectEqual(@as(f32, 40), (try tree_ref.layout_of(child)).size.width);
     try testing.expectEqual(@as(f32, 40), (try tree_ref.layout_of(grandchild)).size.width);
@@ -3660,14 +3398,14 @@ test "flex child layout receives used size for percentage descendants" {
 
 test "flex positions absolute children against the container" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const absolute = try tree_ref.new_leaf(.{
         .position = .absolute,
         .inset = .{ .left = .length(10), .right = .auto(), .top = .length(5), .bottom = .auto() },
         .size = .{ .width = .length(20), .height = .length(10) },
     });
-    const root = try tree_ref.new_with_children(.{}, &[_]tree.NodeId{absolute});
+    const root = try tree_ref.new_with_children(.{}, &[_]NodeId{absolute});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 50 } });
     const result = try tree_ref.layout_of(absolute);
     try testing.expectEqual(@as(f32, 10), result.location.x);
@@ -3677,35 +3415,35 @@ test "flex positions absolute children against the container" {
 
 test "flex reverse direction and auto margins use main-axis free space" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const first = try tree_ref.new_leaf(.{ .size = .{ .width = .length(20), .height = .length(10) } });
     const second = try tree_ref.new_leaf(.{ .size = .{ .width = .length(30), .height = .length(10) } });
-    const reverse_root = try tree_ref.new_with_children(.{ .flex_direction = .row_reverse, .size = .{ .width = .length(100), .height = .length(20) } }, &[_]tree.NodeId{ first, second });
+    const reverse_root = try tree_ref.new_with_children(.{ .flex_direction = .row_reverse, .size = .{ .width = .length(100), .height = .length(20) } }, &[_]NodeId{ first, second });
     try tree_ref.compute_layout(reverse_root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 20 } });
     try testing.expectEqual(@as(f32, 80), (try tree_ref.layout_of(first)).location.x);
     try testing.expectEqual(@as(f32, 50), (try tree_ref.layout_of(second)).location.x);
 
-    var auto_tree = tree.TaffyTree.init(testing.allocator);
+    var auto_tree = tree.Tree.init(testing.allocator);
     defer auto_tree.deinit();
     const auto_child = try auto_tree.new_leaf(.{
         .size = .{ .width = .length(20), .height = .length(10) },
         .margin = .{ .left = .auto(), .right = .zero(), .top = .zero(), .bottom = .zero() },
     });
-    const auto_root = try auto_tree.new_with_children(.{ .size = .{ .width = .length(100), .height = .length(20) } }, &[_]tree.NodeId{auto_child});
+    const auto_root = try auto_tree.new_with_children(.{ .size = .{ .width = .length(100), .height = .length(20) } }, &[_]NodeId{auto_child});
     try auto_tree.compute_layout(auto_root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 20 } });
     try testing.expectEqual(@as(f32, 80), (try auto_tree.layout_of(auto_child)).location.x);
 }
 
 test "flex distributed justification expands inter-item gaps" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const item_style = style.Style{ .size = .{ .width = .length(10), .height = .length(10) } };
     const a = try tree_ref.new_leaf(item_style);
     const b = try tree_ref.new_leaf(item_style);
     const c = try tree_ref.new_leaf(item_style);
-    const root = try tree_ref.new_with_children(.{ .justify_content = .space_between, .size = .{ .width = .length(100), .height = .length(20) } }, &[_]tree.NodeId{ a, b, c });
+    const root = try tree_ref.new_with_children(.{ .justify_content = .space_between, .size = .{ .width = .length(100), .height = .length(20) } }, &[_]NodeId{ a, b, c });
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 20 } });
     try testing.expectEqual(@as(f32, 0), (try tree_ref.layout_of(a)).location.x);
     try testing.expectEqual(@as(f32, 45), (try tree_ref.layout_of(b)).location.x);
@@ -3714,11 +3452,11 @@ test "flex distributed justification expands inter-item gaps" {
 
 test "flexing freezes max violations and redistributes remaining space" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const first = try tree_ref.new_leaf(.{ .flex_basis = .length(20), .flex_grow = 1, .size = .{ .width = .auto, .height = .length(10) } });
     const second = try tree_ref.new_leaf(.{ .flex_basis = .length(20), .flex_grow = 1, .max_size = .{ .width = .length(30), .height = .auto() }, .size = .{ .width = .auto, .height = .length(10) } });
-    const root = try tree_ref.new_with_children(.{ .size = .{ .width = .length(100), .height = .length(20) } }, &[_]tree.NodeId{ first, second });
+    const root = try tree_ref.new_with_children(.{ .size = .{ .width = .length(100), .height = .length(20) } }, &[_]NodeId{ first, second });
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 20 } });
     try testing.expectEqual(@as(f32, 70), (try tree_ref.layout_of(first)).size.width);
     try testing.expectEqual(@as(f32, 30), (try tree_ref.layout_of(second)).size.width);
@@ -3726,12 +3464,12 @@ test "flexing freezes max violations and redistributes remaining space" {
 
 test "flex wrap-reverse stacks lines from the cross-axis end" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const child_style = style.Style{ .size = .{ .width = .length(30), .height = .length(10) } };
     const first = try tree_ref.new_leaf(child_style);
     const second = try tree_ref.new_leaf(child_style);
-    const root = try tree_ref.new_with_children(.{ .flex_wrap = .wrap_reverse, .size = .{ .width = .length(50), .height = .length(40) } }, &[_]tree.NodeId{ first, second });
+    const root = try tree_ref.new_with_children(.{ .flex_wrap = .wrap_reverse, .size = .{ .width = .length(50), .height = .length(40) } }, &[_]NodeId{ first, second });
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 50 }, .height = .{ .definite = 40 } });
     try testing.expectEqual(@as(f32, 30), (try tree_ref.layout_of(first)).location.y);
     try testing.expectEqual(@as(f32, 10), (try tree_ref.layout_of(second)).location.y);
@@ -3787,8 +3525,7 @@ fn naive_line_item_counts(
     item_sizes: []const f32,
     line_limit: f32,
     gap_between_items: f32,
-    min_line_count: usize,
-) ![]usize {
+    min_line_count: usize) ![]usize {
     const item_count = item_sizes.len;
     const gap = balance.to_size(gap_between_items);
     const limit: f64 = @floatCast(line_limit);
@@ -3911,8 +3648,7 @@ test "balance dynamic program matches the naive DP" {
         testing.expectEqualSlices(usize, expected, actual) catch |err| {
             std.debug.print(
                 "case {d}: item_sizes={any} line_limit={d} gap={d} min_line_count={d}\n",
-                .{ case, item_sizes, line_limit, gap_between_items, min_line_count },
-            );
+                .{ case, item_sizes, line_limit, gap_between_items, min_line_count });
             return err;
         };
     }
@@ -3944,7 +3680,7 @@ test "balance zero sized item rule matches the reference oracle" {
 
 test "flex-wrap balance splits items across lines" {
     const testing = std.testing;
-    var tree_ref = tree.TaffyTree.init(testing.allocator);
+    var tree_ref = tree.Tree.init(testing.allocator);
     defer tree_ref.deinit();
     const item_style = style.Style{ .size = .{ .width = .length(30), .height = .length(10) } };
     const a = try tree_ref.new_leaf(item_style);
@@ -3953,7 +3689,7 @@ test "flex-wrap balance splits items across lines" {
     const root = try tree_ref.new_with_children(.{
         .flex_wrap = .balance,
         .size = .{ .width = .length(60), .height = .length(40) },
-    }, &[_]tree.NodeId{ a, b, c });
+    }, &[_]NodeId{ a, b, c });
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 60 }, .height = .{ .definite = 40 } });
     // Ties are broken by assigning the most items to the first line: [a, b] / [c],
     // and align-content: stretch spreads the two lines over the 40px cross size.

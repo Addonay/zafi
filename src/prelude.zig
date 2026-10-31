@@ -1,9 +1,9 @@
 //! Taffy `prelude.rs` module root.
 
 pub const geometry = @import("geometry.zig");
-pub const style = @import("style/mod.zig");
-pub const tree = @import("tree/mod.zig");
-pub const helpers = @import("style_helpers.zig");
+pub const style = @import("style/root.zig");
+pub const tree = @import("tree/root.zig");
+pub const style_helpers = @import("style_helpers.zig");
 
 pub const Size = geometry.Size;
 pub const Point = geometry.Point;
@@ -45,26 +45,21 @@ pub const MaxTrackSizingFunction = style.grid.MaxTrackSizingFunction;
 pub const MinTrackSizingFunction = style.grid.MinTrackSizingFunction;
 pub const RepetitionCount = style.grid.RepetitionCount;
 pub const TrackSizingFunction = style.grid.TrackSizingFunction;
-pub const TaffyTree = tree.TaffyTree;
-pub const TaffyConfig = tree.taffy_tree.TaffyConfig;
+pub const Tree = tree.Tree;
+pub const TreeConfig = tree.TreeConfig;
 pub const Layout = tree.Layout;
 pub const NodeId = tree.NodeId;
-pub const LayoutPartialTree = tree.traits.LayoutPartialTree;
-pub const TraversePartialTree = tree.traits.TraversePartialTree;
-pub const TraverseTree = tree.traits.TraverseTree;
-pub const RoundTree = tree.traits.RoundTree;
-pub const PrintTree = tree.traits.PrintTree;
 
-pub const auto = helpers.auto;
-pub const length = helpers.length;
-pub const percent = helpers.percent;
-pub const zero = helpers.zero;
-pub const min_content = helpers.min_content;
-pub const max_content = helpers.max_content;
-pub const fit_content = helpers.fit_content;
-pub const fr = helpers.fr;
-pub const flex = helpers.flex;
-pub const line = helpers.line;
-pub const span = helpers.span;
-pub const minmax = helpers.minmax;
-pub const repeat = helpers.repeat;
+pub const auto = style_helpers.auto;
+pub const length = style_helpers.length;
+pub const percent = style_helpers.percent;
+pub const zero = style_helpers.zero;
+pub const min_content = style_helpers.min_content;
+pub const max_content = style_helpers.max_content;
+pub const fit_content = style_helpers.fit_content;
+pub const fr = style_helpers.fr;
+pub const flex = style_helpers.flex;
+pub const line = style_helpers.line;
+pub const span = style_helpers.span;
+pub const minmax = style_helpers.minmax;
+pub const repeat = style_helpers.repeat;

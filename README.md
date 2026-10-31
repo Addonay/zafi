@@ -1,23 +1,32 @@
 # zlay
 
-A standalone Zig layout engine: a faithful, behavior-verified port of
-[Taffy](https://github.com/DioxusLabs/taffy) 0.14 (pinned at
-`v0.14.0-7-g1b918ba`). Flexbox, grid, block/float layout, RTL, baselines,
-absolute positioning, content sizing, scrollable overflow and
-`calc()`-resolved lengths — with Taffy's API shape and semantics.
+A standalone Zig layout engine: a behavior-verified port of
+[Taffy](https://github.com/DioxusLabs/taffy) (pinned at `22f941e`, upstream
+`main` as of 2026-10-03). Flexbox, grid, block/float layout, RTL, baselines,
+absolute positioning, content sizing and scrollable overflow — with Taffy's
+behavior, and a Zig-idiomatic API over it.
 
-**Status: behavioral parity with Taffy 0.14, and faster overall in the matched
-benchmark suite** (geometric mean ~0.86× Taffy's time in both wall-clock and
-CPU-time measurements; block chains 0.57–0.68×, tree creation 0.48–0.62×,
-flex/grid largely at parity, mixed workloads 1.08–1.21×).
+**Status: behavioral parity with the pinned Taffy on its full generated fixture
+corpus, and roughly at parity overall in the matched benchmark suite** —
+geometric mean **1.01×** Taffy's wall-clock time and **0.90×** on CPU time
+(both figures move by roughly ±0.02 between runs on a shared host). See
+[tools/bench/README.md](tools/bench/README.md) for the full table, the
+per-scenario breakdown and the method.
 
 | Gate | Result |
 | --- | --- |
-| Taffy generated XML fixtures | **6,084 / 6,084** (incl. scroll extents and resolved grid track lists) |
-| Unit tests (`zig build test`) | **87 / 87** (**97 / 97** with `-Dserde=true`) |
-| Differential oracle vs real Taffy (`zig build parity`) | **36 / 36 nodes** |
-| Matched benchmarks (`zig build bench-compare` / `bench-cpu`) | geomean **0.862×** wall / **0.856×** CPU (port faster; best-of-N, pinned CPU; re-verified **0.958×** CPU on a second host, 2026-09-22 — see report.md §2.4) |
+| Taffy generated XML fixtures (current pin) | **6,192 / 6,192** |
+| Taffy generated XML fixtures (older baseline pin) | **6,076 / 6,084** — the 8 failures are fixtures whose expectations upstream deliberately changed (`align_baseline_child_margin_percent`, `rounding_fractial_input_6/7`) |
+| Unit tests (`zig build test`) | **92 / 92** (**103 / 103** with `-Dserde=true`) |
+| Host-genericity differential test | a second, independent `LayoutTree` implementor produces identical layouts — see `src/tree/interfaces_test.zig` |
+| Matched benchmarks (`zig build bench-compare -- --repeat 5`) | geomean **1.01×** wall / **0.90×** CPU |
 | Taffy `serde` wire format | validated against Rust-generated JSON (`audit/serde_format_rust.txt`) |
+
+> Two earlier claims in this file were wrong and have been corrected. The
+> benchmark figure was measured with the library compiled at `Debug`, so it was
+> not a like-for-like comparison; and the fixture count predates the upstream
+> pin move. Both are recorded rather than quietly replaced — see
+> `tools/bench/README.md` § "Known trade-off" and the round-3 notes.
 
 The port is checked in file-by-file against the pinned Rust sources; the parity
 verdict, evidence and the (non-behavioral) remaining API gaps are documented in
@@ -48,7 +57,7 @@ const exe_mod = b.createModule(.{
 // src/main.zig
 const zlay = @import("zlay");
 
-var tree = zlay.TaffyTree.init(allocator);
+var tree = zlay.Tree.init(allocator);
 const root = try tree.new_with_children(
     .{
         .display = .flex,
@@ -98,8 +107,8 @@ plan.md                campaign plan and optimization results
 ## Building and testing
 
 ```sh
-zig build test                 # 87 unit tests
-zig build test -Dserde=true    # 97 tests, including Taffy wire-format serde
+zig build test                 # 92 unit tests
+zig build test -Dserde=true    # 103 tests, including Taffy wire-format serde
 zig build check                # alias for `test`
 zig build fixtures             # run the XML fixture suite in-process
 zig build fixtures-bin         # install the fixture runner into zig-out/bin
@@ -108,8 +117,9 @@ zig build parity -- --report   # differential harness (needs cargo)
 zig build audit                # static Rust-vs-Zig declaration diff
 zig build bench                # Zig benchmarks (defaults to ReleaseFast)
 zig build bench-rust           # Rust Taffy mirror benchmarks
-zig build bench-compare        # matched ratio table (`-- --repeat 3 --out ...`)
-zig build bench-cpu            # CPU-time ratio table (`-- --repeat 3 --cpu 2`)
+zig build bench-compare        # matched ratio table (`-- --repeat 5 --out ...`)
+zig build bench-cpu            # CPU-time ratio table (`-- --repeat 5 --cpu 2`)
+zig build bench-allocs         # allocation census per layout pass
 ```
 
 Useful filters and helpers:
@@ -144,7 +154,18 @@ supporting Zig 0.17 development builds.
 - `CompactLength` and its wrappers use Taffy's u64 wire bits with the same
   deserialization tag validation (calc is rejected on read).
 - Enums use PascalCase names; alignments use `Safe`-prefixed strings;
-  `GridPlacement`/`RepetitionCount` use Taffy's external tagging.
+  `GridPlacement`/`RepetitionCount` use Taffy's external tagging, which serde.zig
+  handles natively, so those two need only a `rename` map.
+
+Most of `src/serde_hooks.zig` is **not** a workaround: it is a port of the
+`impl Serialize` / `impl Deserialize` blocks that Taffy itself hand-writes for
+`CompactLength` (`.references/taffy/src/style/compact_length.rs:550`), the
+alignment types (`alignment.rs:452`) and their wrappers. Those types exist
+precisely because their in-memory shape differs from their wire shape, and no
+reflection-based serializer can bridge that. Only `NamedLine`/`NamedSpan` keep a
+hook for a structural reason: upstream models them as Rust *tuple variants*
+(`["foo", -1]`), and serde.zig renders a struct as an object with no
+newtype/transparent mode.
 
 The expected wire format was captured from the pinned Rust crate into
 `audit/serde_format_rust.txt`, and the tests deserialize Rust-generated JSON
@@ -156,8 +177,11 @@ the gitignored `zig-pkg/` directory at configure time).
 
 | Component | Revision |
 | --- | --- |
-| Taffy | `1b918bafcab101dd234ebeb27da0443e24fd9de2` (`v0.14.0-7-g1b918ba`, 2026-09-03) |
-| Tested Zig | `0.17.0-dev.2122+3e15e99e6` (floor `0.17.0-dev.2085+5e36170b5`) |
+| Taffy (tracked) | `22f941e19e05d1b29621703b4f3a9d96d7839886` (upstream `main`, 2026-10-03) |
+| Taffy (baseline fixtures) | `1b918bafcab101dd234ebeb27da0443e24fd9de2`, kept for the historical corpus |
+| Zig | `0.17.0` floor, per `build.zig.zon` |
+
+`tools/pin.env` records both revisions and the gates they gate.
 
 ## License and provenance
 

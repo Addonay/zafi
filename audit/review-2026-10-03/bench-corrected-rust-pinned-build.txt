@@ -1,0 +1,17 @@
+     Locking 12 packages to latest compatible versions
+   Compiling version_check v0.9.5
+   Compiling arrayvec v0.7.8
+   Compiling smallvec v1.16.1
+   Compiling slotmap v1.1.1
+   Compiling taffy v0.14.0 (/tmp/zlay-audit-pin/.references/taffy)
+   Compiling zlay-corrected v0.1.0 (/tmp/zlay-corrected-pinned)
+warning: struct `CountingAllocator` is never constructed
+  --> src/main.rs:20:8
+   |
+20 | struct CountingAllocator;
+   |        ^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `zlay-corrected` (bin "zlay-corrected") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 27.00s

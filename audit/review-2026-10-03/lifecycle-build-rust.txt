@@ -1,0 +1,2 @@
+   Compiling zlay-corrected v0.1.0 (/tmp/zlay-corrected-pinned)
+    Finished `release` profile [optimized] target(s) in 20.01s

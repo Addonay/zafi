@@ -1,6 +1,6 @@
 //! Direct-port home for Taffy's `util/resolve.rs`.
 
-const available = @import("../style/available_space.zig");
+const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
 const dimension = @import("../style/dimension.zig");
 
 pub const MaybeResolve = struct {};
@@ -52,7 +52,7 @@ pub fn resolve_dimension(value: dimension.Dimension, basis: ?f32) ?f32 {
     return value.resolve(basis);
 }
 
-pub fn available_or(value: available.AvailableSpace, fallback: f32) f32 {
+pub fn available_or(value: AvailableSpace, fallback: f32) f32 {
     return value.unwrap_or(fallback);
 }
 

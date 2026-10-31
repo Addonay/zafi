@@ -5,23 +5,22 @@
 
 const std = @import("std");
 const geometry = @import("../../geometry.zig");
-const style = @import("../../style/mod.zig");
-const available_mod = @import("../../style/available_space.zig");
+const style = @import("../../style/root.zig");
+const AvailableSpace = @import("../../style/available_space.zig").AvailableSpace;
 const math = @import("../../util/math.zig");
-const taffy_tree = @import("../../tree/taffy_tree.zig");
-const layout_mod = @import("../../tree/layout.zig");
+const layout = @import("../../tree/layout.zig");
 const coordinates = @import("types/coordinates.zig");
 const grid_track = @import("types/grid_track.zig");
-const grid_item_mod = @import("types/grid_item.zig");
-const counts_mod = @import("types/grid_track_counts.zig");
+const grid_item = @import("types/grid_item.zig");
+const grid_track_counts = @import("types/grid_track_counts.zig");
+const LayoutTree = @import("../../tree/interfaces.zig").LayoutTree;
 
 const GridTrack = grid_track.GridTrack;
-const GridItem = grid_item_mod.GridItem;
-const TrackCounts = counts_mod.TrackCounts;
-const AvailableSpace = available_mod.AvailableSpace;
+const GridItem = grid_item.GridItem;
+const TrackCounts = grid_track_counts.TrackCounts;
 const AlignContent = style.alignment.AlignContent;
 const AbstractAxis = geometry.AbstractAxis;
-const TrackSizeEstimateFn = grid_item_mod.TrackSizeEstimateFn;
+const TrackSizeEstimateFn = grid_item.TrackSizeEstimateFn;
 
 /// Takes an axis, and a list of grid items sorted firstly by whether they cross
 /// a flex track in the specified axis (items that don't cross a flex track
@@ -68,52 +67,60 @@ const ItemBatcher = struct {
 };
 
 /// Captures the variables used to compute the intrinsic sizes of children.
-const IntrinsicSizeMeasurer = struct {
-    tree: *taffy_tree.TaffyTree,
+/// Generic over the tree type so it works with any `LayoutTree` implementation.
+fn IntrinsicSizeMeasurer(comptime Tree: type) type {
+    return struct {
+    /// This type. Declared inside the struct body so the methods below can name
+    /// their own receiver.
+    const Self = @This();
+
+    tree_ref: *Tree,
     other_axis_tracks: []const GridTrack,
-    get_track_size_estimate: TrackSizeEstimateFn,
+    get_track_size_estimate: TrackSizeEstimateFn(Tree),
     axis: AbstractAxis,
     inner_node_size: geometry.Size(?f32),
 
-    inline fn gridAreaSize(self: *IntrinsicSizeMeasurer, item: *GridItem, axis_tracks: []const GridTrack) geometry.Size(?f32) {
+    inline fn gridAreaSize(self: *Self, item: *GridItem, axis_tracks: []const GridTrack) geometry.Size(?f32) {
         return item.grid_area_size_cached(
+            Tree,
             self.axis,
             axis_tracks,
             self.other_axis_tracks,
             self.inner_node_size,
             self.get_track_size_estimate,
-            self.tree,
+            self.tree_ref,
         );
     }
 
-    inline fn marginsAxisSums(self: *IntrinsicSizeMeasurer, item: *const GridItem, percentage_basis: ?f32) geometry.F32Size {
-        return item.margins_axis_sums_with_baseline_shims(percentage_basis, self.tree);
+    inline fn marginsAxisSums(self: *Self, item: *const GridItem, percentage_basis: ?f32) geometry.F32Size {
+        return item.margins_axis_sums_with_baseline_shims(Tree, percentage_basis, self.tree_ref);
     }
 
-    inline fn minContentContribution(self: *IntrinsicSizeMeasurer, item: *GridItem, axis_tracks: []const GridTrack) f32 {
+    inline fn minContentContribution(self: *Self, item: *GridItem, axis_tracks: []const GridTrack) f32 {
         const grid_area_size = self.gridAreaSize(item, axis_tracks);
         const available_space = grid_area_size.with(self.axis, null);
         const margin_axis_sums = self.marginsAxisSums(item, available_space.width);
-        const contribution = item.min_content_contribution_cached(self.axis, self.tree, grid_area_size, available_space);
+        const contribution = item.min_content_contribution_cached(Tree, self.axis, self.tree_ref, grid_area_size, available_space);
         return contribution + margin_axis_sums.get(self.axis);
     }
 
-    inline fn maxContentContribution(self: *IntrinsicSizeMeasurer, item: *GridItem, axis_tracks: []const GridTrack) f32 {
+    inline fn maxContentContribution(self: *Self, item: *GridItem, axis_tracks: []const GridTrack) f32 {
         const grid_area_size = self.gridAreaSize(item, axis_tracks);
         const available_space = grid_area_size.with(self.axis, null);
         const margin_axis_sums = self.marginsAxisSums(item, available_space.width);
-        const contribution = item.max_content_contribution_cached(self.axis, self.tree, grid_area_size, available_space);
+        const contribution = item.max_content_contribution_cached(Tree, self.axis, self.tree_ref, grid_area_size, available_space);
         return contribution + margin_axis_sums.get(self.axis);
     }
 
-    inline fn minimumContribution(self: *IntrinsicSizeMeasurer, item: *GridItem, axis_tracks: []const GridTrack) f32 {
+    inline fn minimumContribution(self: *Self, item: *GridItem, axis_tracks: []const GridTrack) f32 {
         const grid_area_size = self.gridAreaSize(item, axis_tracks);
         const available_space = grid_area_size.with(self.axis, null);
         const margin_axis_sums = self.marginsAxisSums(item, available_space.width);
-        const contribution = item.minimum_contribution_cached(self.tree, self.axis, axis_tracks, grid_area_size, self.inner_node_size);
+        const contribution = item.minimum_contribution_cached(Tree, self.tree_ref, self.axis, axis_tracks, grid_area_size, self.inner_node_size);
         return contribution + margin_axis_sums.get(self.axis);
     }
-};
+    };
+}
 
 fn cmpByCrossFlexThenSpanThenStart(axis: AbstractAxis, item_a: GridItem, item_b: GridItem) bool {
     const a_flex = item_a.crosses_flexible_track(axis);
@@ -133,11 +140,10 @@ fn cmpByCrossFlexThenSpanThenStart(axis: AbstractAxis, item_a: GridItem, item_b:
 /// When applying the track sizing algorithm and estimating the size in the other
 /// axis for content sizing items we should take into account align-content/justify-content
 /// if both the grid container and all items in the other axis have definite sizes.
-pub fn compute_alignment_gutter_adjustment(
-    alignment: AlignContent,
+pub fn compute_alignment_gutter_adjustment(comptime Tree: type, alignment: AlignContent,
     axis_inner_node_size: ?f32,
-    tree: *taffy_tree.TaffyTree,
-    get_track_size_estimate: TrackSizeEstimateFn,
+    tree_ref: *Tree,
+    get_track_size_estimate: TrackSizeEstimateFn(Tree),
     tracks: []const GridTrack,
 ) f32 {
     if (tracks.len <= 1) return 0;
@@ -162,7 +168,7 @@ pub fn compute_alignment_gutter_adjustment(
     if (axis_inner_node_size) |axis_size| {
         var track_size_sum: f32 = 0;
         for (tracks) |track| {
-            const estimate = get_track_size_estimate(track, axis_size, tree) orelse return 0;
+            const estimate = get_track_size_estimate(track, axis_size, tree_ref) orelse return 0;
             track_size_sum += estimate;
         }
         const free_space = math.f32_max(0, axis_size - track_size_sum);
@@ -213,8 +219,7 @@ fn any_spanned(item: GridItem, axis: AbstractAxis, tracks: []const GridTrack, pr
 
 /// Track sizing algorithm
 /// Note: Gutters are treated as empty fixed-size tracks for the purpose of the algorithm.
-pub fn track_sizing_algorithm(
-    tree: *taffy_tree.TaffyTree,
+pub fn track_sizing_algorithm(comptime Tree: type, tree_ref: *Tree,
     axis: AbstractAxis,
     axis_min_size: ?f32,
     axis_max_size: ?f32,
@@ -225,16 +230,21 @@ pub fn track_sizing_algorithm(
     axis_tracks: []GridTrack,
     other_axis_tracks: []GridTrack,
     items: []GridItem,
-    get_track_size_estimate: TrackSizeEstimateFn,
+    get_track_size_estimate: TrackSizeEstimateFn(Tree),
     has_baseline_aligned_item: bool,
 ) void {
+    const TreeApi = LayoutTree(Tree);
+
     // 11.4 Initialise Track sizes
     const percentage_basis = inner_node_size.get(axis) orelse axis_min_size;
     initialize_track_sizes(axis_tracks, percentage_basis);
 
+    // One scratch allocation pair for the item sorts in this pass.
+    const sort_scratch = SortScratch.init(TreeApi.scratch_allocator(tree_ref), items.len);
+
     // 11.5.1 Shim item baselines
     if (has_baseline_aligned_item) {
-        resolve_item_baselines(tree, axis, items, inner_node_size);
+        resolve_item_baselines(Tree, tree_ref, axis, items, inner_node_size, sort_scratch);
     }
 
     // If all tracks have a fixed min track sizing function and base_size = growth_limit,
@@ -250,9 +260,10 @@ pub fn track_sizing_algorithm(
 
     // Pre-computations for 11.5 Resolve Intrinsic Track Sizes
     const gutter_alignment_adjustment = compute_alignment_gutter_adjustment(
+        Tree,
         other_axis_alignment,
         inner_node_size.get(axis.other()),
-        tree,
+        tree_ref,
         get_track_size_estimate,
         other_axis_tracks,
     );
@@ -265,7 +276,8 @@ pub fn track_sizing_algorithm(
 
     // 11.5 Resolve Intrinsic Track Sizes
     resolve_intrinsic_track_sizes(
-        tree,
+        Tree,
+        tree_ref,
         axis,
         axis_tracks,
         other_axis_tracks,
@@ -273,6 +285,7 @@ pub fn track_sizing_algorithm(
         available_grid_space.get(axis),
         inner_node_size,
         get_track_size_estimate,
+        sort_scratch,
     );
 
     // 11.6. Maximise Tracks
@@ -289,7 +302,8 @@ pub fn track_sizing_algorithm(
 
     // 11.7. Expand Flexible Tracks
     expand_flexible_tracks(
-        tree,
+        Tree,
+        tree_ref,
         axis,
         axis_tracks,
         other_axis_tracks,
@@ -335,6 +349,107 @@ inline fn flush_planned_growth_limit_increases(tracks: []GridTrack, set_infinite
     }
 }
 
+/// Which of the two item orderings a sort call wants.
+const SortKind = enum {
+    /// By start position on the other axis, matching `lessThanByOtherAxisStart`.
+    other_axis_start,
+    /// By (cross-flex, span, start), matching `cmpByCrossFlexThenSpanThenStart`.
+    cross_flex_span_start,
+};
+
+/// The item's sort key, packed so that comparing `u64`s reproduces the
+/// corresponding comparator exactly. The components are compared as unsigned,
+/// which preserves the signed ordering of the underlying `i16`/`u16` values
+/// under two's complement.
+fn itemKey(comptime kind: SortKind, axis: AbstractAxis, item: GridItem) u64 {
+    return switch (kind) {
+        .other_axis_start => @as(u64, @as(u16, @bitCast(item.placement(axis).start.value))),
+        .cross_flex_span_start => blk: {
+            const placement = item.placement(axis);
+            const span = coordinates.line_origin_zero_span(placement);
+            // Items that do not cross a flexible track sort first, so the flag
+            // occupies the high bit.
+            const flex: u64 = if (item.crosses_flexible_track(axis)) 1 else 0;
+            break :blk (flex << 48) |
+                (@as(u64, span) << 16) |
+                @as(u64, @as(u16, @bitCast(placement.start.value)));
+        },
+    };
+}
+
+/// Sort grid items by a compact key, then permute once.
+///
+/// Sorting `[]GridItem` directly is expensive whichever algorithm is used: the
+/// struct is 312 bytes, so `std.mem.sort` (WikiSort, a `[512]T` scratch cache
+/// plus an 8-element sorting network) and `std.mem.sortUnstable` (pdqsort) both
+/// spend their time moving whole items. On the mixed scenario a direct sort
+/// measured at ~8% of total time, and switching to pdqsort made it *worse*.
+///
+/// Instead each item is reduced to one `u64` key, the 12-byte entries are
+/// sorted, and the items are then permuted out of place through one reusable
+/// scratch buffer. Permuting by cycling through `entries` instead was tried and
+/// is markedly slower: the swaps jump around a 312-byte array, so the extra item
+/// buffer is what makes this variant cheap.
+const ItemSortEntry = struct {
+    key: u64,
+    index: u32,
+};
+
+fn lessThanEntry(_: void, a: ItemSortEntry, b: ItemSortEntry) bool {
+    if (a.key != b.key) return a.key < b.key;
+    // Ties keep their existing relative order, so the outcome is identical to
+    // sorting the items with a stable sort -- which is what upstream's
+    // `sort_by_key` does.
+    return a.index < b.index;
+}
+
+/// Reusable scratch for the item sorts, sized once per `track_sizing_algorithm`
+/// call and shared by both sorts in that call. The layout arena does not
+/// reclaim on free, so allocating per sort call would grow the arena once per
+/// call rather than once per pass.
+const SortScratch = struct {
+    entries: []ItemSortEntry,
+    reordered: []GridItem,
+
+    fn init(allocator: std.mem.Allocator, n: usize) SortScratch {
+        return .{
+            .entries = allocator.alloc(ItemSortEntry, n) catch &.{},
+            .reordered = allocator.alloc(GridItem, n) catch &.{},
+        };
+    }
+
+    fn fits(self: SortScratch, n: usize) bool {
+        return self.entries.len >= n and self.reordered.len >= n;
+    }
+};
+
+fn sortItemsByKey(items: []GridItem, scratch: SortScratch, axis: AbstractAxis, comptime kind: SortKind) void {
+    if (items.len < 2) return;
+    if (!scratch.fits(items.len)) {
+        // No scratch available: the direct sort needs none, so use it.
+        std.mem.sort(GridItem, items, axis, switch (kind) {
+            .other_axis_start => lessThanByOtherAxisStart,
+            .cross_flex_span_start => cmpByCrossFlexThenSpanThenStart,
+        });
+        return;
+    }
+    const entries = scratch.entries[0..items.len];
+    const reordered = scratch.reordered[0..items.len];
+
+    for (items, 0..) |item, i| entries[i] = .{ .key = itemKey(kind, axis, item), .index = @intCast(i) };
+    std.mem.sort(ItemSortEntry, entries, {}, lessThanEntry);
+    for (entries, 0..) |entry, i| reordered[i] = items[entry.index];
+    @memcpy(items, reordered);
+}
+
+fn sortItemsByOtherAxisStart(items: []GridItem, axis: AbstractAxis, scratch: SortScratch) void {
+    sortItemsByKey(items, scratch, axis, .other_axis_start);
+}
+
+fn sortItemsByCrossFlexSpanStart(items: []GridItem, axis: AbstractAxis, scratch: SortScratch) void {
+    sortItemsByKey(items, scratch, axis, .cross_flex_span_start);
+}
+
 /// 11.4 Initialise Track sizes: initialize each track's base size and growth limit.
 inline fn initialize_track_sizes(axis_tracks: []GridTrack, axis_inner_node_size: ?f32) void {
     for (axis_tracks) |*track| {
@@ -353,11 +468,12 @@ inline fn initialize_track_sizes(axis_tracks: []GridTrack, axis_inner_node_size:
 
 /// 11.5.1 Shim baseline-aligned items so their intrinsic size contributions
 /// reflect their baseline alignment.
-fn resolve_item_baselines(tree: *taffy_tree.TaffyTree, axis: AbstractAxis, items: []GridItem, inner_node_size: geometry.Size(?f32)) void {
+fn resolve_item_baselines(comptime Tree: type, tree_ref: *Tree, axis: AbstractAxis, items: []GridItem, inner_node_size: geometry.Size(?f32), sort_scratch: SortScratch) void {
+    const TreeApi = LayoutTree(Tree);
     // Sort items by track in the other axis start position so that we can iterate
     // items in groups which are in the same track in the other axis.
     const other_axis = axis.other();
-    std.mem.sort(GridItem, items, other_axis, lessThanByOtherAxisStart);
+    sortItemsByOtherAxisStart(items, other_axis, sort_scratch);
 
     var row_start: usize = 0;
     while (row_start < items.len) {
@@ -381,7 +497,7 @@ fn resolve_item_baselines(tree: *taffy_tree.TaffyTree, axis: AbstractAxis, items
         for (row_items) |*item| {
             if (!item.participates_in_baseline_alignment()) continue;
 
-            const measured = tree.perform_child_layout(
+            const measured = TreeApi.perform_child_layout(tree_ref,
                 item.node,
                 .{ .width = null, .height = null },
                 inner_node_size,
@@ -426,25 +542,26 @@ fn lessThanByOtherAxisStart(axis: AbstractAxis, item_a: GridItem, item_b: GridIt
 }
 
 /// 11.5 Resolve Intrinsic Track Sizes
-fn resolve_intrinsic_track_sizes(
-    tree: *taffy_tree.TaffyTree,
+fn resolve_intrinsic_track_sizes(comptime Tree: type, tree_ref: *Tree,
     axis: AbstractAxis,
     axis_tracks: []GridTrack,
     other_axis_tracks: []const GridTrack,
     items: []GridItem,
     axis_available_grid_space: AvailableSpace,
     inner_node_size: geometry.Size(?f32),
-    get_track_size_estimate: TrackSizeEstimateFn,
+    get_track_size_estimate: TrackSizeEstimateFn(Tree),
+    sort_scratch: SortScratch,
 ) void {
+
     // Step 1 shim baseline-aligned items already done in `resolve_item_baselines`.
 
     // The track sizing algorithm requires us to iterate through the items in ascending
     // order of the number of tracks they span. Pre-sort them into this order.
-    std.mem.sort(GridItem, items, axis, cmpByCrossFlexThenSpanThenStart);
+    sortItemsByCrossFlexSpanStart(items, axis, sort_scratch);
 
     const axis_inner_node_size = inner_node_size.get(axis);
-    var item_sizer = IntrinsicSizeMeasurer{
-        .tree = tree,
+    var item_sizer = IntrinsicSizeMeasurer(Tree){
+        .tree_ref = tree_ref,
         .other_axis_tracks = other_axis_tracks,
         .get_track_size_estimate = get_track_size_estimate,
         .axis = axis,
@@ -958,8 +1075,7 @@ inline fn maximise_tracks(
 }
 
 /// 11.7. Expand Flexible Tracks
-fn expand_flexible_tracks(
-    tree: *taffy_tree.TaffyTree,
+fn expand_flexible_tracks(comptime Tree: type, tree_ref: *Tree,
     axis: AbstractAxis,
     axis_tracks: []GridTrack,
     other_axis_tracks: []const GridTrack,
@@ -968,10 +1084,10 @@ fn expand_flexible_tracks(
     axis_max_size: ?f32,
     axis_available_space_for_expansion: AvailableSpace,
     inner_node_size: geometry.Size(?f32),
-    get_track_size_estimate: TrackSizeEstimateFn,
+    get_track_size_estimate: TrackSizeEstimateFn(Tree),
 ) void {
-    var item_sizer = IntrinsicSizeMeasurer{
-        .tree = tree,
+    var item_sizer = IntrinsicSizeMeasurer(Tree){
+        .tree_ref = tree_ref,
         .other_axis_tracks = other_axis_tracks,
         .get_track_size_estimate = get_track_size_estimate,
         .axis = axis,

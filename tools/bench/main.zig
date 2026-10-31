@@ -77,7 +77,7 @@ fn fixedSize(width: f32, height: f32) zlay.Style {
 }
 
 fn benchTreeCreation(allocator: std.mem.Allocator) !void {
-    var tree = zlay.TaffyTree.init(allocator);
+    var tree = zlay.Tree.init(allocator);
     const root = try tree.new_leaf(.{});
     for (0..10_000) |_| {
         const child = try tree.new_leaf(.{});
@@ -86,7 +86,7 @@ fn benchTreeCreation(allocator: std.mem.Allocator) !void {
 }
 
 fn benchFlexRow(allocator: std.mem.Allocator) !void {
-    var tree = zlay.TaffyTree.init(allocator);
+    var tree = zlay.Tree.init(allocator);
     const children = try allocator.alloc(zlay.NodeId, 1000);
     for (children) |*child| {
         child.* = try tree.new_leaf(.{
@@ -109,7 +109,7 @@ fn benchFlexRow(allocator: std.mem.Allocator) !void {
 }
 
 fn benchFlexWrap(allocator: std.mem.Allocator) !void {
-    var tree = zlay.TaffyTree.init(allocator);
+    var tree = zlay.Tree.init(allocator);
     const children = try allocator.alloc(zlay.NodeId, 500);
     for (children) |*child| {
         child.* = try tree.new_leaf(fixedSize(60, 10));
@@ -125,7 +125,7 @@ fn benchFlexWrap(allocator: std.mem.Allocator) !void {
 }
 
 fn benchGrid(allocator: std.mem.Allocator) !void {
-    var tree = zlay.TaffyTree.init(allocator);
+    var tree = zlay.Tree.init(allocator);
     const children = try allocator.alloc(zlay.NodeId, 2500);
     for (children) |*child| {
         child.* = try tree.new_leaf(fixedSize(5, 5));
@@ -144,7 +144,7 @@ fn benchGrid(allocator: std.mem.Allocator) !void {
 }
 
 fn benchBlockNested(allocator: std.mem.Allocator) !void {
-    var tree = zlay.TaffyTree.init(allocator);
+    var tree = zlay.Tree.init(allocator);
     var parent = try tree.new_leaf(.{ .display = .block });
     for (0..50) |_| {
         const child = try tree.new_leaf(.{
@@ -167,7 +167,7 @@ fn benchBlockNested(allocator: std.mem.Allocator) !void {
 }
 
 fn benchMixed(allocator: std.mem.Allocator) !void {
-    var tree = zlay.TaffyTree.init(allocator);
+    var tree = zlay.Tree.init(allocator);
     const grid_children = try allocator.alloc(zlay.NodeId, 100);
     for (grid_children) |*child| {
         const block_child = try tree.new_leaf(.{ .display = .block, .margin = .{

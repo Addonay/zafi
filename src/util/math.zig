@@ -7,7 +7,7 @@
 //! clamps apply the side that is present.
 
 const geometry = @import("../geometry.zig");
-const available_mod = @import("../style/available_space.zig");
+const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
 
 pub const MaybeMath = struct {};
 
@@ -115,7 +115,7 @@ pub fn f32_maybe_sub(lhs: f32, rhs: ?f32) f32 {
 }
 
 /// `AvailableSpace::maybe_min(Option<f32>)`.
-pub fn available_maybe_min(value: available_mod.AvailableSpace, rhs: ?f32) available_mod.AvailableSpace {
+pub fn available_maybe_min(value: AvailableSpace, rhs: ?f32) AvailableSpace {
     return switch (value) {
         .definite => |number| if (rhs) |right| .{ .definite = @min(number, right) } else .{ .definite = number },
         .min_content => if (rhs) |right| .{ .definite = right } else .min_content,
@@ -124,7 +124,7 @@ pub fn available_maybe_min(value: available_mod.AvailableSpace, rhs: ?f32) avail
 }
 
 /// `AvailableSpace::maybe_max(Option<f32>)`.
-pub fn available_maybe_max(value: available_mod.AvailableSpace, rhs: ?f32) available_mod.AvailableSpace {
+pub fn available_maybe_max(value: AvailableSpace, rhs: ?f32) AvailableSpace {
     return switch (value) {
         .definite => |number| if (rhs) |right| .{ .definite = @max(number, right) } else .{ .definite = number },
         .min_content => .min_content,
@@ -133,7 +133,7 @@ pub fn available_maybe_max(value: available_mod.AvailableSpace, rhs: ?f32) avail
 }
 
 /// `AvailableSpace::maybe_clamp(Option<f32>, Option<f32>)`.
-pub fn available_maybe_clamp(value: available_mod.AvailableSpace, minimum: ?f32, maximum: ?f32) available_mod.AvailableSpace {
+pub fn available_maybe_clamp(value: AvailableSpace, minimum: ?f32, maximum: ?f32) AvailableSpace {
     return switch (value) {
         .definite => |number| .{ .definite = f32_maybe_clamp(number, minimum, maximum) },
         .min_content => .min_content,
@@ -142,7 +142,7 @@ pub fn available_maybe_clamp(value: available_mod.AvailableSpace, minimum: ?f32,
 }
 
 /// `AvailableSpace::maybe_add(Option<f32>)`.
-pub fn available_maybe_add(value: available_mod.AvailableSpace, rhs: ?f32) available_mod.AvailableSpace {
+pub fn available_maybe_add(value: AvailableSpace, rhs: ?f32) AvailableSpace {
     return switch (value) {
         .definite => |number| .{ .definite = number + (rhs orelse 0) },
         .min_content => .min_content,
@@ -151,7 +151,7 @@ pub fn available_maybe_add(value: available_mod.AvailableSpace, rhs: ?f32) avail
 }
 
 /// `AvailableSpace::maybe_sub(Option<f32>)`.
-pub fn available_maybe_sub(value: available_mod.AvailableSpace, rhs: ?f32) available_mod.AvailableSpace {
+pub fn available_maybe_sub(value: AvailableSpace, rhs: ?f32) AvailableSpace {
     return switch (value) {
         .definite => |number| .{ .definite = number - (rhs orelse 0) },
         .min_content => .min_content,

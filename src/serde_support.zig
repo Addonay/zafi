@@ -24,3 +24,10 @@ pub const pascal_options = if (enabled) impl.pascal_options else {};
 /// declarations on the types that need a custom wire representation.
 pub const serialize = if (enabled) impl.serialize else {};
 pub const deserialize = if (enabled) impl.deserialize else {};
+
+/// Named grid line payloads, which upstream models as tuple variants and
+/// therefore serialize as two-element arrays rather than objects.
+pub const serializeNamedLine = if (enabled) impl.serializeNamedLine else {};
+pub const serializeNamedSpan = if (enabled) impl.serializeNamedSpan else {};
+pub const deserializeNamedLine = if (enabled) impl.deserializeNamedLine else {};
+pub const deserializeNamedSpan = if (enabled) impl.deserializeNamedSpan else {};

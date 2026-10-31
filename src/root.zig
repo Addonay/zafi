@@ -8,12 +8,12 @@
 
 pub const geometry = @import("geometry.zig");
 pub const prelude = @import("prelude.zig");
-pub const style = @import("style/mod.zig");
+pub const style = @import("style/root.zig");
 pub const style_helpers = @import("style_helpers.zig");
-pub const tree = @import("tree/mod.zig");
-pub const compute = @import("compute/mod.zig");
-pub const util = @import("util/mod.zig");
-pub const test_support = @import("test.zig");
+pub const tree = @import("tree/root.zig");
+pub const compute = @import("compute/root.zig");
+pub const util = @import("util/root.zig");
+pub const testing = @import("test.zig");
 
 pub const Size = geometry.Size;
 pub const Point = geometry.Point;
@@ -63,8 +63,8 @@ pub const Layout = tree.Layout;
 pub const LayoutInput = tree.LayoutInput;
 pub const LayoutOutput = tree.LayoutOutput;
 pub const NodeId = tree.NodeId;
-pub const TaffyTree = tree.TaffyTree;
-pub const TaffyConfig = tree.taffy_tree.TaffyConfig;
+pub const Tree = tree.Tree;
+pub const TreeConfig = tree.TreeConfig;
 pub const Baselines = tree.layout.Baselines;
 pub const CollapsibleMarginSet = tree.layout.CollapsibleMarginSet;
 pub const RunMode = tree.layout.RunMode;
@@ -73,8 +73,8 @@ pub const RequestedAxis = tree.layout.RequestedAxis;
 pub const DetailedLayoutInfo = tree.layout.DetailedLayoutInfo;
 pub const Cache = tree.cache.Cache;
 pub const ClearState = tree.cache.ClearState;
-pub const TaffyError = tree.taffy_tree.TaffyError;
-pub const TaffyResult = tree.taffy_tree.TaffyResult;
+pub const TreeError = tree.TreeError;
+pub const TreeResult = tree.TreeResult;
 pub const MaybeMath = util.math.MaybeMath;
 pub const GridTemplateTracks = style.grid.GridTemplateTracks;
 pub const GridTemplateComponents = style.grid.GridTemplateComponents;
@@ -94,19 +94,14 @@ pub const compute_hidden_layout = compute.compute_hidden_layout;
 pub const compute_root_layout = compute.compute_root_layout;
 pub const round_layout = compute.round_layout;
 
-pub const TraversePartialTree = tree.traits.TraversePartialTree;
-pub const TraverseTree = tree.traits.TraverseTree;
-pub const LayoutPartialTree = tree.traits.LayoutPartialTree;
-pub const CacheTree = tree.traits.CacheTree;
-pub const RoundTree = tree.traits.RoundTree;
-pub const PrintTree = tree.traits.PrintTree;
 
 test {
     _ = @import("geometry.zig");
-    _ = @import("style/mod.zig");
-    _ = @import("tree/mod.zig");
-    _ = @import("compute/mod.zig");
-    _ = @import("util/mod.zig");
+    _ = @import("style/root.zig");
+    _ = @import("tree/root.zig");
+    _ = @import("tree/interfaces_test.zig");
+    _ = @import("compute/root.zig");
+    _ = @import("util/root.zig");
     _ = @import("test.zig");
     // Taffy-compatible serde tests are compiled only when the optional
     // dependency is enabled (`zig build test -Dserde=true`).

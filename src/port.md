@@ -23,7 +23,7 @@ the language has no direct construct.
 | [x] | `lib.rs` | `root.zig` | module exports |
 | [x] | `prelude.rs` | `prelude.zig` | module exports |
 | [x] | `geometry.rs` | `geometry.zig` | generic values and helpers |
-| [x] | `style/mod.rs` | `style/mod.zig` | style fields and defaults |
+| [x] | `style/mod.rs` | `style/root.zig` | style fields and defaults |
 | [x] | `style/alignment.rs` | `style/alignment.zig` | alignment values |
 | [x] | `style/available_space.rs` | `style/available_space.zig` | constraint values |
 | [x] | `style/block.rs` | `style/block.zig` | block values |
@@ -33,37 +33,37 @@ the language has no direct construct.
 | [x] | `style/float.rs` | `style/float.zig` | float enums |
 | [x] | `style/grid.rs` | `style/grid.zig` | grid placements, tracks, template areas, and line resolution |
 | [x] | `style_helpers.rs` | `style_helpers.zig` | constructors |
-| [x] | `tree/mod.rs` | `tree/mod.zig` | tree exports |
+| [x] | `tree/mod.rs` | `tree/root.zig` | tree exports |
 | [x] | `tree/cache.rs` | `tree/cache.zig` | cache records and storage |
 | [x] | `tree/layout.rs` | `tree/layout.zig` | hidden inputs, margin collapse, outputs, scroll extents, and layout |
 | [x] | `tree/node.rs` | `tree/node.zig` | node identity |
-| [x] | `tree/taffy_tree.rs` | `tree/taffy_tree.zig` | allocator-backed mutations, traversal, cache, layout, and style API |
-| [x] | `tree/traits.rs` | `tree/traits.zig` | traversal/measure interface boundary |
-| [x] | `compute/mod.rs` | `compute/mod.zig` | cache/dispatch/root contracts |
+| [x] | `tree/taffy_tree.rs` | `tree/tree.zig` | allocator-backed mutations, traversal, cache, layout, and style API |
+| [x] | `tree/traits.rs` | `tree/interfaces.zig` | traversal/measure interface boundary, as the comptime `LayoutTree(comptime Self)` contract |
+| [x] | `compute/mod.rs` | `compute/root.zig` | cache/dispatch/root contracts |
 | [x] | `compute/leaf.rs` | `compute/leaf.zig` | leaf sizing sequence |
 | [x] | `compute/flexbox.rs` | `compute/flexbox.zig` | flex records, sizing, line, and final-placement phases |
 | [x] | `compute/block.rs` | `compute/block.zig` | block flow, absolute placement, and item generation |
 | [x] | `compute/float.rs` | `compute/float.zig` | float state, clearance, slots, and intrinsic contribution |
-| [x] | `compute/common/mod.rs` | `compute/common/mod.zig` | helper exports |
+| [x] | `compute/common/mod.rs` | `compute/common/root.zig` | helper exports |
 | [x] | `compute/common/alignment.rs` | `compute/common/alignment.zig` | alignment calculations |
 | [x] | `compute/common/scrollable_overflow.rs` | `compute/common/scrollable_overflow.zig` | overflow contribution |
 | [x] | `compute/common/sizing_keyword.rs` | `compute/common/sizing_keyword.zig` | sizing keyword resolution |
-| [x] | `compute/grid/mod.rs` | `compute/grid/mod.zig` | grid entry point and staged dispatch |
+| [x] | `compute/grid/mod.rs` | `compute/grid/root.zig` | grid entry point and staged dispatch |
 | [x] | `compute/grid/alignment.rs` | `compute/grid/alignment.zig` | track and item alignment |
 | [x] | `compute/grid/explicit_grid.rs` | `compute/grid/explicit_grid.zig` | explicit sizing and track initialization |
 | [x] | `compute/grid/implicit_grid.rs` | `compute/grid/implicit_grid.zig` | child-position estimates and implicit counts |
 | [x] | `compute/grid/placement.rs` | `compute/grid/placement.zig` | occupancy-backed sparse/dense placement |
 | [x] | `compute/grid/track_sizing.rs` | `compute/grid/track_sizing.zig` | phase records and free-space sizing |
-| [x] | `compute/grid/types/mod.rs` | `compute/grid/types/mod.zig` | type exports |
+| [x] | `compute/grid/types/mod.rs` | `compute/grid/types/root.zig` | type exports |
 | [x] | `compute/grid/types/cell_occupancy.rs` | `compute/grid/types/cell_occupancy.zig` | sparse occupancy intervals |
 | [x] | `compute/grid/types/coordinates.rs` | `compute/grid/types/coordinates.zig` | CSS and OriginZero coordinates |
 | [x] | `compute/grid/types/grid_item.rs` | `compute/grid/types/grid_item.zig` | placement, style, and contribution record |
 | [x] | `compute/grid/types/grid_track.rs` | `compute/grid/types/grid_track.zig` | track sizing record |
 | [x] | `compute/grid/types/grid_track_counts.rs` | `compute/grid/types/grid_track_counts.zig` | implicit/explicit count conversions |
 | [x] | `compute/grid/types/named.rs` | `compute/grid/types/named.zig` | named line and area resolution |
-| [x] | `compute/grid/util/mod.rs` | `compute/grid/util/mod.zig` | grid utility exports |
+| [x] | `compute/grid/util/mod.rs` | `compute/grid/util/root.zig` | grid utility exports |
 | [x] | `compute/grid/util/test_helpers.rs` | `compute/grid/util/test_helpers.zig` | grid fixture helper boundary |
-| [x] | `util/mod.rs` | `util/mod.zig` | helper exports |
+| [x] | `util/mod.rs` | `util/root.zig` | helper exports |
 | [x] | `util/debug.rs` | `util/debug.zig` | debug flags |
 | [x] | `util/math.rs` | `util/math.zig` | numeric helpers |
 | [x] | `util/parse.rs` | `util/parse.zig` | exhaustive primitive and declaration-backed parser seam |
@@ -95,20 +95,25 @@ is complete only when the following gates are all closed:
    expresses differently.
 3. the Taffy XML/HTML fixture families are executable against the Zig tree —
    **closed for XML**: `zig build fixtures` and
-   `tools/fixtures/run_all.py` execute all 6,084 generated tests, including
-   scroll extents and resolved grid track lists. HTML sources are consumed
-   through their generated XML form.
+   `tools/fixtures/run_all.py` execute all 6,192 generated tests against the
+   pinned revision, including scroll extents and resolved grid track lists.
+   HTML sources are consumed through their generated XML form.
 4. layout outputs match Taffy within the same tolerance and rounding mode —
-   **closed**: 6,084/6,084 fixture tests pass at 0.1px with Taffy's
+   **closed**: 6,192/6,192 fixture tests pass at 0.1px with Taffy's
    `(v + 0.5).floor()` rounding; the differential oracle matches 36/36 nodes
    and the tree/measure/cache probes equal Rust (`audit/tree_probes_*.txt`).
 5. release benchmarks cover the same tree-creation, flex, grid, and mixed
-   cases, with capacity differences explicitly reported — **closed**: `zig
-   build bench -Doptimize=ReleaseFast` runs tree creation, flex row/wrap,
-   grid, block and mixed scenarios and reports ns/iteration plus arena
-   capacity (`audit/bench_results.txt`). It is Zig-only; no side-by-side Rust
-   timing is produced.
+   cases, with capacity differences explicitly reported — **closed, and now
+   matched rather than Zig-only**: `zig build bench-compare` runs the same six
+   scenarios through both harnesses and prints a ratio table, with
+   `zig build bench-cpu` as the contention-immune cross-check and
+   `zig build bench-allocs` as the allocation census. Current figures and the
+   method are in `tools/bench/README.md`; the campaign history is in
+   `report.md` §2.4.
 
-Remaining non-behavioral gaps (custom-tree trait API, pluggable calc
-resolvers, generational node IDs, serde, `print_tree` formatting) are
-documented in `report.md` §6.
+The custom-tree trait API is no longer a gap: `src/tree/interfaces.zig` is a
+comptime contract and `src/tree/interfaces_test.zig` proves it by implementing
+it a second time and asserting identical layouts. The remaining gaps — notably a
+pluggable `calc()` resolver, which upstream threads through
+`resolved_percentage_size` as a closure argument — are documented in
+`report.md` §6.

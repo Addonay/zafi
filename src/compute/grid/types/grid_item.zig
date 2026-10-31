@@ -2,32 +2,49 @@
 //!
 //! A `GridItem` captures the parts of a grid child's style that the track
 //! sizing algorithm needs, plus the per-run intrinsic contribution caches.
-//! The intrinsic contribution methods call back into the layout tree through
+//! The intrinsic contribution methods call back into the layout tree_ref through
 //! the same measure APIs used by Taffy's `LayoutPartialTreeExt`.
 
 const std = @import("std");
 const geometry = @import("../../../geometry.zig");
-const style = @import("../../../style/mod.zig");
-const available = @import("../../../style/available_space.zig");
+const style = @import("../../../style/root.zig");
+const AvailableSpace = @import("../../../style/available_space.zig").AvailableSpace;
 const math = @import("../../../util/math.zig");
 const sizing_keyword = @import("../../common/sizing_keyword.zig");
-const taffy_tree = @import("../../../tree/taffy_tree.zig");
+const NodeId = @import("../../../tree/node.zig").NodeId;
 const layout = @import("../../../tree/layout.zig");
+const tree_layout = layout;
 const coordinates = @import("coordinates.zig");
 const grid_track = @import("grid_track.zig");
+const LayoutTree = @import("../../../tree/interfaces.zig").LayoutTree;
 
 pub const OriginZeroLine = coordinates.OriginZeroLine;
 pub const GridTrack = grid_track.GridTrack;
 
 /// A function that computes an estimate of an other-axis track's size.
 /// Mirrors Taffy's `EstimateFunction: Fn(&GridTrack, Option<f32>, &Tree) -> Option<f32>`.
-pub const TrackSizeEstimateFn = *const fn (GridTrack, ?f32, *taffy_tree.TaffyTree) ?f32;
+///
+/// Parameterised by the tree type so the same estimate function can be used with
+/// any `LayoutTree` implementation.
+pub fn TrackSizeEstimateFn(comptime Tree: type) type {
+    return *const fn (GridTrack, ?f32, *Tree) ?f32;
+}
 
 pub const TrackRange = struct { start: usize, end: usize };
 
+/// An in-flow grid child together with its index in the container's full child list.
+///
+/// `source_order` is the document child index (not the index within the filtered
+/// in-flow list), so `GridItem.source_order` can be matched against `child_count`
+/// iterations when interleaving out-of-flow candidates in document order.
+pub const InFlowChild = struct {
+    node: NodeId,
+    source_order: u16,
+};
+
 pub const GridItem = struct {
     /// The id of the node that this item represents
-    node: taffy_tree.NodeId,
+    node: NodeId,
 
     /// The order of the item in the children array. Track sizing sorts items;
     /// this field allows sorting back to original order for final positioning.
@@ -93,15 +110,18 @@ pub const GridItem = struct {
     /// Final height. Used to compute baseline alignment for the container.
     height: f32 = 0,
 
+    /// Out-of-flow candidates bubbled out of this item's subtree (anchors relative
+    /// to the container's border box).
+    oof_candidates: tree_layout.OofCandidates = .empty,
+
     pub fn new_with_placement_style_and_order(
-        node: taffy_tree.NodeId,
+        node: NodeId,
         col_span: geometry.Line(OriginZeroLine),
         row_span: geometry.Line(OriginZeroLine),
         item_style: *const style.Style,
         parent_align_items: style.alignment.AlignItems,
         parent_justify_items: style.alignment.AlignItems,
-        source_order: u16,
-    ) GridItem {
+        source_order: u16) GridItem {
         return .{
             .node = node,
             .source_order = source_order,
@@ -212,33 +232,29 @@ pub const GridItem = struct {
     }
 
     /// Compute the known_dimensions to be passed to the child sizing functions,
-    /// applying stretch alignment so percentage sizes further down the tree
+    /// applying stretch alignment so percentage sizes further down the tree_ref
     /// resolve properly.
-    fn known_dimensions(self: *const GridItem, tree: *taffy_tree.TaffyTree, area_size: geometry.Size(?f32)) geometry.Size(?f32) {
-        const margins = self.margins_axis_sums_with_baseline_shims(area_size.width, tree);
+    fn known_dimensions(self: *const GridItem, comptime Tree: type, tree_ref: *Tree, area_size: geometry.Size(?f32)) geometry.Size(?f32) {
+        const margins = self.margins_axis_sums_with_baseline_shims(Tree, area_size.width, tree_ref);
 
         const aspect_ratio = self.aspect_ratio;
-        const padding = resolve_rect_length_percentage_or_zero(self.padding, area_size.width, tree);
-        const border = resolve_rect_length_percentage_or_zero(self.border, area_size.width, tree);
+        const padding = resolve_rect_length_percentage_or_zero(Tree, self.padding, area_size.width, tree_ref);
+        const border = resolve_rect_length_percentage_or_zero(Tree, self.border, area_size.width, tree_ref);
         const padding_border_size = padding.add(border).sum_axes();
         const box_sizing_adjustment = if (self.box_sizing == .content_box) padding_border_size else geometry.F32Size{ .width = 0, .height = 0 };
         const inherent_size = maybe_add_size(
             geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_dimension_size(self.size, area_size), aspect_ratio),
-            box_sizing_adjustment,
-        );
+            box_sizing_adjustment);
         const min_size = maybe_add_size(
             geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(self.min_size, area_size), aspect_ratio),
-            box_sizing_adjustment,
-        );
+            box_sizing_adjustment);
         const max_size = maybe_add_size(
             geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(self.max_size, area_size), aspect_ratio),
-            box_sizing_adjustment,
-        );
+            box_sizing_adjustment);
 
         const grid_area_minus_item_margins_size = maybe_max_size(
             maybe_sub_size(area_size, geometry.F32Size{ .width = margins.width, .height = margins.height }),
-            geometry.F32Size{ .width = 0, .height = 0 },
-        );
+            geometry.F32Size{ .width = 0, .height = 0 });
 
         // If node is absolutely positioned and width is not set explicitly, then deduce it
         // from left, right and container_content_box if both are set.
@@ -276,15 +292,13 @@ pub const GridItem = struct {
 
     /// Returns the grid area's size in the specified axis when every spanned
     /// track has a definite fixed size.
-    pub fn grid_area_size(
-        self: *const GridItem,
+    pub fn grid_area_size(self: *const GridItem, comptime Tree: type,
         axis: geometry.AbstractAxis,
         axis_tracks: []const GridTrack,
         other_axis_tracks: []const GridTrack,
         available_space: geometry.Size(?f32),
-        get_track_size_estimate: TrackSizeEstimateFn,
-        tree: *taffy_tree.TaffyTree,
-    ) geometry.Size(?f32) {
+        get_track_size_estimate: TrackSizeEstimateFn(Tree),
+        tree_ref: *Tree) geometry.Size(?f32) {
         var size = geometry.Size(?f32){ .width = null, .height = null };
         const axis_range = self.track_range_excluding_lines(axis);
         if (axis_range.end <= axis_tracks.len and axis_range.start < axis_range.end) {
@@ -308,7 +322,7 @@ pub const GridItem = struct {
             var total: f32 = 0;
             var definite = true;
             for (other_axis_tracks[other_range.start..other_range.end]) |track| {
-                if (get_track_size_estimate(track, available_space.get(axis.other()), tree)) |track_size| {
+                if (get_track_size_estimate(track, available_space.get(axis.other()), tree_ref)) |track_size| {
                     total += track_size + track.content_alignment_adjustment;
                 } else {
                     definite = false;
@@ -321,29 +335,27 @@ pub const GridItem = struct {
     }
 
     /// Retrieve the grid area size from the cache or compute it using the passed parameters
-    pub fn grid_area_size_cached(
-        self: *GridItem,
+    pub fn grid_area_size_cached(self: *GridItem, comptime Tree: type,
         axis: geometry.AbstractAxis,
         axis_tracks: []const GridTrack,
         other_axis_tracks: []const GridTrack,
         available_space: geometry.Size(?f32),
-        get_track_size_estimate: TrackSizeEstimateFn,
-        tree: *taffy_tree.TaffyTree,
-    ) geometry.Size(?f32) {
+        get_track_size_estimate: TrackSizeEstimateFn(Tree),
+        tree_ref: *Tree) geometry.Size(?f32) {
         if (self.grid_area_size_cache) |cached| return cached;
-        const result = self.grid_area_size(axis, axis_tracks, other_axis_tracks, available_space, get_track_size_estimate, tree);
+        const result = self.grid_area_size(Tree, axis, axis_tracks, other_axis_tracks, available_space, get_track_size_estimate, tree_ref);
         self.grid_area_size_cache = result;
         return result;
     }
 
     /// Compute the item's resolved margins for size contributions. Horizontal percentage
     /// margins always resolve to zero if the container size is indefinite.
-    pub fn margins_axis_sums_with_baseline_shims(self: *const GridItem, inner_node_width: ?f32, tree: *taffy_tree.TaffyTree) geometry.F32Size {
+    pub fn margins_axis_sums_with_baseline_shims(self: *const GridItem, comptime Tree: type, inner_node_width: ?f32, tree_ref: *Tree) geometry.F32Size {
         const left = self.margin.left.resolve(0) orelse 0;
         const right = self.margin.right.resolve(0) orelse 0;
         const top = if (inner_node_width) |basis| (self.margin.top.resolve(basis) orelse 0) else (self.margin.top.resolve(0) orelse 0);
         const bottom = if (inner_node_width) |basis| (self.margin.bottom.resolve(basis) orelse 0) else (self.margin.bottom.resolve(0) orelse 0);
-        _ = tree;
+        _ = tree_ref;
         return .{
             .width = left + right,
             .height = top + bottom + self.baseline_shim,
@@ -351,83 +363,73 @@ pub const GridItem = struct {
     }
 
     /// Compute the item's min content contribution from the provided parameters
-    pub fn min_content_contribution(
-        self: *const GridItem,
+    pub fn min_content_contribution(self: *const GridItem, comptime Tree: type,
         axis: geometry.AbstractAxis,
-        tree: *taffy_tree.TaffyTree,
+        tree_ref: *Tree,
         grid_area_size_value: geometry.Size(?f32),
-        available_space: geometry.Size(?f32),
-    ) f32 {
-        const known = self.known_dimensions(tree, grid_area_size_value);
-        return tree.measure_child_size(
+        available_space: geometry.Size(?f32)) f32 {
+        const known = self.known_dimensions(Tree, tree_ref, grid_area_size_value);
+        return LayoutTree(Tree).measure_child_size(
+            tree_ref,
             self.node,
             known,
             grid_area_size_value,
-            self.keyword_adjusted_available_space(grid_area_size_value, map_available_space(available_space, .min_content), tree),
+            self.keyword_adjusted_available_space(Tree, grid_area_size_value, map_available_space(available_space, .min_content), tree_ref),
             .inherent_size,
             axis.as_abs_naive(),
-            .{ .start = false, .end = false },
-        ) catch @panic("Taffy grid min content measurement failed");
+            .{ .start = false, .end = false }) catch @panic("zlay: grid item min content measurement failed");
     }
 
     /// Retrieve the item's min content contribution from the cache or compute it
-    pub fn min_content_contribution_cached(
-        self: *GridItem,
+    pub fn min_content_contribution_cached(self: *GridItem, comptime Tree: type,
         axis: geometry.AbstractAxis,
-        tree: *taffy_tree.TaffyTree,
+        tree_ref: *Tree,
         grid_area_size_value: geometry.Size(?f32),
-        available_space: geometry.Size(?f32),
-    ) f32 {
+        available_space: geometry.Size(?f32)) f32 {
         if (self.min_content_contribution_cache.get(axis)) |cached| return cached;
-        const size = self.min_content_contribution(axis, tree, grid_area_size_value, available_space);
+        const size = self.min_content_contribution(Tree, axis, tree_ref, grid_area_size_value, available_space);
         self.min_content_contribution_cache.set(axis, size);
         return size;
     }
 
     /// Compute the item's max content contribution from the provided parameters
-    pub fn max_content_contribution(
-        self: *const GridItem,
+    pub fn max_content_contribution(self: *const GridItem, comptime Tree: type,
         axis: geometry.AbstractAxis,
-        tree: *taffy_tree.TaffyTree,
+        tree_ref: *Tree,
         grid_area_size_value: geometry.Size(?f32),
-        available_space: geometry.Size(?f32),
-    ) f32 {
-        const known = self.known_dimensions(tree, grid_area_size_value);
-        return tree.measure_child_size(
+        available_space: geometry.Size(?f32)) f32 {
+        const known = self.known_dimensions(Tree, tree_ref, grid_area_size_value);
+        return LayoutTree(Tree).measure_child_size(
+            tree_ref,
             self.node,
             known,
             grid_area_size_value,
-            self.keyword_adjusted_available_space(grid_area_size_value, map_available_space(available_space, .max_content), tree),
+            self.keyword_adjusted_available_space(Tree, grid_area_size_value, map_available_space(available_space, .max_content), tree_ref),
             .inherent_size,
             axis.as_abs_naive(),
-            .{ .start = false, .end = false },
-        ) catch @panic("Taffy grid max content measurement failed");
+            .{ .start = false, .end = false }) catch @panic("zlay: grid item max content measurement failed");
     }
 
     /// Retrieve the item's max content contribution from the cache or compute it
-    pub fn max_content_contribution_cached(
-        self: *GridItem,
+    pub fn max_content_contribution_cached(self: *GridItem, comptime Tree: type,
         axis: geometry.AbstractAxis,
-        tree: *taffy_tree.TaffyTree,
+        tree_ref: *Tree,
         grid_area_size_value: geometry.Size(?f32),
-        available_space: geometry.Size(?f32),
-    ) f32 {
+        available_space: geometry.Size(?f32)) f32 {
         if (self.max_content_contribution_cache.get(axis)) |cached| return cached;
-        const size = self.max_content_contribution(axis, tree, grid_area_size_value, available_space);
+        const size = self.max_content_contribution(Tree, axis, tree_ref, grid_area_size_value, available_space);
         self.max_content_contribution_cache.set(axis, size);
         return size;
     }
 
-    /// Override the available space in each axis whose size style is a sizing
-    /// keyword that measures the item under a specific available space constraint.
-    fn keyword_adjusted_available_space(
-        self: *const GridItem,
+    /// Override the available_space space in each axis whose size style is a sizing
+    /// keyword that measures the item under a specific available_space space constraint.
+    fn keyword_adjusted_available_space(self: *const GridItem, comptime Tree: type,
         grid_area_size_value: geometry.Size(?f32),
-        available_space: geometry.Size(available.AvailableSpace),
-        tree: *taffy_tree.TaffyTree,
-    ) geometry.Size(available.AvailableSpace) {
+        available_space: geometry.Size(AvailableSpace),
+        tree_ref: *Tree) geometry.Size(AvailableSpace) {
         if (!self.size.width.is_sizing_keyword() and !self.size.height.is_sizing_keyword()) return available_space;
-        const margins = self.margins_axis_sums_with_baseline_shims(grid_area_size_value.width, tree);
+        const margins = self.margins_axis_sums_with_baseline_shims(Tree, grid_area_size_value.width, tree_ref);
         var adjusted = available_space;
         const axes = [_]geometry.AbstractAxis{ .inline_axis, .block };
         for (axes) |axis| {
@@ -443,27 +445,23 @@ pub const GridItem = struct {
     }
 
     /// The minimum contribution of an item is the smallest outer size it can have.
-    pub fn minimum_contribution(
-        self: *GridItem,
-        tree: *taffy_tree.TaffyTree,
+    pub fn minimum_contribution(self: *GridItem, comptime Tree: type,
+        tree_ref: *Tree,
         axis: geometry.AbstractAxis,
         axis_tracks: []const GridTrack,
         grid_area_size_value: geometry.Size(?f32),
-        inner_node_size: geometry.Size(?f32),
-    ) f32 {
-        const padding = resolve_rect_length_percentage_or_zero(self.padding, grid_area_size_value.width, tree);
-        const border = resolve_rect_length_percentage_or_zero(self.border, grid_area_size_value.width, tree);
+        inner_node_size: geometry.Size(?f32)) f32 {
+        const padding = resolve_rect_length_percentage_or_zero(Tree, self.padding, grid_area_size_value.width, tree_ref);
+        const border = resolve_rect_length_percentage_or_zero(Tree, self.border, grid_area_size_value.width, tree_ref);
         const padding_border_size = padding.add(border).sum_axes();
         const box_sizing_adjustment = if (self.box_sizing == .content_box) padding_border_size else geometry.F32Size{ .width = 0, .height = 0 };
         const resolved_size = maybe_add_size(
             geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_dimension_size(self.size, grid_area_size_value), self.aspect_ratio),
-            box_sizing_adjustment,
-        );
+            box_sizing_adjustment);
         if (resolved_size.get(axis)) |value| return value;
         const resolved_min = maybe_add_size(
             geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(self.min_size, grid_area_size_value), self.aspect_ratio),
-            box_sizing_adjustment,
-        );
+            box_sizing_adjustment);
         if (resolved_min.get(axis)) |value| return value;
         if (self.overflow.get(axis).maybe_into_automatic_min_size()) |value| return value;
 
@@ -493,7 +491,7 @@ pub const GridItem = struct {
         const use_content_based_minimum = spans_auto_min_track and (only_span_one_track or !spans_a_flexible_track);
         if (!use_content_based_minimum) return 0;
 
-        var minimum = self.min_content_contribution_cached(axis, tree, grid_area_size_value, grid_area_size_value);
+        var minimum = self.min_content_contribution_cached(Tree, axis, tree_ref, grid_area_size_value, grid_area_size_value);
 
         // If the item is a compressible replaced element, cap the size suggestion
         // by any definite preferred or maximum size in the relevant axis.
@@ -510,16 +508,14 @@ pub const GridItem = struct {
     }
 
     /// Retrieve the item's minimum contribution from the cache or compute it
-    pub fn minimum_contribution_cached(
-        self: *GridItem,
-        tree: *taffy_tree.TaffyTree,
+    pub fn minimum_contribution_cached(self: *GridItem, comptime Tree: type,
+        tree_ref: *Tree,
         axis: geometry.AbstractAxis,
         axis_tracks: []const GridTrack,
         grid_area_size_value: geometry.Size(?f32),
-        inner_node_size: geometry.Size(?f32),
-    ) f32 {
+        inner_node_size: geometry.Size(?f32)) f32 {
         if (self.minimum_contribution_cache.get(axis)) |cached| return cached;
-        const size = self.minimum_contribution(tree, axis, axis_tracks, grid_area_size_value, inner_node_size);
+        const size = self.minimum_contribution(Tree, tree_ref, axis, axis_tracks, grid_area_size_value, inner_node_size);
         self.minimum_contribution_cache.set(axis, size);
         return size;
     }
@@ -548,8 +544,8 @@ fn resolve_lpa_size(value: geometry.Size(style.dimension.LengthPercentageAuto), 
     return .{ .width = resolve_lpa(value.width, basis.width), .height = resolve_lpa(value.height, basis.height) };
 }
 
-fn resolve_rect_length_percentage_or_zero(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32, tree: *taffy_tree.TaffyTree) geometry.Rect(f32) {
-    _ = tree;
+fn resolve_rect_length_percentage_or_zero(comptime Tree: type, value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32, tree_ref: *Tree) geometry.Rect(f32) {
+    _ = tree_ref;
     const resolved_basis = basis orelse 0;
     return .{
         .left = value.left.resolve(resolved_basis),
@@ -590,7 +586,7 @@ fn optional_size_maybe_clamp(value: geometry.Size(?f32), minimum: geometry.Size(
 /// Map `Size<Option<f32>>` to `Size<AvailableSpace>`, using `intrinsic` when the
 /// side is indefinite (Taffy: `available_space.map(|opt| match opt { Some(size) =>
 /// AvailableSpace::Definite(size), None => AvailableSpace::MinContent/MaxContent })`).
-fn map_available_space(value: geometry.Size(?f32), intrinsic: available.AvailableSpace) geometry.Size(available.AvailableSpace) {
+fn map_available_space(value: geometry.Size(?f32), intrinsic: AvailableSpace) geometry.Size(AvailableSpace) {
     return .{
         .width = if (value.width) |size| .{ .definite = size } else intrinsic,
         .height = if (value.height) |size| .{ .definite = size } else intrinsic,
@@ -606,8 +602,7 @@ test "grid item retains placement and contribution caches" {
         &.{},
         style.alignment.AlignItems.start,
         style.alignment.AlignItems.stretch,
-        2,
-    );
+        2);
     try testing.expectEqual(@as(u16, 2), item.span(.inline_axis));
     try testing.expectEqual(@as(u16, 2), item.span(.block));
     try testing.expect(!item.has_auto_block_margin());

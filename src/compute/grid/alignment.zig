@@ -4,15 +4,18 @@
 
 const std = @import("std");
 const geometry = @import("../../geometry.zig");
-const style = @import("../../style/mod.zig");
-const available_mod = @import("../../style/available_space.zig");
+const style = @import("../../style/root.zig");
+const AvailableSpace = @import("../../style/available_space.zig").AvailableSpace;
 const math = @import("../../util/math.zig");
-const common_alignment = @import("../common/alignment.zig");
+const alignment = @import("../common/alignment.zig");
 const scrollable_overflow = @import("../common/scrollable_overflow.zig");
 const sizing_keyword = @import("../common/sizing_keyword.zig");
-const taffy_tree = @import("../../tree/taffy_tree.zig");
-const layout_mod = @import("../../tree/layout.zig");
+const NodeId = @import("../../tree/node.zig").NodeId;
+const layout = @import("../../tree/layout.zig");
+const tree_layout = layout;
+const oof = @import("../oof.zig");
 const grid_track = @import("types/grid_track.zig");
+const LayoutTree = @import("../../tree/interfaces.zig").LayoutTree;
 
 const GridTrack = grid_track.GridTrack;
 const AlignContent = style.alignment.AlignContent;
@@ -23,7 +26,6 @@ const Overflow = style.Overflow;
 const Position = style.Position;
 const Direction = style.Direction;
 const BoxSizing = style.BoxSizing;
-const AvailableSpace = available_mod.AvailableSpace;
 
 /// Align the grid tracks within the grid according to the align-content (rows)
 /// or justify-content (columns) property.
@@ -33,8 +35,7 @@ pub fn align_tracks(
     border: geometry.Line(f32),
     tracks: []GridTrack,
     track_alignment_style: AlignContent,
-    axis_is_reversed: bool,
-) void {
+    axis_is_reversed: bool) void {
     const used_size: f32 = sum_base_sizes(tracks);
     const free_space = grid_container_content_box_size - used_size;
     const origin = padding.start + border.start;
@@ -50,13 +51,13 @@ pub fn align_tracks(
     // simply pass zero here. Grid layout is never reversed.
     const gap = 0.0;
     const layout_is_reversed = false;
-    var track_alignment = common_alignment.apply_alignment_fallback(free_space, num_tracks, track_alignment_style);
+    var track_alignment = alignment.apply_alignment_fallback(free_space, num_tracks, track_alignment_style);
     if (axis_is_reversed) track_alignment = track_alignment.reversed();
 
     // If every track is collapsed then no track receives the alignment offset
     // below, but the grid's lines should still be aligned within the container.
     const empty_grid_offset = if (num_tracks == 0)
-        common_alignment.compute_alignment_offset(free_space, num_tracks, gap, track_alignment, layout_is_reversed, true)
+        alignment.compute_alignment_offset(free_space, num_tracks, gap, track_alignment, layout_is_reversed, true)
     else
         0.0;
 
@@ -75,8 +76,7 @@ pub fn align_tracks(
             alignment_keyword: style.alignment.AlignContentKeyword,
             reversed: bool,
             total_offset_ptr: *f32,
-            seen_ptr: *bool,
-        ) void {
+            seen_ptr: *bool) void {
             // Odd tracks are gutters (but slices are zero-indexed, so gutters have even indices)
             const is_gutter = idx % 2 == 0;
             const is_non_collapsed_track = !is_gutter and !track.is_collapsed;
@@ -85,7 +85,7 @@ pub fn align_tracks(
             const is_first = is_non_collapsed_track and !seen_ptr.*;
 
             const offset = if (is_non_collapsed_track)
-                common_alignment.compute_alignment_offset(free_space_value, num_tracks_value, gap_value, alignment_keyword, reversed, is_first)
+                alignment.compute_alignment_offset(free_space_value, num_tracks_value, gap_value, alignment_keyword, reversed, is_first)
             else
                 0.0;
 
@@ -121,9 +121,8 @@ pub const AlignAndPositionResult = struct {
 };
 
 /// Align and size a grid item into its final position
-pub fn align_and_position_item(
-    tree: *taffy_tree.TaffyTree,
-    node: taffy_tree.NodeId,
+pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
+    node: NodeId,
     order: u32,
     grid_area: geometry.Rect(f32),
     container_alignment_styles: geometry.InBothAbsAxis(?AlignItems),
@@ -132,11 +131,11 @@ pub fn align_and_position_item(
     container_border_box_width: f32,
     container_border: geometry.Rect(f32),
     container_is_scroll_container: bool,
-) !AlignAndPositionResult {
+    bubbled_candidates: *tree_layout.OofCandidates) !AlignAndPositionResult {
+    const TreeApi = LayoutTree(Tree);
     const grid_area_size = geometry.F32Size{ .width = grid_area.right - grid_area.left, .height = grid_area.bottom - grid_area.top };
 
-    const node_data = tree.node(node) orelse return error.InvalidInputNode;
-    const item_style = &node_data.style;
+    const item_style = TreeApi.get_style(tree_ref, node);
 
     const overflow = item_style.overflow;
     const contain = item_style.contain;
@@ -169,22 +168,17 @@ pub fn align_and_position_item(
     const size_style = item_style.size;
     const inherent_size = maybe_add_optional_size(
         geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_dimension_size(size_style, grid_area_size), aspect_ratio),
-        box_sizing_adjustment,
-    );
+        box_sizing_adjustment);
     const min_size = maybe_apply_aspect_ratio_optional(
         maybe_max_optional_size(
             maybe_or_optional_size(
                 maybe_add_optional_size(resolve_lpa_size(item_style.min_size, grid_area_size), box_sizing_adjustment),
-                geometry.Size(?f32){ .width = padding_border_size.width, .height = padding_border_size.height },
-            ),
-            padding_border_size,
-        ),
-        aspect_ratio,
-    );
+                geometry.Size(?f32){ .width = padding_border_size.width, .height = padding_border_size.height }),
+            padding_border_size),
+        aspect_ratio);
     const max_size = maybe_add_optional_size(
         geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(item_style.max_size, grid_area_size), aspect_ratio),
-        box_sizing_adjustment,
-    );
+        box_sizing_adjustment);
 
     // Resolve default alignment styles if they are set on neither the parent or the node itself.
     // Note: if the child has a preferred aspect ratio but neither width or height are set, then
@@ -223,15 +217,14 @@ pub fn align_and_position_item(
     // If both axes need to be measured then resolve them with a single measure call
     var keyword_measured_size = geometry.Size(?f32){ .width = null, .height = null };
     if (keyword_width != null and keyword_height != null) {
-        if (keyword_width.? == .measure and keyword_height.? == .measure and position != .absolute) {
-            const measured = try tree.measure_child_size_both(
+        if (keyword_width.? == .measure and keyword_height.? == .measure and !position.is_out_of_flow()) {
+            const measured = try TreeApi.measure_child_size_both(tree_ref, 
                 node,
                 .{ .width = null, .height = null },
                 map_optional_some(grid_area_size),
                 .{ .width = keyword_width.?.measure, .height = keyword_height.?.measure },
                 .inherent_size,
-                .{ .start = false, .end = false },
-            );
+                .{ .start = false, .end = false });
             keyword_measured_size = .{ .width = measured.width, .height = measured.height };
         }
     }
@@ -242,7 +235,7 @@ pub fn align_and_position_item(
     if (width == null) {
         // Apply width derived from both the left and right properties of an absolutely
         // positioned element being set
-        if (position == .absolute) {
+        if (position.is_out_of_flow()) {
             if (inset_horizontal.start != null and inset_horizontal.end != null) {
                 width = @max(grid_area_minus_item_margins_size.width - inset_horizontal.start.? - inset_horizontal.end.?, 0);
             }
@@ -252,21 +245,20 @@ pub fn align_and_position_item(
         if (keyword_width) |resolution| {
             width = switch (resolution) {
                 .exact => |value| value,
-                .measure => |available_width| keyword_measured_size.width orelse (try tree.measure_child_size(
+                .measure => |available_width| keyword_measured_size.width orelse (try TreeApi.measure_child_size(tree_ref, 
                     node,
                     .{ .width = null, .height = null },
                     map_optional_some(grid_area_size),
                     .{ .width = available_width, .height = .{ .definite = grid_area_minus_item_margins_size.height } },
                     .inherent_size,
                     .horizontal,
-                    .{ .start = false, .end = false },
-                )),
+                    .{ .start = false, .end = false })),
             };
         }
     }
     if (width == null) {
         // Apply width based on stretch alignment
-        if (margin.left != null and margin.right != null and is_stretch(alignment_styles.horizontal) and position != .absolute) {
+        if (margin.left != null and margin.right != null and is_stretch(alignment_styles.horizontal) and !position.is_out_of_flow()) {
             width = grid_area_minus_item_margins_size.width;
         }
     }
@@ -277,7 +269,7 @@ pub fn align_and_position_item(
     var height = size.height;
 
     if (height == null) {
-        if (position == .absolute) {
+        if (position.is_out_of_flow()) {
             if (inset_vertical.start != null and inset_vertical.end != null) {
                 height = @max(grid_area_minus_item_margins_size.height - inset_vertical.start.? - inset_vertical.end.?, 0);
             }
@@ -287,7 +279,7 @@ pub fn align_and_position_item(
         if (keyword_height) |resolution| {
             height = switch (resolution) {
                 .exact => |value| value,
-                .measure => |available_height| keyword_measured_size.height orelse (try tree.measure_child_size(
+                .measure => |available_height| keyword_measured_size.height orelse (try TreeApi.measure_child_size(tree_ref, 
                     node,
                     .{ .width = width, .height = null },
                     map_optional_some(grid_area_size),
@@ -297,13 +289,12 @@ pub fn align_and_position_item(
                     },
                     .inherent_size,
                     .vertical,
-                    .{ .start = false, .end = false },
-                )),
+                    .{ .start = false, .end = false })),
             };
         }
     }
     if (height == null) {
-        if (margin.top != null and margin.bottom != null and is_stretch(alignment_styles.vertical) and position != .absolute) {
+        if (margin.top != null and margin.bottom != null and is_stretch(alignment_styles.vertical) and !position.is_out_of_flow()) {
             height = grid_area_minus_item_margins_size.height;
         }
     }
@@ -318,26 +309,24 @@ pub fn align_and_position_item(
     height = size.height;
 
     // Layout node
-    const layout_size: geometry.Size(?f32) = if (position == .absolute and (width == null or height == null)) blk: {
-        const measured = try tree.measure_child_size_both(
+    const layout_size: geometry.Size(?f32) = if (position.is_out_of_flow() and (width == null or height == null)) blk: {
+        const measured = try TreeApi.measure_child_size_both(tree_ref, 
             node,
             .{ .width = width, .height = height },
             map_optional_some(grid_area_size),
             map_optional_definite(grid_area_minus_item_margins_size),
             .inherent_size,
-            .{ .start = false, .end = false },
-        );
+            .{ .start = false, .end = false });
         break :blk .{ .width = measured.width, .height = measured.height };
     } else .{ .width = width, .height = height };
 
-    const layout_output = try tree.perform_child_layout(
+    var layout_output = try TreeApi.perform_child_layout(tree_ref, 
         node,
         layout_size,
         map_optional_some(grid_area_size),
         map_optional_definite(grid_area_minus_item_margins_size),
         .inherent_size,
-        .{ .start = false, .end = false },
-    );
+        .{ .start = false, .end = false });
 
     // Resolve final size
     const resolved_final_size = layout_size.unwrap_or(layout_output.size);
@@ -356,8 +345,7 @@ pub fn align_and_position_item(
         inset_horizontal,
         margin.horizontal_components(),
         0.0,
-        direction,
-    );
+        direction);
     const vertical_result = align_item_within_area(
         .{ .start = grid_area.top, .end = grid_area.bottom },
         align_self orelse alignment_styles.vertical,
@@ -366,8 +354,7 @@ pub fn align_and_position_item(
         inset_vertical,
         margin.vertical_components(),
         baseline_shim,
-        .ltr,
-    );
+        .ltr);
 
     const scrollbar_size = geometry.F32Size{
         .width = if (overflow.y == .scroll) scrollbar_width_value else 0,
@@ -381,7 +368,16 @@ pub fn align_and_position_item(
         .bottom = vertical_result.margin.end,
     };
 
-    node_data.unrounded_layout = .{
+    // Bubble out-of-flow candidates from the item's subtree, translating anchors from
+    // item-relative to container-relative coordinates
+    var item_candidates = layout_output.oof_candidates;
+    layout_output.oof_candidates = .empty;
+    if (item_candidates.items.len != 0) {
+        oof.translateCandidates(&item_candidates, .{ .x = horizontal_result.offset, .y = vertical_result.offset });
+        try oof.appendCandidates(tree_ref.scratch_allocator(), bubbled_candidates, &item_candidates);
+    }
+
+    try TreeApi.set_unrounded_layout(tree_ref, node, .{
         .order = order,
         .location = .{ .x = horizontal_result.offset, .y = vertical_result.offset },
         .size = .{ .width = width.?, .height = height.? },
@@ -390,7 +386,7 @@ pub fn align_and_position_item(
         .padding = padding,
         .border = border,
         .margin = resolved_margin,
-    };
+    });
 
     // Contributions to the container's scrollable overflow rect are measured from the
     // container's padding-box origin (mirrored for RTL).
@@ -404,8 +400,7 @@ pub fn align_and_position_item(
         layout_output.scrollable_overflow_rect,
         overflow,
         contain,
-        container_is_scroll_container,
-    );
+        container_is_scroll_container);
 
     return .{ .contribution = contribution, .y = vertical_result.offset, .height = height.? };
 }
@@ -440,8 +435,7 @@ pub fn align_item_within_area(
     inset: geometry.Line(?f32),
     margin: geometry.Line(?f32),
     baseline_shim: f32,
-    direction: Direction,
-) AlignResult {
+    direction: Direction) AlignResult {
     // Calculate grid area dimension in the axis
     const non_auto_margin = geometry.Line(f32){
         .start = (margin.start orelse 0) + baseline_shim,
@@ -459,7 +453,7 @@ pub fn align_item_within_area(
     };
 
     const overflows = resolved_size + non_auto_margin.sum() > grid_area_size;
-    const alignment_keyword = common_alignment.resolve_self_alignment_safety(alignment_style, overflows);
+    const alignment_keyword = alignment.resolve_self_alignment_safety(alignment_style, overflows);
 
     // Compute offset in the axis
     const alignment_based_offset: f32 = switch (alignment_keyword) {
@@ -476,7 +470,7 @@ pub fn align_item_within_area(
         .self_start, .self_end => unreachable,
     };
 
-    const offset_within_area: f32 = if (position == .absolute) blk: {
+    const offset_within_area: f32 = if (position.is_out_of_flow()) blk: {
         if (inset.start != null and inset.end != null) {
             break :blk if (direction.is_rtl())
                 grid_area_size - inset.end.? - resolved_size - non_auto_margin.end

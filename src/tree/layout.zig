@@ -1,7 +1,11 @@
 //! Direct port of Taffy's `tree/layout.rs` data contracts.
 
+const std = @import("std");
 const geometry = @import("../geometry.zig");
-const available = @import("../style/available_space.zig");
+const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
+const alignment = @import("../style/alignment.zig");
+const style = @import("../style/root.zig");
+const node = @import("node.zig");
 
 pub const RunMode = enum { perform_layout, compute_size, perform_hidden_layout };
 pub const SizingMode = enum { content_size, inherent_size };
@@ -64,7 +68,7 @@ pub const LayoutInput = struct {
     known_dimensions: geometry.Size(?f32),
     known_dimensions_are_definite: geometry.Size(bool),
     parent_size: geometry.Size(?f32),
-    available_space: geometry.Size(available.AvailableSpace),
+    available_space: geometry.Size(AvailableSpace),
     vertical_margins_are_collapsible: geometry.Line(bool),
 
     pub const HIDDEN: LayoutInput = .{
@@ -79,6 +83,106 @@ pub const LayoutInput = struct {
     };
 };
 
+/// The physical alignment of an out-of-flow box's margin box within its static-position
+/// area (per-axis).
+///
+/// The static position of an out-of-flow box may depend on alignment properties
+/// (`justify-content`/`align-self` in flexbox, `justify-self`/`align-self` in grid) which cannot
+/// be fully resolved until the box's final size is known. To defer that resolution, the static
+/// position is recorded as an *area* plus the physical alignment keyword to apply to the box's
+/// margin box within that area.
+pub const AxisStaticEdge = enum {
+    /// Align the start (left/top) edge of the box's margin box to the start of the area.
+    start,
+    /// Center the box within the area.
+    center,
+    /// Align the end (right/bottom) edge of the box's margin box to the end of the area.
+    end,
+};
+
+/// The alignment to apply to an out-of-flow box's margin box within its static-position area in
+/// a single axis.
+///
+/// Keywords are physical: container-specific semantics (`justify-content`/`align-self`
+/// resolution, flex-direction/wrap-reverse reversal, RTL flipping, `self-start`/`self-end`) are
+/// resolved by the emitting layout algorithm.
+pub const AxisStaticAlign = struct {
+    /// The physical alignment keyword.
+    keyword: AxisStaticEdge,
+    /// The `safe` overflow-position keyword from CSS Box Alignment: when `Safe`, `fallback` is
+    /// used instead if the box's margin box overflows the area.
+    safety: alignment.AlignmentSafety,
+    /// The physical keyword to fall back to when `safety` is `Safe` and the box's margin box
+    /// overflows the area.
+    fallback: AxisStaticEdge,
+
+    /// Create an `AxisStaticAlign` from a keyword with no safe fallback.
+    pub fn from_keyword(keyword: AxisStaticEdge) AxisStaticAlign {
+        return .{ .keyword = keyword, .safety = .unsafe, .fallback = keyword };
+    }
+};
+
+/// The static position of an out-of-flow box in a single axis: the alignment container
+/// (start/end coordinates) plus the alignment to apply to the box's margin box within it.
+///
+/// Area coordinates are initially relative to the border box of the node which produced the
+/// candidate and are translated by each node's location as the candidate bubbles up the tree, so
+/// they are always relative to the border box of the node currently holding the candidate.
+///
+/// Emitters which have no alignment area in an axis (e.g. block layout, where the static
+/// position is a point) emit a degenerate area (`start == end`).
+pub const AxisStaticPosition = struct {
+    /// The alignment container in this axis.
+    area: geometry.Line(f32),
+    /// The alignment to apply to the box's margin box within `area`.
+    alignment: AxisStaticAlign,
+
+    /// Create an `AxisStaticPosition` with a degenerate (zero-extent) area at `anchor` and no
+    /// safe fallback.
+    pub fn from_edge(anchor: f32, edge: AxisStaticEdge) AxisStaticPosition {
+        return .{ .area = .{ .start = anchor, .end = anchor }, .alignment = AxisStaticAlign.from_keyword(edge) };
+    }
+};
+
+/// A record of an out-of-flow (`position: absolute` or `position: fixed`) box which has not yet
+/// been laid out because its containing block is an ancestor of its parent.
+///
+/// Candidates are produced by the layout algorithm of the box's parent (which computes the static
+/// position) and bubble up through `LayoutOutput` until they reach a node which acts as the box's
+/// containing block, which lays the box out.
+pub const OofCandidate = struct {
+    /// The id of the out-of-flow node.
+    node: node.NodeId,
+    /// The `order` value that the node's layout should be assigned (its child index within its parent).
+    order: u32,
+    /// The position style of the node (`absolute` or `fixed`).
+    position: style.Position,
+    /// The static position of the box in each axis.
+    static_position: geometry.Point(AxisStaticPosition),
+};
+
+/// A list of `OofCandidate`s.
+///
+/// The backing storage is allocated by the caller (normally from the tree's layout-pass scratch
+/// arena) and is therefore valid only until the end of the current top-level layout pass. An
+/// empty list performs no allocation. Values stored in a node's persistent layout cache always
+/// have an empty candidate list, so no pass-scoped pointer can outlive its pass.
+pub const OofCandidates = std.ArrayListUnmanaged(OofCandidate);
+
+/// The area of a container against which the insets of its out-of-flow (absolute/fixed) boxes are
+/// resolved: the container's border box minus its borders and scrollbar gutters.
+///
+/// Container layout algorithms record this on `LayoutOutput` (for `RunMode.perform_layout` runs)
+/// so that the out-of-flow positioning pass (`compute_oof_layout`) can run after the algorithm has
+/// finished. When the container is a grid, per-box grid areas are resolved within this area by the
+/// positioning pass itself (from the container's detailed grid info).
+pub const OofPositioningArea = struct {
+    /// The size of the area.
+    size: geometry.Size(f32),
+    /// The offset of the area from the container's border box origin.
+    offset: geometry.Point(f32),
+};
+
 pub const LayoutOutput = struct {
     size: geometry.Size(f32),
     scrollable_overflow_rect: geometry.Rect(f32) = .{ .left = 0, .right = 0, .top = 0, .bottom = 0 },
@@ -86,6 +190,24 @@ pub const LayoutOutput = struct {
     top_margin: CollapsibleMarginSet = .zero,
     bottom_margin: CollapsibleMarginSet = .zero,
     margins_can_collapse_through: bool = false,
+    /// Out-of-flow (absolute/fixed) descendants of this node for which this node is *not* the
+    /// containing block. These bubble up the tree until they reach their containing block, which
+    /// lays them out. Empty (allocation-free) when there are no such descendants (the common
+    /// case).
+    ///
+    /// Candidates are only produced by `RunMode.perform_layout` passes. Container layout
+    /// algorithms place the *full* document-ordered candidate list here (direct out-of-flow
+    /// children plus candidates bubbled from in-flow children); the out-of-flow positioning pass
+    /// then lays out those for which the node is the containing block and replaces this list with
+    /// the unclaimed remainder.
+    ///
+    /// The backing storage is pass-scoped (layout scratch). A `LayoutOutput` that is stored in a
+    /// node's persistent cache always has this list emptied first.
+    oof_candidates: OofCandidates = .empty,
+    /// The node's inset-resolution area for out-of-flow boxes. Set by container layout algorithms
+    /// for `RunMode.perform_layout` runs; `null` for leaves and size-only runs (in which case the
+    /// out-of-flow positioning pass is a no-op).
+    oof_positioning_area: ?OofPositioningArea = null,
 
     pub fn from_outer_size(size: geometry.Size(f32)) LayoutOutput {
         return .{ .size = size };

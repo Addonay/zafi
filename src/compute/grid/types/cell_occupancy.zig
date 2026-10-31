@@ -9,7 +9,7 @@
 const std = @import("std");
 const geometry = @import("../../../geometry.zig");
 const coordinates = @import("coordinates.zig");
-const counts_mod = @import("grid_track_counts.zig");
+const grid_track_counts = @import("grid_track_counts.zig");
 
 const IntervalRange = struct { start: i16, end: i16 };
 
@@ -132,17 +132,17 @@ const TrackIntervals = struct {
 };
 
 pub const CellOccupancyMatrix = struct {
-    columns: counts_mod.TrackCounts,
-    rows: counts_mod.TrackCounts,
+    columns: grid_track_counts.TrackCounts,
+    rows: grid_track_counts.TrackCounts,
     row_intervals: std.ArrayList(TrackIntervals),
     column_intervals: std.ArrayList(TrackIntervals),
     allocator: std.mem.Allocator,
 
-    pub fn with_track_counts(columns: counts_mod.TrackCounts, rows: counts_mod.TrackCounts) CellOccupancyMatrix {
+    pub fn with_track_counts(columns: grid_track_counts.TrackCounts, rows: grid_track_counts.TrackCounts) CellOccupancyMatrix {
         return with_track_counts_using_allocator(std.heap.page_allocator, columns, rows);
     }
 
-    pub fn with_track_counts_using_allocator(allocator: std.mem.Allocator, columns: counts_mod.TrackCounts, rows: counts_mod.TrackCounts) CellOccupancyMatrix {
+    pub fn with_track_counts_using_allocator(allocator: std.mem.Allocator, columns: grid_track_counts.TrackCounts, rows: grid_track_counts.TrackCounts) CellOccupancyMatrix {
         var row_intervals = std.ArrayList(TrackIntervals).empty;
         var column_intervals = std.ArrayList(TrackIntervals).empty;
         for (0..rows.len()) |_| row_intervals.append(allocator, .{}) catch @panic("Taffy occupancy allocation failed");
@@ -168,8 +168,8 @@ pub const CellOccupancyMatrix = struct {
     /// visible to placement.
     pub fn with_raw_track_counts(columns: usize, rows: usize) CellOccupancyMatrix {
         return with_track_counts(
-            counts_mod.TrackCounts.from_raw(0, @intCast(columns), 0),
-            counts_mod.TrackCounts.from_raw(0, @intCast(rows), 0),
+            grid_track_counts.TrackCounts.from_raw(0, @intCast(columns), 0),
+            grid_track_counts.TrackCounts.from_raw(0, @intCast(rows), 0),
         );
     }
 
@@ -276,7 +276,7 @@ pub const CellOccupancyMatrix = struct {
         return column < self.column_intervals.items.len and !self.column_intervals.items[column].is_empty();
     }
 
-    pub fn track_counts(self: *const CellOccupancyMatrix, axis: geometry.AbsoluteAxis) *const counts_mod.TrackCounts {
+    pub fn track_counts(self: *const CellOccupancyMatrix, axis: geometry.AbsoluteAxis) *const grid_track_counts.TrackCounts {
         return switch (axis) {
             .horizontal => &self.columns,
             .vertical => &self.rows,
@@ -294,7 +294,7 @@ pub const CellOccupancyMatrix = struct {
 
 test "cell occupancy overwrites and jumps over occupied intervals" {
     const testing = std.testing;
-    var matrix = CellOccupancyMatrix.with_track_counts_using_allocator(testing.allocator, counts_mod.TrackCounts.from_raw(0, 3, 0), counts_mod.TrackCounts.from_raw(0, 3, 0));
+    var matrix = CellOccupancyMatrix.with_track_counts_using_allocator(testing.allocator, grid_track_counts.TrackCounts.from_raw(0, 3, 0), grid_track_counts.TrackCounts.from_raw(0, 3, 0));
     defer matrix.deinit();
     const line = geometry.Line(coordinates.OriginZeroLine){ .start = .{ .value = 0 }, .end = .{ .value = 1 } };
     matrix.mark_area_as(.horizontal, line, .{ .start = .{ .value = 0 }, .end = .{ .value = 2 } }, .auto_placed);

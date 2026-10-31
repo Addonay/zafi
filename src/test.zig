@@ -5,17 +5,17 @@
 pub const fixture_tolerance: f32 = 0.1;
 
 const geometry = @import("geometry.zig");
-const available = @import("style/available_space.zig");
-const style_mod = @import("style/mod.zig");
-const tree_layout = @import("tree/layout.zig");
-const node_mod = @import("tree/node.zig");
+const AvailableSpace = @import("style/available_space.zig").AvailableSpace;
+const style = @import("style/root.zig");
+const layout = @import("tree/layout.zig");
+const node = @import("tree/node.zig");
 const leaf = @import("compute/leaf.zig");
 const std = @import("std");
 
-const LayoutInput = tree_layout.LayoutInput;
-const LayoutOutput = tree_layout.LayoutOutput;
-const NodeId = node_mod.NodeId;
-const Style = style_mod.Style;
+const LayoutInput = layout.LayoutInput;
+const LayoutOutput = layout.LayoutOutput;
+const NodeId = node.NodeId;
+const Style = style.Style;
 const compute_leaf_layout = leaf.compute_leaf_layout;
 
 pub fn roughly_equal(expected: f32, actual: f32) bool {
@@ -38,7 +38,7 @@ pub const AhemTextMeasureData = struct {
     text: []const u8,
     writing_mode: WritingMode = .horizontal,
 
-    pub fn measure(self: AhemTextMeasureData, known: geometry.Size(?f32), space: geometry.Size(available.AvailableSpace)) geometry.Size(f32) {
+    pub fn measure(self: AhemTextMeasureData, known: geometry.Size(?f32), space: geometry.Size(AvailableSpace)) geometry.Size(f32) {
         const inline_axis = if (self.writing_mode == .horizontal) geometry.AbsoluteAxis.horizontal else geometry.AbsoluteAxis.vertical;
         const block_axis = inline_axis.other_axis();
         // Taffy's Ahem fixture font measures one ASCII codepoint as a 10px
@@ -117,7 +117,7 @@ pub const TestNodeContext = struct {
 };
 
 /// Taffy `src/test.rs` measure function: returns a size directly.
-pub fn test_measure_function(context_pointer: ?*anyopaque, known_dimensions: geometry.Size(?f32), available_space: geometry.Size(available.AvailableSpace)) geometry.Size(f32) {
+pub fn test_measure_function(context_pointer: ?*anyopaque, known_dimensions: geometry.Size(?f32), available_space: geometry.Size(AvailableSpace)) geometry.Size(f32) {
     if (known_dimensions.width != null and known_dimensions.height != null) return .{ .width = known_dimensions.width.?, .height = known_dimensions.height.? };
     const context = if (context_pointer) |pointer| @as(*TestNodeContext, @ptrCast(@alignCast(pointer))) else return .{ .width = known_dimensions.width orelse 0, .height = known_dimensions.height orelse 0 };
     context.count += 1;

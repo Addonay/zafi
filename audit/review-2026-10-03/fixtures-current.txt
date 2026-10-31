@@ -1,0 +1,44 @@
+FAIL block/block_absolute_margin_auto_bottom_only_inset__border_box_ltr.xml: /0: expected (x=0.00 y=130.00 w=50.00 h=50.00) got (x=0.00 y=65.00 w=50.00 h=50.00)
+
+FAIL block/block_absolute_margin_auto_bottom_only_inset__border_box_rtl.xml: /0: expected (x=150.00 y=130.00 w=50.00 h=50.00) got (x=150.00 y=65.00 w=50.00 h=50.00)
+
+FAIL block/block_absolute_margin_auto_bottom_only_inset__content_box_ltr.xml: /0: expected (x=0.00 y=130.00 w=50.00 h=50.00) got (x=0.00 y=65.00 w=50.00 h=50.00)
+
+FAIL block/block_absolute_margin_auto_bottom_only_inset__content_box_rtl.xml: /0: expected (x=150.00 y=130.00 w=50.00 h=50.00) got (x=150.00 y=65.00 w=50.00 h=50.00)
+
+FAIL block/block_absolute_margin_auto_right_only_inset__border_box_ltr.xml: /0: expected (x=130.00 y=0.00 w=50.00 h=50.00) got (x=65.00 y=0.00 w=50.00 h=50.00)
+
+FAIL block/block_absolute_margin_auto_right_only_inset__border_box_rtl.xml: /0: expected (x=130.00 y=0.00 w=50.00 h=50.00) got (x=65.00 y=0.00 w=50.00 h=50.00)
+
+FAIL block/block_absolute_margin_auto_right_only_inset__content_box_ltr.xml: /0: expected (x=130.00 y=0.00 w=50.00 h=50.00) got (x=65.00 y=0.00 w=50.00 h=50.00)
+
+FAIL block/block_absolute_margin_auto_right_only_inset__content_box_rtl.xml: /0: expected (x=130.00 y=0.00 w=50.00 h=50.00) got (x=65.00 y=0.00 w=50.00 h=50.00)
+
+FAIL block/block_margin_y_collapse_through_height_clamped_by_max_height__border_box_ltr.xml: : expected (x=0.00 y=0.00 w=50.00 h=30.00) got (x=0.00 y=0.00 w=50.00 h=40.00)
+/2: expected (x=0.00 y=20.00 w=50.00 h=10.00) got (x=0.00 y=30.00 w=50.00 h=10.00)
+
+FAIL block/block_margin_y_collapse_through_height_clamped_by_max_height__border_box_rtl.xml: : expected (x=0.00 y=0.00 w=50.00 h=30.00) got (x=0.00 y=0.00 w=50.00 h=40.00)
+/2: expected (x=0.00 y=20.00 w=50.00 h=10.00) got (x=0.00 y=30.00 w=50.00 h=10.00)
+
+
+=== fixture results ===
+               block  1000 files    966 passed     34 failed
+           blockflex    48 files     44 passed      4 failed
+           blockgrid    56 files     56 passed      0 failed
+             contain    32 files     32 passed      0 failed
+                flex  2696 files   2668 passed     28 failed
+               float    92 files     92 passed      0 failed
+                grid  2184 files   2172 passed     12 failed
+            gridflex    28 files     28 passed      0 failed
+                leaf    56 files     56 passed      0 failed
+total: 6192 files, 6114 passed, 78 failed
+(68 failures not printed; use --list-failures for all names)
+fixtures
++- run exe fixtures failure
+error: process exited with code 1
+failed command: cd . && ./.zig-cache/o/37b6845cbf2e6da0a0ed4b7314c01933/fixtures --max-failures 10
+
+Build Summary: 3/5 steps succeeded (1 failed)
+fixtures transitive failure
++- run exe fixtures failure
+

@@ -1,20 +1,20 @@
 //! Direct port of Taffy's `compute/common/alignment.rs`.
 
-const style = @import("../../style/alignment.zig");
+const alignment = @import("../../style/alignment.zig");
 
 /// Resolve the safe/unsafe overflow-position fallback for self-level
 /// alignment, matching Taffy's `resolve_self_alignment_safety`.
-pub fn resolve_self_alignment_safety(alignment: style.AlignItems, overflows: bool) style.AlignItemsKeyword {
-    if (alignment.safety == .safe and overflows) return .start;
-    return alignment.keyword;
+pub fn resolve_self_alignment_safety(self_alignment: alignment.AlignItems, overflows: bool) alignment.AlignItemsKeyword {
+    if (self_alignment.safety == .safe and overflows) return .start;
+    return self_alignment.keyword;
 }
 
 /// Resolve the distribution fallbacks from CSS Box Alignment §5.3. This is
 /// intentionally separate from offset calculation because Flexbox and Grid
 /// call it with different item/line counts.
-pub fn apply_alignment_fallback(free_space: f32, item_count: usize, alignment: style.AlignContent) style.AlignContentKeyword {
-    var keyword = alignment.keyword;
-    var is_safe = alignment.safety == .safe;
+pub fn apply_alignment_fallback(free_space: f32, item_count: usize, alignment_value: alignment.AlignContent) alignment.AlignContentKeyword {
+    var keyword = alignment_value.keyword;
+    var is_safe = alignment_value.safety == .safe;
     if (item_count <= 1 or free_space <= 0) switch (keyword) {
         .stretch, .space_between => {
             keyword = if (keyword == .stretch) .flex_start else .flex_start;
@@ -36,7 +36,7 @@ pub fn compute_alignment_offset(
     free_space: f32,
     item_count: usize,
     gap: f32,
-    keyword: style.AlignContentKeyword,
+    keyword: alignment.AlignContentKeyword,
     layout_is_reversed: bool,
     is_first: bool,
 ) f32 {
@@ -60,6 +60,28 @@ pub fn compute_alignment_offset(
     };
 }
 
-pub fn fallback_position(value: ?style.AlignContent) style.AlignContentKeyword {
-    return (value orelse style.AlignContent.start).keyword;
+pub fn fallback_position(value: ?alignment.AlignContent) alignment.AlignContentKeyword {
+    return (value orelse alignment.AlignContent.start).keyword;
+}
+
+/// Resolve a self-relative alignment keyword (`self-start`/`self-end`) against the
+/// item's own direction relative to the container's.
+///
+/// `axis_is_inline` selects the main (inline) axis, where a direction difference
+/// flips the meaning; on the block axis the container's direction governs and the
+/// item's own direction is irrelevant. Mirrors Taffy's
+/// `AlignSelf::resolve_self_relative`.
+pub fn resolve_self_relative(
+    alignment_value: alignment.AlignItems,
+    item_direction: @import("../../style/root.zig").Direction,
+    container_direction: @import("../../style/root.zig").Direction,
+    axis_is_inline: bool,
+) alignment.AlignItems {
+    const flip = axis_is_inline and item_direction != container_direction;
+    const resolved: alignment.AlignItemsKeyword = switch (alignment_value.keyword) {
+        .self_start => if (flip) alignment.AlignItemsKeyword.end else alignment.AlignItemsKeyword.start,
+        .self_end => if (flip) alignment.AlignItemsKeyword.start else alignment.AlignItemsKeyword.end,
+        else => alignment_value.keyword,
+    };
+    return .{ .keyword = resolved, .safety = alignment_value.safety };
 }

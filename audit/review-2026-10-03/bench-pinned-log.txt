@@ -1,0 +1,17 @@
+Matched benchmark: pinned Taffy (Rust, LTO) vs Zig port (ReleaseFast)
+ratio = port_ns / taffy_ns; < 1.0 means the port is faster
+
+scenario                         taffy_ns      port_ns   ratio  taffy_bytes   port_bytes
+--------------------------------------------------------------------------------------------
+block_nested_50                     10480         5025   0.48x        86328       119856  <-- faster
+flex_row_1000                      561695       740527   1.32x      1601992      2042330  <-- slower
+flex_wrap_500                      297371       363739   1.22x       800688      2302128  <-- slower
+grid_50x50                        1859478      2469452   1.33x      6728664      8812550  <-- slower
+mixed_flex_grid_block              929188      1382667   1.49x       394760       980452  <-- slower
+tree_creation_10k                 3080803      1653633   0.54x     21161264     15793850  <-- faster
+
+geometric mean ratio: 0.967x (6 scenarios)
+
+slower than 5%: flex_row_1000 (1.32x), flex_wrap_500 (1.22x), grid_50x50 (1.33x), mixed_flex_grid_block (1.49x)
+
+wrote /home/addo/dev/stupid/zlay/audit/review-2026-10-03/bench-pinned.txt

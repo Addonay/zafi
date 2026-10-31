@@ -11,6 +11,20 @@
 //!   zig build fixtures -- --filter align_items  # name substring
 //!   zig build fixtures -- --limit 50 --verbose
 //!   zig build fixtures -- --list-failures       # names only
+//!
+//! # The `position` attribute default
+//!
+//! Taffy's own runner reads a missing `position` attribute as
+//! `Position::default()`. That default is revision-dependent, and the port
+//! tracks the current one (`static`, matching CSS), so the runner does the
+//! same.
+//!
+//! Fixture corpora generated *before* Taffy made `static` the default omit the
+//! attribute on nodes that were `relative` at the time. Running such a corpus
+//! against the current default therefore builds a different tree than the
+//! corpus describes. `--default-position` selects the default explicitly for
+//! those historical baselines; every fixture in the current corpus sets
+//! `position` explicitly, so the flag does not affect it.
 
 const std = @import("std");
 const zlay = @import("zlay");
@@ -41,6 +55,11 @@ const Options = struct {
     verbose: bool = false,
     list_failures: bool = false,
     report: bool = false,
+    /// The `position` used when a fixture omits the attribute. Defaults to the
+    /// port's `Style.position` default (and Taffy's `Position::default()`);
+    /// override only for historical fixture corpora generated when Taffy's default
+    /// was `relative`.
+    default_position: zlay.Position = .static,
 };
 
 const GroupStats = struct {
@@ -125,10 +144,10 @@ const Runner = struct {
 
         const use_rounding = parseUseRounding(doc.attribute("use-rounding")) catch return "invalid use-rounding";
 
-        var tree = zlay.TaffyTree.init(self.gpa);
+        var tree = zlay.Tree.init(self.gpa);
         defer tree.deinit();
 
-        const expected_tree = self.buildTree(alloc, &tree, input_root, expected_root, null) catch |err| {
+        const expected_tree = self.buildTree(alloc, &tree, input_root, expected_root, null, self.options.default_position) catch |err| {
             return std.fmt.allocPrint(alloc, "tree build error: {s}", .{@errorName(err)}) catch "tree build error";
         };
 
@@ -137,7 +156,7 @@ const Runner = struct {
             .height = parseAvailableSpace(viewport.attribute("height")) catch return "invalid viewport height",
         };
         tree.use_rounding = use_rounding;
-        tree.compute_layout_with_measure(expected_tree.node_id, available, zlay.test_support.fixture_measure_function) catch |err| {
+        tree.compute_layout_with_measure(expected_tree.node_id, available, zlay.testing.fixture_measure_function) catch |err| {
             return std.fmt.allocPrint(alloc, "compute error: {s}", .{@errorName(err)}) catch "compute error";
         };
 
@@ -150,24 +169,25 @@ const Runner = struct {
     fn buildTree(
         self: *Runner,
         alloc: std.mem.Allocator,
-        tree: *zlay.TaffyTree,
+        tree: *zlay.Tree,
         input: *const xml.Element,
         expected: *const xml.Element,
         parent: ?zlay.NodeId,
+        default_position: zlay.Position,
     ) !*ExpectedNode {
-        const style = try buildStyle(input);
+        const style = try buildStyle(input, default_position);
         var node_id: zlay.NodeId = undefined;
         if (input.children.len > 0) {
             node_id = try tree.new_leaf(style);
         } else {
             const raw_text = input.text;
             if (raw_text.len > 0) {
-                const context = try alloc.create(zlay.test_support.TestNodeContext);
-                const writing_mode: zlay.test_support.WritingMode = if (input.attribute("writing-mode")) |mode|
+                const context = try alloc.create(zlay.testing.TestNodeContext);
+                const writing_mode: zlay.testing.WritingMode = if (input.attribute("writing-mode")) |mode|
                     (if (std.mem.startsWith(u8, mode, "vertical")) .vertical else .horizontal)
                 else
                     .horizontal;
-                context.* = zlay.test_support.TestNodeContext.ahem_text(std.mem.trim(u8, raw_text, " \t\r\n"), writing_mode);
+                context.* = zlay.testing.TestNodeContext.ahem_text(std.mem.trim(u8, raw_text, " \t\r\n"), writing_mode);
                 node_id = try tree.new_leaf_with_context(style, @ptrCast(context));
             } else {
                 node_id = try tree.new_leaf(style);
@@ -191,7 +211,7 @@ const Runner = struct {
         if (input.children.len != expected.children.len) return error.ChildCountMismatch;
         var children = std.ArrayList(ExpectedNode).empty;
         for (input.children, 0..) |_, index| {
-            const built = try self.buildTree(alloc, tree, &input.children[index], &expected.children[index], node_id);
+            const built = try self.buildTree(alloc, tree, &input.children[index], &expected.children[index], node_id, default_position);
             try children.append(alloc, built.*);
         }
         expected_node.children = try alloc.dupe(ExpectedNode, children.items);
@@ -246,7 +266,7 @@ fn parsePlacement(node: *const xml.Element, name: []const u8) !grid.GridPlacemen
     return try grid.grid_placement_from_str(raw);
 }
 
-fn buildStyle(node: *const xml.Element) !Style {
+fn buildStyle(node: *const xml.Element, default_position: zlay.Position) !Style {
     var style = Style{};
 
     style.display = try attrOr(zlay.Display, node, "display", .flex);
@@ -258,7 +278,7 @@ fn buildStyle(node: *const xml.Element) !Style {
     style.contain = try attrOr(zlay.Contain, node, "contain", .{});
     style.float = try attrOr(zlay.style.float.Float, node, "float", .none);
     style.clear = try attrOr(zlay.style.float.Clear, node, "clear", .none);
-    style.position = try attrOr(zlay.Position, node, "position", .relative);
+    style.position = try attrOr(zlay.Position, node, "position", default_position);
 
     style.size = .{
         .width = try attrOr(zlay.Dimension, node, "width", zlay.Dimension.auto),
@@ -414,7 +434,7 @@ fn appendMessage(alloc: std.mem.Allocator, details: *std.ArrayList(u8), comptime
 
 fn compareNode(
     alloc: std.mem.Allocator,
-    tree: *zlay.TaffyTree,
+    tree: *zlay.Tree,
     node_id: zlay.NodeId,
     expected: *const ExpectedNode,
     use_rounding: bool,
@@ -517,6 +537,10 @@ fn parseArgs(args: []const [:0]const u8) !Options {
             options.list_failures = true;
         } else if (std.mem.eql(u8, arg, "--report")) {
             options.report = true;
+        } else if (std.mem.eql(u8, arg, "--default-position")) {
+            index += 1;
+            if (index >= args.len) return error.MissingArgument;
+            options.default_position = zlay.Position.from_str(args[index]) catch return error.InvalidPosition;
         }
     }
     return options;

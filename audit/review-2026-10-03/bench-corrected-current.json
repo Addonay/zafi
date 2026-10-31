@@ -1,0 +1,150 @@
+{
+  "rust": [
+    {
+      "tree_creation_10k": 4676080,
+      "flex_row_1000": 1085900,
+      "flex_wrap_500": 562134,
+      "grid_50x50": 2564590,
+      "block_nested_50": 63484,
+      "mixed_flex_grid_block": 1438187
+    },
+    {
+      "tree_creation_10k": 3633806,
+      "flex_row_1000": 784259,
+      "flex_wrap_500": 369208,
+      "grid_50x50": 1761196,
+      "block_nested_50": 39146,
+      "mixed_flex_grid_block": 853008
+    },
+    {
+      "tree_creation_10k": 2793594,
+      "flex_row_1000": 646893,
+      "flex_wrap_500": 334007,
+      "grid_50x50": 1552862,
+      "block_nested_50": 36748,
+      "mixed_flex_grid_block": 835705
+    },
+    {
+      "tree_creation_10k": 2687442,
+      "flex_row_1000": 689101,
+      "flex_wrap_500": 339804,
+      "grid_50x50": 1551864,
+      "block_nested_50": 36573,
+      "mixed_flex_grid_block": 842762
+    },
+    {
+      "tree_creation_10k": 2749005,
+      "flex_row_1000": 670147,
+      "flex_wrap_500": 349658,
+      "grid_50x50": 1531405,
+      "block_nested_50": 37037,
+      "mixed_flex_grid_block": 842481
+    },
+    {
+      "tree_creation_10k": 3254738,
+      "flex_row_1000": 672229,
+      "flex_wrap_500": 373898,
+      "grid_50x50": 1570019,
+      "block_nested_50": 38587,
+      "mixed_flex_grid_block": 941845
+    },
+    {
+      "tree_creation_10k": 3546362,
+      "flex_row_1000": 690224,
+      "flex_wrap_500": 342495,
+      "grid_50x50": 1661359,
+      "block_nested_50": 40926,
+      "mixed_flex_grid_block": 868913
+    },
+    {
+      "tree_creation_10k": 2427022,
+      "flex_row_1000": 671684,
+      "flex_wrap_500": 326277,
+      "grid_50x50": 1526803,
+      "block_nested_50": 37664,
+      "mixed_flex_grid_block": 826557
+    },
+    {
+      "tree_creation_10k": 2382103,
+      "flex_row_1000": 672753,
+      "flex_wrap_500": 338859,
+      "grid_50x50": 1514582,
+      "block_nested_50": 38000,
+      "mixed_flex_grid_block": 839403
+    }
+  ],
+  "zig": [
+    {
+      "tree_creation_10k": 20032803,
+      "flex_row_1000": 1618672,
+      "flex_wrap_500": 408007,
+      "grid_50x50": 7237146,
+      "block_nested_50": 44937,
+      "mixed_flex_grid_block": 1762792
+    },
+    {
+      "tree_creation_10k": 18693535,
+      "flex_row_1000": 1365143,
+      "flex_wrap_500": 338533,
+      "grid_50x50": 5045347,
+      "block_nested_50": 27731,
+      "mixed_flex_grid_block": 1143216
+    },
+    {
+      "tree_creation_10k": 11538435,
+      "flex_row_1000": 968119,
+      "flex_wrap_500": 240826,
+      "grid_50x50": 4168806,
+      "block_nested_50": 27039,
+      "mixed_flex_grid_block": 1079435
+    },
+    {
+      "tree_creation_10k": 11744408,
+      "flex_row_1000": 970444,
+      "flex_wrap_500": 239833,
+      "grid_50x50": 4460061,
+      "block_nested_50": 32630,
+      "mixed_flex_grid_block": 1204586
+    },
+    {
+      "tree_creation_10k": 11853058,
+      "flex_row_1000": 967324,
+      "flex_wrap_500": 242220,
+      "grid_50x50": 4416602,
+      "block_nested_50": 27073,
+      "mixed_flex_grid_block": 1080859
+    },
+    {
+      "tree_creation_10k": 11810814,
+      "flex_row_1000": 1033216,
+      "flex_wrap_500": 279037,
+      "grid_50x50": 4851216,
+      "block_nested_50": 29801,
+      "mixed_flex_grid_block": 1140247
+    },
+    {
+      "tree_creation_10k": 11820074,
+      "flex_row_1000": 991450,
+      "flex_wrap_500": 254168,
+      "grid_50x50": 4173411,
+      "block_nested_50": 26855,
+      "mixed_flex_grid_block": 1065342
+    },
+    {
+      "tree_creation_10k": 11684031,
+      "flex_row_1000": 978951,
+      "flex_wrap_500": 240910,
+      "grid_50x50": 4239454,
+      "block_nested_50": 33387,
+      "mixed_flex_grid_block": 1110152
+    },
+    {
+      "tree_creation_10k": 12008320,
+      "flex_row_1000": 969799,
+      "flex_wrap_500": 239818,
+      "grid_50x50": 4187352,
+      "block_nested_50": 27343,
+      "mixed_flex_grid_block": 1084827
+    }
+  ]
+}
