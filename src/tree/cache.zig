@@ -38,6 +38,37 @@ pub const CacheKey = struct {
     }
 };
 
+/// Taffy's `CacheMode`: the layout inputs that affect a node's layout but are
+/// not part of the `CacheKey` (sizing mode and vertical margin
+/// collapsibility). A cache records the single mode all of its entries were
+/// computed with; `get` misses for any other mode and `store` drops the
+/// existing entries when the mode changes.
+pub const CacheMode = packed struct(u8) {
+    inherent_size: bool = false,
+    collapsible_start_margin: bool = false,
+    collapsible_end_margin: bool = false,
+    _pad: u5 = 0,
+
+    pub const initial: CacheMode = .{};
+
+    pub inline fn from(input: layout.LayoutInput) CacheMode {
+        return .{
+            .inherent_size = input.sizing_mode == .inherent_size,
+            .collapsible_start_margin = input.vertical_margins_are_collapsible.start,
+            .collapsible_end_margin = input.vertical_margins_are_collapsible.end,
+        };
+    }
+
+    pub inline fn eql(self: CacheMode, other: CacheMode) bool {
+        return @as(u8, @bitCast(self)) == @as(u8, @bitCast(other));
+    }
+};
+
+/// Debug-only count of stores into a non-empty cache under a different mode
+/// (Taffy's `cache_mode_change_evictions`). A layout pass over a tree whose
+/// caches started out empty must never evict.
+pub threadlocal var mode_change_evictions: usize = 0;
+
 pub const CacheEntry = struct {
     key: CacheKey,
     output: layout.LayoutOutput,
@@ -110,6 +141,8 @@ pub const Cache = struct {
     /// scanning the entries, which is what makes dirty propagation stop early
     /// instead of re-clearing every ancestor on every mutation.
     empty: bool = true,
+    /// The mode all entries were computed with (see `CacheMode`).
+    mode: CacheMode = .initial,
 
     pub fn clear(self: *Cache) ClearState {
         if (self.empty) return .already_empty;
@@ -135,6 +168,7 @@ pub const Cache = struct {
 
     pub fn get(self: *Cache, input: layout.LayoutInput) ?layout.LayoutOutput {
         if (input.run_mode == .perform_hidden_layout) return null;
+        if (!self.mode.eql(CacheMode.from(input))) return null;
         const key = cache_key(input);
         switch (input.run_mode) {
             .perform_layout => if (self.final_layout_entry) |entry| {
@@ -158,6 +192,12 @@ pub const Cache = struct {
 
     pub fn store(self: *Cache, input: layout.LayoutInput, output: layout.LayoutOutput) void {
         if (input.run_mode == .perform_hidden_layout) return;
+        const mode = CacheMode.from(input);
+        if (!self.mode.eql(mode)) {
+            if (std.debug.runtime_safety and !self.empty) mode_change_evictions += 1;
+            _ = self.clear();
+            self.mode = mode;
+        }
         const key = cache_key(input);
         switch (input.run_mode) {
             .perform_layout => {

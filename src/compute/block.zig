@@ -856,7 +856,8 @@ fn determine_content_based_container_width(comptime Tree: type, tree_ref: *Tree,
                 geometry.Size(AvailableSpace){ .width = item_available_width, .height = available_space.height },
                 .inherent_size,
                 .horizontal,
-                .{ .start = true, .end = true });
+                // Must match the value passed when laying the item out (see `Cache.mode`).
+                .{ .start = item.is_in_same_bfc, .end = item.is_in_same_bfc });
         };
 
         const width_with_margins = math.f32_max(width, item.padding_border_sum.width) + item_x_margin_sum;
@@ -1129,7 +1130,8 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                             geometry.Size(@import("../style/available_space.zig").AvailableSpace){ .width = item_available_width, .height = .max_content },
                             .inherent_size,
                             .horizontal,
-                            .{ .start = true, .end = true }),
+                            // Must match the value passed when laying the item out (see `Cache.mode`).
+                            .{ .start = item.is_in_same_bfc, .end = item.is_in_same_bfc }),
                     };
                 }
             }

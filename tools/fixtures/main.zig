@@ -156,9 +156,15 @@ const Runner = struct {
             .height = parseAvailableSpace(viewport.attribute("height")) catch return "invalid viewport height",
         };
         tree.use_rounding = use_rounding;
+        const evictions_before = zlay.tree.cache.mode_change_evictions;
         tree.compute_layout_with_measure(expected_tree.node_id, available, zlay.testing.fixture_measure_function) catch |err| {
             return std.fmt.allocPrint(alloc, "compute error: {s}", .{@errorName(err)}) catch "compute error";
         };
+
+        // Taffy's runner asserts this too: a single pass over fresh caches must
+        // lay every node out with one sizing mode / margin collapsibility.
+        if (zlay.tree.cache.mode_change_evictions != evictions_before)
+            return "cache mode changed during a layout pass over fresh caches";
 
         var details = std.ArrayList(u8).empty;
         const failure_count = compareNode(alloc, &tree, expected_tree.node_id, expected_tree, use_rounding, "", &details, 0);
