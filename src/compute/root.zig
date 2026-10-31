@@ -52,7 +52,18 @@ fn cachedDispatch(comptime Tree: type, tree_ref: *Tree,
     node_id: NodeId,
     input: layout.LayoutInput,
     block_ctx: ?*block.BlockContext) ComputeError!layout.LayoutOutput {
-    if (LayoutTree(Tree).cache_get(tree_ref, node_id, &input)) |cached| return cached;
+    const Api = LayoutTree(Tree);
+    // A block child sharing its parent's float context reads and places floats
+    // the cache key does not capture: serve it from the cache only when neither
+    // the cached result nor the current context involve floats. (Taffy serves
+    // such results unconditionally, so a parent's height can lose a float that
+    // a cached child placed.)
+    const floats_before = if (block_ctx) |ctx| ctx.has_floats() else false;
+    const may_use_cache = if (block_ctx == null) true else !floats_before and !Api.cache_float_coupled(tree_ref, node_id);
+    if (may_use_cache) {
+        if (Api.cache_get(tree_ref, node_id, &input)) |cached| return cached;
+    }
+    const float_mark = if (block_ctx) |ctx| ctx.float_mark() else undefined;
     // A child layout's scratch temporaries are dead once it returns, unless it
     // hands out-of-flow candidates (scratch lists) to its parent: reclaim them
     // like a stack so peak scratch memory is the deepest live set.
@@ -62,7 +73,12 @@ fn cachedDispatch(comptime Tree: type, tree_ref: *Tree,
     // The output's candidate list lives in pass scratch memory; the host's
     // cache_store must copy it if it caches the result, so a later cache hit
     // can surface the same candidates (Tree does; see Tree.cache_store).
-    try LayoutTree(Tree).cache_store(tree_ref, node_id, &input, output);
+    if (block_ctx) |ctx| {
+        const after = ctx.float_mark();
+        const placed_floats = after.left != float_mark.left or after.right != float_mark.right;
+        Api.set_cache_float_coupled(tree_ref, node_id, floats_before or placed_floats);
+    }
+    try Api.cache_store(tree_ref, node_id, &input, output);
     return output;
 }
 
@@ -642,3 +658,21 @@ const FailOnce = struct {
         self.backing.rawFree(memory, alignment, ret);
     }
 };
+
+test "a cached block child does not lose the floats it placed (Taffy has this bug too)" {
+    const testing = std.testing;
+    var t = tree.Tree.init(testing.allocator);
+    defer t.deinit();
+    const D = style.dimension.Dimension;
+    const float_box = try t.new_leaf(.{ .display = .block, .float = .left, .size = .{ .width = D.length(20), .height = D.length(40) } });
+    const wrapper = try t.new_with_children(.{ .display = .block }, &.{float_box});
+    const sibling = try t.new_leaf(.{ .display = .block, .size = .{ .width = D.length(10), .height = D.length(20) } });
+    const root = try t.new_with_children(.{ .display = .block, .size = .{ .width = D.length(100), .height = .auto } }, &.{ wrapper, sibling });
+    const space = geometry.Size(AvailableSpace){ .width = .max_content, .height = .max_content };
+    try t.compute_layout(root, space);
+    try testing.expectEqual(@as(f32, 40), (try t.layout_of(root)).size.height);
+    // Edit only the sibling: the wrapper must not be served stale from the cache.
+    try t.set_style(sibling, .{ .display = .block, .size = .{ .width = D.length(11), .height = D.length(20) } });
+    try t.compute_layout(root, space);
+    try testing.expectEqual(@as(f32, 40), (try t.layout_of(root)).size.height);
+}

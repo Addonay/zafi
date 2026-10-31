@@ -171,6 +171,25 @@ pub fn LayoutTree(comptime Self: type) type {
         /// caching wrapper reclaim a finished child layout's temporaries early.
         pub const ScratchMark = if (@hasDecl(Self, "scratch_mark")) @typeInfo(@TypeOf(Self.scratch_mark)).@"fn".return_type.? else void;
 
+        /// Optional: whether `node_id`'s cached layout was computed while
+        /// sharing a float context with floats in it (or placed floats into
+        /// one). Such a result must not be served to a later shared-context
+        /// layout, because a hit cannot replay or see those floats. Hosts
+        /// without the hook are treated as always coupled, i.e. same-BFC block
+        /// children are then never served from the cache (correct, slower).
+        pub const cache_float_coupled = if (@hasDecl(Self, "cache_float_coupled")) cacheFloatCoupledImpl else cacheFloatCoupledDefault;
+        pub const set_cache_float_coupled = if (@hasDecl(Self, "set_cache_float_coupled")) setCacheFloatCoupledImpl else setCacheFloatCoupledNoop;
+        inline fn cacheFloatCoupledImpl(tree: *Self, node_id: NodeId) bool {
+            return tree.cache_float_coupled(node_id);
+        }
+        inline fn cacheFloatCoupledDefault(_: *Self, _: NodeId) bool {
+            return true;
+        }
+        inline fn setCacheFloatCoupledImpl(tree: *Self, node_id: NodeId, value: bool) void {
+            tree.set_cache_float_coupled(node_id, value);
+        }
+        inline fn setCacheFloatCoupledNoop(_: *Self, _: NodeId, _: bool) void {}
+
         pub const scratch_mark = if (@hasDecl(Self, "scratch_mark")) scratchMarkImpl else scratchMarkNoop;
         pub const scratch_release = if (@hasDecl(Self, "scratch_release")) scratchReleaseImpl else scratchReleaseNoop;
         inline fn scratchMarkImpl(tree: *Self) ScratchMark {
