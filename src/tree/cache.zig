@@ -69,19 +69,6 @@ pub const CacheMode = packed struct(u8) {
 /// caches started out empty must never evict.
 pub threadlocal var mode_change_evictions: usize = 0;
 
-pub const CacheEntry = struct {
-    key: CacheKey,
-    output: layout.LayoutOutput,
-};
-
-/// Measurement entries store only the size, exactly like Taffy: cache hits are
-/// reconstructed with `LayoutOutput.from_outer_size`, which resets margin and
-/// overflow metadata.
-pub const MeasureEntry = struct {
-    key: CacheKey,
-    size: geometry.Size(f32),
-};
-
 fn margin_is_zero(value: layout.CollapsibleMarginSet) bool {
     return value.positive == 0 and value.negative == 0;
 }
@@ -132,14 +119,90 @@ pub fn cache_key(input: layout.LayoutInput) CacheKey {
     };
 }
 
+/// The packed key without the definiteness flags, which live in
+/// `Cache.definite` (2 bits per entry) so each key is 16 bytes.
+const PackedKey = struct {
+    kd_available_space: u64,
+    parent_size: u64,
+
+    inline fn from(key: CacheKey) PackedKey {
+        return .{ .kd_available_space = key.kd_available_space, .parent_size = key.parent_size };
+    }
+    inline fn x_axis_parent_size(self: PackedKey) u64 {
+        return self.parent_size & ((@as(u64, 0xffff_ffff) << 32) & ~(@as(u64, 1) << 63 | @as(u64, 1) << 31));
+    }
+    inline fn requested_axis_bits(self: PackedKey) u64 {
+        return self.parent_size & (@as(u64, 1) << 63 | @as(u64, 1) << 31);
+    }
+    /// Whether a result computed for `self`'s requested axis serves `other`'s.
+    inline fn size_is_valid_for(self: PackedKey, other: PackedKey) bool {
+        const both = (@as(u64, 1) << 63) | (@as(u64, 1) << 31);
+        const axis = self.requested_axis_bits();
+        return axis == both or axis == other.requested_axis_bits();
+    }
+};
+
+inline fn definiteBits(key: CacheKey) u2 {
+    return @as(u2, @intFromBool(key.known_dimensions_are_definite.width)) | (@as(u2, @intFromBool(key.known_dimensions_are_definite.height)) << 1);
+}
+
+/// A cached final layout: `LayoutOutput` without its out-of-flow candidate
+/// list, which lives in the per-pass scratch arena and is never cached.
+const CachedOutput = struct {
+    size: geometry.Size(f32),
+    scrollable_overflow_rect: layout.ScrollableOverflow,
+    baselines: layout.Baselines,
+    top_margin: layout.CollapsibleMarginSet,
+    bottom_margin: layout.CollapsibleMarginSet,
+    margins_can_collapse_through: bool,
+    oof_positioning_area: ?layout.OofPositioningArea,
+
+    inline fn from(output: layout.LayoutOutput) CachedOutput {
+        return .{
+            .size = output.size,
+            .scrollable_overflow_rect = output.scrollable_overflow_rect,
+            .baselines = output.baselines,
+            .top_margin = output.top_margin,
+            .bottom_margin = output.bottom_margin,
+            .margins_can_collapse_through = output.margins_can_collapse_through,
+            .oof_positioning_area = output.oof_positioning_area,
+        };
+    }
+    inline fn expand(self: CachedOutput) layout.LayoutOutput {
+        return .{
+            .size = self.size,
+            .scrollable_overflow_rect = self.scrollable_overflow_rect,
+            .baselines = self.baselines,
+            .top_margin = self.top_margin,
+            .bottom_margin = self.bottom_margin,
+            .margins_can_collapse_through = self.margins_can_collapse_through,
+            .oof_positioning_area = self.oof_positioning_area,
+        };
+    }
+};
+
+/// Index of the final-layout entry in `valid`/`definite` (after the measure ring).
+const final_slot = max_entries;
+
+/// Taffy's layout cache: one final-layout entry plus a ring of measurement
+/// entries (sizes only, rebuilt with `LayoutOutput.from_outer_size` on a hit).
+///
+/// Stored compactly (struct-of-arrays, 16-byte keys, a validity bitmask
+/// instead of optionals): ~45% smaller than an array of optional entries,
+/// which matters because every node carries one.
 pub const Cache = struct {
-    final_layout_entry: ?CacheEntry = null,
-    measure_entries: [max_entries]?MeasureEntry = std.mem.zeroes([max_entries]?MeasureEntry),
+    measure_keys: [max_entries]PackedKey = undefined,
+    measure_sizes: [max_entries]geometry.Size(f32) = undefined,
+    final_key: PackedKey = undefined,
+    final_output: CachedOutput = undefined,
+    /// Bit `i < max_entries`: measure entry `i` is valid; bit `final_slot`: the final entry is.
+    valid: u16 = 0,
+    /// Two `known_dimensions_are_definite` bits per entry (same indexing as `valid`).
+    definite: u32 = 0,
     recently_used_entries: u16 = 0,
     next_measure_entry: u8 = 0,
     /// Taffy's `is_empty` flag: lets `clear` report `already_empty` without
-    /// scanning the entries, which is what makes dirty propagation stop early
-    /// instead of re-clearing every ancestor on every mutation.
+    /// scanning, which is what makes dirty propagation stop early.
     empty: bool = true,
     /// The mode all entries were computed with (see `CacheMode`).
     mode: CacheMode = .initial,
@@ -152,8 +215,7 @@ pub const Cache = struct {
 
     fn clearUnchecked(self: *Cache) void {
         self.empty = true;
-        self.final_layout_entry = null;
-        self.measure_entries = std.mem.zeroes([max_entries]?MeasureEntry);
+        self.valid = 0;
         self.recently_used_entries = 0;
         self.next_measure_entry = 0;
     }
@@ -166,23 +228,41 @@ pub const Cache = struct {
         return self.empty;
     }
 
+    inline fn definiteAt(self: *const Cache, index: usize) u2 {
+        return @truncate(self.definite >> @intCast(index * 2));
+    }
+    inline fn setDefinite(self: *Cache, index: usize, bits: u2) void {
+        const shift: u5 = @intCast(index * 2);
+        self.definite = (self.definite & ~(@as(u32, 3) << shift)) | (@as(u32, bits) << shift);
+    }
+    inline fn isValid(self: *const Cache, index: usize) bool {
+        return self.valid & (@as(u16, 1) << @intCast(index)) != 0;
+    }
+
     pub fn get(self: *Cache, input: layout.LayoutInput) ?layout.LayoutOutput {
         if (input.run_mode == .perform_hidden_layout) return null;
         if (!self.mode.eql(CacheMode.from(input))) return null;
-        const key = cache_key(input);
+        const full = cache_key(input);
+        const key = PackedKey.from(full);
+        const definite = definiteBits(full);
         switch (input.run_mode) {
-            .perform_layout => if (self.final_layout_entry) |entry| {
-                if (entry.key.eql(key)) return entry.output;
+            .perform_layout => if (self.isValid(final_slot) and
+                self.final_key.kd_available_space == key.kd_available_space and
+                self.final_key.parent_size == key.parent_size and
+                self.definiteAt(final_slot) == definite)
+            {
+                return self.final_output.expand();
             },
-            .compute_size => for (self.measure_entries, 0..) |entry, index| if (entry) |cached| {
-                if (cached.key.kd_available_space == key.kd_available_space and
-                    cached.key.known_dimensions_are_definite.width == key.known_dimensions_are_definite.width and
-                    cached.key.known_dimensions_are_definite.height == key.known_dimensions_are_definite.height and
-                    cached.key.x_axis_parent_size() == key.x_axis_parent_size() and
-                    cached.key.size_is_valid_for(key))
+            .compute_size => for (0..max_entries) |index| {
+                if (!self.isValid(index)) continue;
+                const cached = self.measure_keys[index];
+                if (cached.kd_available_space == key.kd_available_space and
+                    self.definiteAt(index) == definite and
+                    cached.x_axis_parent_size() == key.x_axis_parent_size() and
+                    cached.size_is_valid_for(key))
                 {
                     self.recently_used_entries |= @as(u16, 1) << @intCast(index);
-                    return layout.LayoutOutput.from_outer_size(cached.size);
+                    return layout.LayoutOutput.from_outer_size(self.measure_sizes[index]);
                 }
             },
             .perform_hidden_layout => {},
@@ -198,33 +278,43 @@ pub const Cache = struct {
             _ = self.clear();
             self.mode = mode;
         }
-        const key = cache_key(input);
+        const full = cache_key(input);
+        const key = PackedKey.from(full);
+        const definite = definiteBits(full);
         switch (input.run_mode) {
             .perform_layout => {
                 self.empty = false;
-                self.final_layout_entry = .{ .key = key, .output = output };
+                self.final_key = key;
+                self.final_output = CachedOutput.from(output);
+                self.setDefinite(final_slot, definite);
+                self.valid |= @as(u16, 1) << final_slot;
             },
             .compute_size => {
                 // Measure entries only store the size; results carrying
                 // margin-collapse metadata cannot be reconstructed from it.
                 if (output.margins_can_collapse_through or !margin_is_zero(output.top_margin) or !margin_is_zero(output.bottom_margin)) return;
                 self.empty = false;
-                const entry = MeasureEntry{ .key = key, .size = output.size };
                 for (0..max_entries) |index| {
-                    if (self.measure_entries[index]) |*existing| {
-                        if (existing.key.eql(key)) {
-                            existing.* = entry;
-                            self.recently_used_entries |= @as(u16, 1) << @intCast(index);
-                            return;
-                        }
+                    if (self.isValid(index) and
+                        self.measure_keys[index].kd_available_space == key.kd_available_space and
+                        self.measure_keys[index].parent_size == key.parent_size and
+                        self.definiteAt(index) == definite)
+                    {
+                        self.measure_sizes[index] = output.size;
+                        self.recently_used_entries |= @as(u16, 1) << @intCast(index);
+                        return;
                     }
                 }
                 while ((self.recently_used_entries & (@as(u16, 1) << @intCast(self.next_measure_entry))) != 0) {
                     self.recently_used_entries &= ~(@as(u16, 1) << @intCast(self.next_measure_entry));
                     self.next_measure_entry = (self.next_measure_entry + 1) % @as(u8, max_entries);
                 }
-                self.measure_entries[self.next_measure_entry] = entry;
-                self.recently_used_entries |= @as(u16, 1) << @intCast(self.next_measure_entry);
+                const slot: usize = self.next_measure_entry;
+                self.measure_keys[slot] = key;
+                self.measure_sizes[slot] = output.size;
+                self.setDefinite(slot, definite);
+                self.valid |= @as(u16, 1) << @intCast(slot);
+                self.recently_used_entries |= @as(u16, 1) << @intCast(slot);
                 self.next_measure_entry = (self.next_measure_entry + 1) % @as(u8, max_entries);
             },
             .perform_hidden_layout => {},
