@@ -53,7 +53,12 @@ fn cachedDispatch(comptime Tree: type, tree_ref: *Tree,
     input: layout.LayoutInput,
     block_ctx: ?*block.BlockContext) ComputeError!layout.LayoutOutput {
     if (LayoutTree(Tree).cache_get(tree_ref, node_id, &input)) |cached| return cached;
+    // A child layout's scratch temporaries are dead once it returns, unless it
+    // hands out-of-flow candidates (scratch lists) to its parent: reclaim them
+    // like a stack so peak scratch memory is the deepest live set.
+    const scratch_mark = LayoutTree(Tree).scratch_mark(tree_ref);
     const output = try compute_child_layout_with_block_ctx(Tree, tree_ref, node_id, input, block_ctx);
+    if (output.oof_candidates.items.len == 0) LayoutTree(Tree).scratch_release(tree_ref, scratch_mark);
     // Candidate lists are allocated from the layout-pass scratch arena, which is
     // reset before the next pass. A persistent cache entry must therefore not
     // retain one: the stored copy is emptied while the returned value keeps the
