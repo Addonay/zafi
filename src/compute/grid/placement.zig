@@ -226,7 +226,7 @@ fn place_definite_secondary_axis_item(matrix: *const CellOccupancyMatrix, placem
     const starting_position = if (grid.is_dense(auto_flow))
         primary_axis_grid_start_line
     else
-        matrix.last_of_type(primary_axis, secondary_axis_placement.start, .auto_placed) orelse primary_axis_grid_start_line;
+        matrix.auto_placement_cursor(primary_axis, secondary_axis_placement.start) orelse primary_axis_grid_start_line;
     const primary_axis_span = grid.origin_zero_line_indefinite_span(placement_get(placement, primary_axis));
 
     var position = starting_position;
