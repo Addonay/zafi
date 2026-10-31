@@ -357,8 +357,11 @@ fn cloneLineNameMap(source: *const LineNameMap, allocator: std.mem.Allocator, ta
     var it = source.iterator();
     while (it.next()) |entry| {
         const key = try allocator.dupe(u8, entry.key_ptr.*);
-        errdefer allocator.free(key);
-        try owned_keys.append(allocator, key);
+        {
+            errdefer allocator.free(key);
+            try owned_keys.append(allocator, key);
+        }
+        // From here `key` is owned by `owned_keys` (freed by OwnedLineIndex.deinit).
         var positions: LinePositions = .empty;
         errdefer positions.deinit(allocator);
         try positions.appendSlice(allocator, entry.value_ptr.items);
@@ -526,4 +529,25 @@ test "missing named lines fall back to implicit grid lines" {
     try testing.expectEqual((OriginZeroLine{ .value = coordinates.MAX_OZ_LINE }).into_grid_line(10_000).value, high.start.line);
     const low = resolver.resolve_column_names(.{ .start = .{ .named_line = .{ .name = "missing", .index = std.math.minInt(i16) } }, .end = .auto });
     try testing.expectEqual((OriginZeroLine{ .value = coordinates.MIN_OZ_LINE }).into_grid_line(10_000).value, low.start.line);
+}
+
+test "toOwnedIndex frees correctly when any allocation fails" {
+    const testing = std.testing;
+    const cols = [_]grid.GridTemplateComponent{
+        .{ .single = grid.TrackSizingFunction.from_length(10) },
+        .{ .single = grid.TrackSizingFunction.from_length(10) },
+    };
+    const names = [_]grid.GridTemplateLineNames{ &[_][]const u8{ "a", "x-start" }, &.{}, &[_][]const u8{"b"} };
+    var item_style = style.Style{ .display = .grid, .grid_template_columns = &cols, .grid_template_column_names = &names };
+    var resolver = try NamedLineResolver.init(testing.allocator, &item_style, 0, 0);
+    defer resolver.deinit();
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        if (resolver.toOwnedIndex(failing.allocator())) |index_value| {
+            var index = index_value;
+            index.deinit();
+            break;
+        } else |err| try testing.expectEqual(error.OutOfMemory, err);
+    }
 }

@@ -183,13 +183,16 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
     // Resolve default alignment styles if they are set on neither the parent or the node itself.
     // Note: if the child has a preferred aspect ratio but neither width or height are set, then
     // the width is stretched and the height is calculated from the width.
-    // `normal` behaves as `start` for items with a definite (or keyword) size, `stretch` otherwise.
+    // `normal` behaves as `start` for items with a definite (or keyword) size and
+    // for replaced elements (which are not stretched), `stretch` otherwise.
+    // https://www.w3.org/TR/css-grid-1/#grid-item-sizing
+    const is_replaced = item_style.is_replaced();
     const horizontal_alignment = if (justify_self.keyword == .normal)
-        (if (inherent_size.width != null or size_style.width.is_sizing_keyword()) AlignSelf.START else AlignSelf.STRETCH)
+        (if (inherent_size.width != null or size_style.width.is_sizing_keyword() or is_replaced) AlignSelf.START else AlignSelf.STRETCH)
     else
         justify_self;
     const vertical_alignment = if (align_self.keyword == .normal)
-        (if (inherent_size.height != null or size_style.height.is_sizing_keyword() or aspect_ratio != null) AlignSelf.START else AlignSelf.STRETCH)
+        (if (inherent_size.height != null or size_style.height.is_sizing_keyword() or aspect_ratio != null or is_replaced) AlignSelf.START else AlignSelf.STRETCH)
     else
         align_self;
     const alignment_styles = geometry.InBothAbsAxis(AlignSelf){ .horizontal = horizontal_alignment, .vertical = vertical_alignment };
@@ -557,4 +560,19 @@ fn map_optional_some(value: geometry.F32Size) geometry.Size(?f32) {
 
 fn map_optional_definite(value: geometry.F32Size) geometry.Size(AvailableSpace) {
     return .{ .width = .{ .definite = value.width }, .height = .{ .definite = value.height } };
+}
+
+test "normal alignment does not stretch replaced grid items" {
+    const testing = std.testing;
+    const zafi = @import("../../root.zig");
+    var t = zafi.Tree.init(testing.allocator);
+    defer t.deinit();
+    var context = zafi.testing.TestNodeContext.fixed(.{ .width = 20, .height = 10 });
+    const item = try t.new_leaf_with_context(.{ .item_is_replaced = true }, @ptrCast(&context));
+    const track = [_]zafi.GridTemplateComponent{.{ .single = zafi.TrackSizingFunction.from_length(100) }};
+    const root = try t.new_with_children(.{ .display = .grid, .grid_template_columns = &track, .grid_template_rows = &track }, &.{item});
+    try t.compute_layout_with_measure(root, .{ .width = .max_content, .height = .max_content }, zafi.testing.fixture_measure_function);
+    const l = try t.layout_of(item);
+    try testing.expectEqual(@as(f32, 20), l.size.width);
+    try testing.expectEqual(@as(f32, 10), l.size.height);
 }
