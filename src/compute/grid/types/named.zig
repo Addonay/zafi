@@ -94,6 +94,10 @@ const AxisResolver = struct {
 
     /// Resolve named lines and spans into numeric placements.
     fn resolve(self: AxisResolver, value: geometry.Line(grid.GridPlacement)) geometry.Line(grid.GridPlacement) {
+        // Fast path: placements without names (the common case) resolve to themselves.
+        const start_named = value.start == .named_line or value.start == .named_span;
+        const end_named = value.end == .named_line or value.end == .named_span;
+        if (!start_named and !end_named) return value;
         const start: grid.GridPlacement = if (value.start == .named_line)
             .{ .line = self.find_named_line(value.start.named_line.name, value.start.named_line.index, .start).value }
         else
