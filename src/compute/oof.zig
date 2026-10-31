@@ -302,13 +302,19 @@ pub fn compute_oof_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId,
 
     const candidates = output.oof_candidates;
     output.oof_candidates = .empty;
-    const result = try compute_oof_layout_for_area(Tree, tree_ref, node_id, candidates, area, direction, claims);
+    const reversed = output.scrollable_overflow_rect.is_reversed();
+    const result = try compute_oof_layout_for_area_with_origin(Tree, tree_ref, node_id, candidates, area, direction, claims, reversed);
     // Always record the hoisted child list (even when empty) so that lists
     // recorded by previous layout runs do not persist.
     try TreeApi.clear_hoisted_children(tree_ref, node_id);
     try TreeApi.add_hoisted_children(tree_ref, node_id, result.hoisted.items);
     output.oof_candidates = result.unclaimed;
-    output.scrollable_overflow_rect = output.scrollable_overflow_rect.@"union"(result.scrollable_overflow_rect);
+    const overflow = node_style.overflow;
+    output.scrollable_overflow_rect = scrollable_overflow.finalize_scrollable_overflow(
+        output.scrollable_overflow_rect.rect().@"union"(result.scrollable_overflow_rect),
+        area.size,
+        reversed,
+        overflow.x.is_scroll_container() or overflow.y.is_scroll_container());
 }
 
 /// The result of laying out out-of-flow candidates against an explicit positioning area.
@@ -339,6 +345,17 @@ pub fn compute_oof_layout_for_area(comptime Tree: type, tree_ref: *Tree,
     area: layout.OofPositioningArea,
     direction: style.Direction,
     claims: style.ContainingBlockClaims) !OofLayoutResult {
+    return compute_oof_layout_for_area_with_origin(Tree, tree_ref, geometry_owner, candidates, area, direction, claims, .{ .x = direction.is_rtl(), .y = false });
+}
+
+/// `compute_oof_layout_for_area` with explicit physical scroll-origin directions.
+fn compute_oof_layout_for_area_with_origin(comptime Tree: type, tree_ref: *Tree,
+    geometry_owner: NodeId,
+    candidates: layout.OofCandidates,
+    area: layout.OofPositioningArea,
+    direction: style.Direction,
+    claims: style.ContainingBlockClaims,
+    reversed: Point(bool)) !OofLayoutResult {
     const TreeApi = LayoutTree(Tree);
     const owner_style = TreeApi.get_style(tree_ref, geometry_owner);
     const overflow = owner_style.overflow;
@@ -357,9 +374,15 @@ tree_ref,
         direction,
         claims,
         overflow,
+        reversed,
         &hoisted,
         &unclaimed);
-    return .{ .hoisted = hoisted, .unclaimed = unclaimed, .scrollable_overflow_rect = scrollable_overflow_rect, .allocator = scratch };
+    const finalized = scrollable_overflow.finalize_scrollable_overflow(
+        scrollable_overflow_rect,
+        area.size,
+        reversed,
+        overflow.x.is_scroll_container() or overflow.y.is_scroll_container()).rect();
+    return .{ .hoisted = hoisted, .unclaimed = unclaimed, .scrollable_overflow_rect = finalized, .allocator = scratch };
 }
 
 /// The result of laying out a single out-of-flow box with `layout_oof_box`.
@@ -658,11 +681,21 @@ pub fn perform_oof_layout(comptime Tree: type, tree_ref: *Tree,
     direction: style.Direction,
     claims: style.ContainingBlockClaims,
     container_overflow: Point(style.Overflow),
+    /// Physical scroll-origin directions of the containing block.
+    reversed: Point(bool),
     hoisted: *std.ArrayList(NodeId),
     unclaimed: *layout.OofCandidates) !Rect(f32) {
     const TreeApi = LayoutTree(Tree);
     var absolute_overflow_rect = geometry.RECT_F32_ZERO;
     const is_scroll_container = container_overflow.x.is_scroll_container() or container_overflow.y.is_scroll_container();
+    // In RTL the overflow reaches the right-edge scroll origin
+    if (direction.is_rtl()) absolute_overflow_rect = absolute_overflow_rect.@"union"(.{ .left = 0, .right = @max(area_size.width, 0), .top = 0, .bottom = 0 });
+    const overflow_container = scrollable_overflow.ScrollableOverflowContainer{
+        .parent_is_scroll_container = is_scroll_container,
+        .parent_size = area_size,
+        .reversed = reversed,
+        .padding = geometry.RECT_F32_ZERO,
+    };
 
     if (candidates.items.len == 0) return absolute_overflow_rect;
 
@@ -706,21 +739,17 @@ pub fn perform_oof_layout(comptime Tree: type, tree_ref: *Tree,
             }
         }
 
-        // Location is measured from the scroll origin (the inline-start edge: right side in RTL)
-        const relative_location = if (direction.is_rtl())
-            Point(f32){
-                .x = area_size.width - (location.x - area_offset.x) - final_size.width,
-                .y = location.y - area_offset.y,
-            }
-        else
-            Point(f32){ .x = location.x - area_offset.x, .y = location.y - area_offset.y };
+        // Physical coordinates relative to the positioning area (Taffy c256056)
+        const relative_location = Point(f32){ .x = location.x - area_offset.x, .y = location.y - area_offset.y };
         absolute_overflow_rect = absolute_overflow_rect.@"union"(scrollable_overflow.compute_scrollable_overflow_contribution(
             relative_location,
             final_size,
-            box_layout.layout.scrollable_overflow_rect,
+            box_layout.layout.scrollable_overflow_rect.rect(),
+            box_layout.layout.border,
             box_layout.overflow,
             box_layout.contain,
-            is_scroll_container));
+            &overflow_container,
+            geometry.RECT_F32_ZERO));
     }
 
     return absolute_overflow_rect;

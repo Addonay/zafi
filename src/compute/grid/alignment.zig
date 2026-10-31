@@ -131,9 +131,9 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
     container_alignment_styles: geometry.InBothAbsAxis(AlignItems),
     baseline_shim: f32,
     direction: Direction,
-    container_border_box_width: f32,
-    container_border: geometry.Rect(f32),
-    container_is_scroll_container: bool,
+    /// The container's border plus scrollbar gutters (its padding-box frame)
+    padding_box_inset: geometry.Rect(f32),
+    overflow_container: *const scrollable_overflow.ScrollableOverflowContainer,
     bubbled_candidates: *tree_layout.OofCandidates) !AlignAndPositionResult {
     const TreeApi = LayoutTree(Tree);
     const grid_area_size = geometry.F32Size{ .width = grid_area.right - grid_area.left, .height = grid_area.bottom - grid_area.top };
@@ -393,19 +393,18 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
         .margin = resolved_margin,
     });
 
-    // Contributions to the container's scrollable overflow rect are measured from the
-    // container's padding-box origin (mirrored for RTL).
-    const contribution_location = if (direction.is_rtl())
-        geometry.F32Point{ .x = container_border_box_width - (horizontal_result.offset + width.?) - container_border.right, .y = vertical_result.offset - container_border.top }
-    else
-        geometry.F32Point{ .x = horizontal_result.offset - container_border.left, .y = vertical_result.offset - container_border.top };
+    // Contributions to the container's scrollable overflow use physical
+    // coordinates in its padding-box frame (Taffy c256056).
+    const contribution_location = geometry.F32Point{ .x = horizontal_result.offset - padding_box_inset.left, .y = vertical_result.offset - padding_box_inset.top };
     const contribution = scrollable_overflow.compute_scrollable_overflow_contribution(
         contribution_location,
         .{ .width = width.?, .height = height.? },
-        layout_output.scrollable_overflow_rect,
+        layout_output.scrollable_overflow_rect.rect(),
+        border,
         overflow,
         contain,
-        container_is_scroll_container);
+        overflow_container,
+        resolved_margin);
 
     const item_baseline: ?f32 = if (layout_output.baselines.first) |b|
         (if (overflow.y.is_scroll_container()) @max(@min(b, height.?), 0) else b)

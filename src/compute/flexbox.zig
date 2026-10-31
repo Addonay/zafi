@@ -561,7 +561,11 @@ fn flex_container_output(
 
     return .{
         .size = constants.container_size,
-        .scrollable_overflow_rect = inflow_overflow_rect,
+        .scrollable_overflow_rect = scrollable_overflow.finalize_scrollable_overflow(
+            inflow_overflow_rect,
+            flexClientSize(constants),
+            flexScrollOriginReversed(constants),
+            constants.is_scroll_container),
         .baselines = layout.Baselines.from_first(first_vertical_baseline),
         .oof_candidates = candidates,
         .oof_positioning_area = .{
@@ -603,8 +607,14 @@ fn compute_empty_container_layout(comptime Tree: type, tree_ref: *Tree, node_id:
         return layout.LayoutOutput.from_outer_size(constants.container_size);
     }
 
-    // With no items there is no inflow overflow and no out-of-flow candidates to collect from them.
-    const inflow_overflow_rect = finalize_inflow_overflow(constants, geometry.RECT_F32_ZERO);
+    // With no items there is no inflow overflow and no out-of-flow candidates to
+    // collect from them; in RTL the overflow reaches the right-edge scroll origin.
+    const inflow_overflow_rect = Rect(f32){
+        .left = 0,
+        .right = if (constants.layout_direction.is_rtl()) @max(flexClientSize(constants).width, 0) else 0,
+        .top = 0,
+        .bottom = 0,
+    };
     var candidates: layout.OofCandidates = .empty;
     try collect_oof_candidates(Tree, tree_ref, node_id, constants, no_lines, &candidates);
 
@@ -2662,17 +2672,20 @@ fn calculate_flex_item(comptime Tree: type, tree_ref: *Tree,
     }
 
     {
-        const contribution_location = if (layout_direction.is_rtl())
-            Point(f32){ .x = container_size.width - (location.x + size.width) - border.right, .y = location.y - border.top }
-        else
-            Point(f32){ .x = location.x - border.left, .y = location.y - border.top };
+        // Physical coordinates in the padding-box frame (Taffy c256056)
+        _ = border;
+        const padding_box_inset = flexPaddingBoxInset(constants);
+        const contribution_location = Point(f32){ .x = location.x - padding_box_inset.left, .y = location.y - padding_box_inset.top };
+        const overflow_container = flexOverflowContainer(constants);
         total_overflow_rect.* = geometry.rect_union(total_overflow_rect.*, scrollable_overflow.compute_scrollable_overflow_contribution(
             contribution_location,
             size,
-            layout_output.scrollable_overflow_rect,
+            layout_output.scrollable_overflow_rect.rect(),
+            item.border,
             item.overflow,
             item.contain,
-            constants.is_scroll_container));
+            &overflow_container,
+            item.margin));
     }
 }
 
@@ -2773,21 +2786,69 @@ tree_ref,
     return finalize_inflow_overflow(constants, overflow_rect);
 }
 
-/// Extend the inflow overflow rect of a flex container by its own padding and border when it is a
-/// scroll container.
+/// Extend a flex container's inflow overflow: in RTL it reaches the right-edge
+/// scroll origin, and a scroll container includes its own end padding
+/// (Taffy c256056).
 fn finalize_inflow_overflow(constants: *const AlgoConstants, overflow_rect: Rect(f32)) Rect(f32) {
     var rect = overflow_rect;
-    // A scroll container's own padding at the end of the content is part of its scrollable
-    // overflow region, so it is included in the overflow rect. Boxes that are not scroll
-    // containers do not extend their overflow region by their own padding.
+    const client_width = @max(flexClientSize(constants).width, 0);
+    const is_rtl = constants.layout_direction.is_rtl();
+    if (is_rtl) rect = geometry.rect_union(rect, .{ .left = 0, .right = client_width, .top = 0, .bottom = 0 });
     if (constants.is_scroll_container) {
-        rect.right += if (constants.layout_direction.is_rtl())
-            constants.content_box_inset.left - constants.border.left - constants.scrollbar_gutter.x
-        else
-            constants.content_box_inset.right - constants.border.right - constants.scrollbar_gutter.x;
-        rect.bottom += constants.content_box_inset.bottom - constants.border.bottom - constants.scrollbar_gutter.y;
+        const padding = flexPadding(constants);
+        rect = geometry.rect_union(rect, .{
+            .left = if (is_rtl) @min(client_width - padding.left, 0) else 0,
+            .right = if (is_rtl) client_width else padding.right,
+            .top = 0,
+            .bottom = padding.bottom,
+        });
     }
     return rect;
+}
+
+/// The border box minus borders and scrollbar gutters, physically (the padding box frame).
+fn flexPaddingBoxInset(constants: *const AlgoConstants) Rect(f32) {
+    const rtl = constants.layout_direction.is_rtl();
+    return constants.border.add(.{
+        .left = if (rtl) constants.scrollbar_gutter.x else 0,
+        .right = if (rtl) 0 else constants.scrollbar_gutter.x,
+        .top = 0,
+        .bottom = constants.scrollbar_gutter.y,
+    });
+}
+
+/// The container's resolved padding (content-box inset minus border and gutters).
+fn flexPadding(constants: *const AlgoConstants) Rect(f32) {
+    const inset = constants.content_box_inset;
+    const pbi = flexPaddingBoxInset(constants);
+    return .{ .left = inset.left - pbi.left, .right = inset.right - pbi.right, .top = inset.top - pbi.top, .bottom = inset.bottom - pbi.bottom };
+}
+
+/// The client area (padding box without scrollbar gutters).
+fn flexClientSize(constants: *const AlgoConstants) Size(f32) {
+    return .{
+        .width = constants.container_size.width - constants.border.horizontal_axis_sum() - constants.scrollbar_gutter.x,
+        .height = constants.container_size.height - constants.border.vertical_axis_sum() - constants.scrollbar_gutter.y,
+    };
+}
+
+/// Physical scroll-origin reversal: main-reverse and wrap-reverse flip their
+/// axes, and RTL flips the horizontal one.
+fn flexScrollOriginReversed(constants: *const AlgoConstants) Point(bool) {
+    const main = constants.dir.is_reverse();
+    const cross = constants.is_wrap_reverse;
+    const x = if (constants.is_column) cross else main;
+    const y = if (constants.is_column) main else cross;
+    return .{ .x = x != constants.layout_direction.is_rtl(), .y = y };
+}
+
+fn flexOverflowContainer(constants: *const AlgoConstants) scrollable_overflow.ScrollableOverflowContainer {
+    return .{
+        .parent_is_scroll_container = constants.is_scroll_container,
+        .parent_size = flexClientSize(constants),
+        .reversed = flexScrollOriginReversed(constants),
+        .padding = flexPadding(constants),
+    };
 }
 
 /// Resolve the sizing keywords (`min-content`, `max-content`, `fit-content`, `fit-content(...)`,

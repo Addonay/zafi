@@ -638,6 +638,7 @@ tree_ref,
         content_box_inset,
         resolved_content_box_inset,
         resolved_border,
+        resolved_padding,
         text_align,
         justify_items,
         direction,
@@ -692,25 +693,28 @@ tree_ref,
 
             {
                 inflow_result.inflow_overflow_rect = RECT_ZERO;
+                const overflow_container = scrollable_overflow.ScrollableOverflowContainer{
+                    .parent_is_scroll_container = is_scroll_container,
+                    .parent_size = final_outer_size.sub(resolved_border.sum_axes()).sub(scrollbar_gutter.sum_axes()),
+                    .reversed = .{ .x = direction.is_rtl(), .y = false },
+                    .padding = resolved_padding,
+                };
                 for (items.list.items) |item| {
                     if (item.final_layout) |item_layout| {
-                        const contribution_location = if (direction.is_rtl())
-                            geometry.Point(f32){
-                                .x = container_outer_width - (item_layout.location.x + item_layout.size.width) - resolved_border.right,
-                                .y = item_layout.location.y - resolved_border.top,
-                            }
-                        else
-                            geometry.Point(f32){
-                                .x = item_layout.location.x - resolved_border.left,
-                                .y = item_layout.location.y - resolved_border.top,
-                            };
+                        // Physical coordinates in the padding-box frame (Taffy c256056)
+                        const contribution_location = geometry.Point(f32){
+                            .x = item_layout.location.x - resolved_border.left - scrollbar_gutter.left,
+                            .y = item_layout.location.y - resolved_border.top,
+                        };
                         inflow_result.inflow_overflow_rect = inflow_result.inflow_overflow_rect.@"union"(scrollable_overflow.compute_scrollable_overflow_contribution(
                             contribution_location,
                             item_layout.size,
-                            item_layout.scrollable_overflow_rect,
+                            item_layout.scrollable_overflow_rect.rect(),
+                            item_layout.border,
                             item.overflow,
                             item.contain,
-                            is_scroll_container));
+                            &overflow_container,
+                            minZeroRect(item_layout.margin)));
                     }
                 }
             }
@@ -736,7 +740,7 @@ tree_ref,
 
     var output = layout.LayoutOutput{
         .size = final_outer_size,
-        .scrollable_overflow_rect = RECT_ZERO,
+        .scrollable_overflow_rect = .ZERO,
         .baselines = layout.Baselines.from_first(inflow_result.first_baseline),
         .top_margin = if (own_margins_collapse_with_children.start)
             inflow_result.first_child_top_margin_set
@@ -810,17 +814,26 @@ tree_ref,
         // A scroll container's own padding at the end of the content is part of its scrollable
         // overflow region, so it is included in the in-flow overflow rect. Boxes that are not
         // scroll containers do not extend their overflow region by their own padding.
+        const client_width = @max(final_outer_size.width - resolved_border.horizontal_axis_sum() - scrollbar_gutter.horizontal_axis_sum(), 0);
+        // In RTL the scroll origin is the right edge, which the overflow must reach
+        if (direction.is_rtl()) {
+            inflow_result.inflow_overflow_rect = inflow_result.inflow_overflow_rect.@"union"(.{ .left = 0, .right = client_width, .top = 0, .bottom = 0 });
+        }
         if (is_scroll_container) {
-            if (direction.is_rtl()) {
-                inflow_result.inflow_overflow_rect.right += resolved_padding.left;
-            } else {
-                inflow_result.inflow_overflow_rect.right += resolved_padding.right;
-            }
-            inflow_result.inflow_overflow_rect.bottom += resolved_padding.bottom;
+            inflow_result.inflow_overflow_rect = inflow_result.inflow_overflow_rect.@"union"(.{
+                .left = if (direction.is_rtl()) @min(client_width - resolved_padding.left, 0) else 0,
+                .right = if (direction.is_rtl()) client_width else resolved_padding.right,
+                .top = 0,
+                .bottom = resolved_padding.bottom,
+            });
         }
         // The absolute overflow contribution is merged in by the out-of-flow
         // positioning pass, which owns the out-of-flow boxes' geometry.
-        output.scrollable_overflow_rect = inflow_result.inflow_overflow_rect;
+        output.scrollable_overflow_rect = scrollable_overflow.finalize_scrollable_overflow(
+            inflow_result.inflow_overflow_rect,
+            final_outer_size.sub(resolved_border.sum_axes()).sub(scrollbar_gutter.sum_axes()),
+            .{ .x = direction.is_rtl(), .y = false },
+            is_scroll_container);
     }
 
     // 5. Perform hidden layout on hidden children
@@ -1002,6 +1015,7 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
     content_box_inset: geometry.Rect(f32),
     resolved_content_box_inset: geometry.Rect(f32),
     resolved_border: geometry.Rect(f32),
+    resolved_padding: geometry.Rect(f32),
     text_align: style.block.TextAlign,
     justify_items: style.alignment.AlignItems,
     direction: style.Direction,
@@ -1013,6 +1027,12 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
     const TreeApi = LayoutTree(Tree);
     // Resolve container_inner_width for sizing child nodes using initial content_box_inset
     const container_inner_width = @max(0.0, container_outer_width - resolved_content_box_inset.horizontal_axis_sum());
+    const overflow_container = scrollable_overflow.ScrollableOverflowContainer{
+        .parent_is_scroll_container = is_scroll_container,
+        .parent_size = .{ .width = container_inner_width + resolved_padding.horizontal_axis_sum(), .height = 0 },
+        .reversed = .{ .x = direction.is_rtl(), .y = false },
+        .padding = resolved_padding,
+    };
     const container_percentage_resolution_height = math.maybe_sub(container_percentage_resolution_height_in, resolved_content_box_inset.vertical_axis_sum());
     const parent_size = geometry.Size(?f32){ .width = container_inner_width, .height = container_percentage_resolution_height };
     // Vertical available_space space in block flow is indefinite, NOT a min-content constraint:
@@ -1156,20 +1176,16 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             } else null;
 
             {
-                const contribution_location = if (direction.is_rtl())
-                    geometry.Point(f32){
-                        .x = container_outer_width - (location.x + item_layout.size.width) - resolved_border.right,
-                        .y = location.y - resolved_border.top,
-                    }
-                else
-                    geometry.Point(f32){ .x = location.x - resolved_border.left, .y = location.y - resolved_border.top };
+                const contribution_location = geometry.Point(f32){ .x = location.x - resolved_content_box_inset.left + resolved_padding.left, .y = location.y - resolved_border.top };
                 inflow_overflow_rect = inflow_overflow_rect.@"union"(scrollable_overflow.compute_scrollable_overflow_contribution(
                     contribution_location,
                     item_layout.size,
-                    item_layout.scrollable_overflow_rect,
+                    item_layout.scrollable_overflow_rect.rect(),
+                    item.border,
                     item.overflow,
                     item.contain,
-                    is_scroll_container));
+                    &overflow_container,
+                    minZeroRect(item_non_auto_margin)));
             }
 
             continue;
@@ -1534,20 +1550,16 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
         } else null;
 
         {
-            const contribution_location = if (direction.is_rtl())
-                geometry.Point(f32){
-                    .x = container_outer_width - (location.x + final_size.width) - resolved_border.right,
-                    .y = location.y - resolved_border.top,
-                }
-            else
-                geometry.Point(f32){ .x = location.x - resolved_border.left, .y = location.y - resolved_border.top };
+            const contribution_location = geometry.Point(f32){ .x = location.x - resolved_content_box_inset.left + resolved_padding.left, .y = location.y - resolved_border.top };
             inflow_overflow_rect = inflow_overflow_rect.@"union"(scrollable_overflow.compute_scrollable_overflow_contribution(
                 contribution_location,
                 final_size,
-                item_layout.scrollable_overflow_rect,
+                item_layout.scrollable_overflow_rect.rect(),
+                item.border,
                 item.overflow,
                 item.contain,
-                is_scroll_container));
+                &overflow_container,
+                minZeroRect(resolved_margin)));
         }
 
         // Update first_child_top_margin_set
@@ -1974,4 +1986,9 @@ test "block skips display none children" {
     const hidden_layout = try tree_ref.layout_of(hidden);
     try testing.expectEqual(@as(f32, 0), hidden_layout.size.width);
     try testing.expectEqual(@as(f32, 0), (try tree_ref.layout_of(visible)).location.y);
+}
+
+/// Only negative margins reduce scroll-container end padding (Taffy c256056).
+inline fn minZeroRect(value: geometry.Rect(f32)) geometry.Rect(f32) {
+    return .{ .left = @min(value.left, 0), .right = @min(value.right, 0), .top = @min(value.top, 0), .bottom = @min(value.bottom, 0) };
 }

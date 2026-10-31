@@ -11,6 +11,7 @@ const geometry = @import("../geometry.zig");
 const style = @import("../style/root.zig");
 const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
 const layout = @import("../tree/layout.zig");
+const scrollable_overflow = @import("common/scrollable_overflow.zig");
 const math = @import("../util/math.zig");
 
 /// Rust's measure closure `FnOnce(Size<Option<f32>>, Size<AvailableSpace>) -> Size<f32>`
@@ -126,12 +127,18 @@ pub fn compute_leaf_layout(
     const is_rtl = node_style.direction == .rtl;
     const start_padding = if (is_rtl) padding.right else padding.left;
     const end_padding = if (is_rtl) padding.left else padding.right;
-    const scrollable_overflow_rect = geometry.Rect(f32){
-        .left = 0,
-        .right = start_padding + measured_size.width + (if (is_scroll_container) end_padding else 0),
+    // Physical coordinates in the client area; RTL content ends at the right edge (Taffy c256056)
+    const client_width = @max(maxed_size.width - border.left - border.right - scrollbar_gutter.x, 0);
+    const content_end = start_padding + measured_size.width + (if (is_scroll_container) end_padding else 0);
+    const scrollable_overflow_rect = scrollable_overflow.finalize_scrollable_overflow(.{
+        .left = if (is_rtl) @min(client_width - content_end, 0) else 0,
+        .right = if (is_rtl) client_width else content_end,
         .top = 0,
         .bottom = padding.top + measured_size.height + (if (is_scroll_container) padding.bottom else 0),
-    };
+    }, .{
+        .width = maxed_size.width - border.left - border.right - scrollbar_gutter.x,
+        .height = maxed_size.height - border.top - border.bottom - scrollbar_gutter.y,
+    }, .{ .x = is_rtl, .y = false }, is_scroll_container);
 
     return .{
         .size = maxed_size,

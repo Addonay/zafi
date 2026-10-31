@@ -27,6 +27,7 @@ const coordinates = @import("types/coordinates.zig");
 const grid_track_counts = @import("types/grid_track_counts.zig");
 const named = @import("types/named.zig");
 const cell_occupancy = @import("types/cell_occupancy.zig");
+const scrollable_overflow = @import("../common/scrollable_overflow.zig");
 const LayoutTree = @import("../../tree/interfaces.zig").LayoutTree;
 
 pub const explicit_grid = @import("explicit_grid.zig");
@@ -816,6 +817,18 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
     // 9. Size, Align, and Position Grid Items
 
     var item_overflow_rect = geometry.Rect(f32){ .left = 0, .right = 0, .top = 0, .bottom = 0 };
+    const padding_box_inset = border.add(geometry.Rect(f32){
+        .left = if (direction.is_rtl()) scrollbar_gutter.x else 0.0,
+        .right = if (direction.is_rtl()) 0.0 else scrollbar_gutter.x,
+        .top = 0.0,
+        .bottom = scrollbar_gutter.y,
+    });
+    const overflow_container = scrollable_overflow.ScrollableOverflowContainer{
+        .parent_is_scroll_container = is_scroll_container,
+        .parent_size = .{ .width = container_border_box.width - padding_box_inset.horizontal_axis_sum(), .height = 0 },
+        .reversed = .{ .x = direction.is_rtl(), .y = false },
+        .padding = padding,
+    };
 
     const container_alignment_styles = geometry.InBothAbsAxis(style.alignment.AlignItems){
         .horizontal = justify_items,
@@ -852,9 +865,8 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
             container_alignment_styles,
             item.baseline_shim,
             direction,
-            container_border_box.width,
-            border,
-            is_scroll_container,
+            padding_box_inset,
+            &overflow_container,
             &item.oof_candidates);
         item.y_position = result.y;
         item.height = result.height;
@@ -996,14 +1008,9 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
     // If there are no in-flow items then return the container size and the overflow
     // (no baseline)
     if (items.items.len == 0) {
-        var overflow_rect = item_overflow_rect;
-        if (is_scroll_container) {
-            overflow_rect.right += if (direction.is_rtl()) padding.left else padding.right;
-            overflow_rect.bottom += padding.bottom;
-        }
         return layout.LayoutOutput{
             .size = container_border_box,
-            .scrollable_overflow_rect = overflow_rect,
+            .scrollable_overflow_rect = gridFinalizeOverflow(item_overflow_rect, container_border_box, border, scrollbar_gutter, padding, direction, is_scroll_container),
             .oof_candidates = oof_candidates,
             .oof_positioning_area = oof_positioning_area,
         };
@@ -1034,11 +1041,7 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
     // A scroll container's own padding at the end of the content is part of its
     // scrollable overflow region. The out-of-flow contribution is merged in by the
     // out-of-flow positioning pass, which owns the out-of-flow boxes' geometry.
-    var scrollable_overflow_rect = item_overflow_rect;
-    if (is_scroll_container) {
-        scrollable_overflow_rect.right += if (direction.is_rtl()) padding.left else padding.right;
-        scrollable_overflow_rect.bottom += padding.bottom;
-    }
+    const scrollable_overflow_rect = gridFinalizeOverflow(item_overflow_rect, container_border_box, border, scrollbar_gutter, padding, direction, is_scroll_container);
 
     return layout.LayoutOutput{
         .size = container_border_box,
@@ -1416,4 +1419,25 @@ test "grid fr track subtracts container padding" {
     }, &[_]NodeId{child});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 20 } });
     try testing.expectEqual(@as(f32, 80), (try tree_ref.layout_of(child)).size.width);
+}
+
+/// A grid container's scrollable overflow: in RTL the overflow reaches the
+/// right-edge scroll origin, and a scroll container includes its own end
+/// padding (Taffy c256056).
+fn gridFinalizeOverflow(item_overflow_rect: geometry.Rect(f32), container_border_box: geometry.F32Size, border: geometry.Rect(f32), scrollbar_gutter: geometry.Point(f32), padding: geometry.Rect(f32), direction: style.Direction, is_scroll_container: bool) layout.ScrollableOverflow {
+    const client_width = @max(container_border_box.width - border.horizontal_axis_sum() - scrollbar_gutter.x, 0);
+    const rtl = direction.is_rtl();
+    const overflow_rect = if (is_scroll_container)
+        item_overflow_rect.@"union"(.{
+            .left = if (rtl) @min(client_width - padding.left, 0) else 0,
+            .right = if (rtl) client_width else padding.right,
+            .top = 0,
+            .bottom = padding.bottom,
+        })
+    else
+        item_overflow_rect.@"union"(.{ .left = 0, .right = if (rtl) client_width else 0, .top = 0, .bottom = 0 });
+    return scrollable_overflow.finalize_scrollable_overflow(overflow_rect, .{
+        .width = container_border_box.width - border.horizontal_axis_sum() - scrollbar_gutter.x,
+        .height = container_border_box.height - border.vertical_axis_sum() - scrollbar_gutter.y,
+    }, .{ .x = rtl, .y = false }, is_scroll_container);
 }
