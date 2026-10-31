@@ -148,8 +148,15 @@ pub const NodeStore = struct {
     /// Slots in the first page. Small trees (the overwhelmingly common case for a
     /// retained tree plus a handful of edits) avoid paying for a full page.
     pub const first_page_size: usize = 8;
-    /// Slots in every page after the first.
-    pub const page_size: usize = 64;
+    /// Pages double from `first_page_size` up to this many slots, then stay
+    /// fixed. Small trees stay small, and full pages are large enough
+    /// (> 128 KiB) that general-purpose allocators serve them from mmap and
+    /// adapt to them, instead of trimming and re-faulting mid-sized heap chunks
+    /// on every tree teardown.
+    pub const page_size: usize = 128;
+    const doubling_pages = std.math.log2_int(usize, page_size / first_page_size);
+    /// Slots before the first fixed-size page: 8 + 16 + ... + page_size/2.
+    const doubling_slots = page_size - first_page_size;
 
     allocator: std.mem.Allocator,
     pages: std.ArrayListUnmanaged([]NodeData) = .empty,
@@ -165,23 +172,30 @@ pub const NodeStore = struct {
     }
 
     fn pageCount(count: u32) usize {
-        if (count <= first_page_size) return @intFromBool(count != 0);
-        const rest = count - first_page_size;
-        return 1 + (rest + page_size - 1) / page_size;
+        return if (count == 0) 0 else pageIndex(count - 1) + 1;
     }
 
-    fn pageIndex(index: u32) usize {
-        return if (index < first_page_size) 0 else 1 + (index - first_page_size) / page_size;
+    inline fn pageIndex(index: u32) usize {
+        if (index < doubling_slots) return 31 - @clz((index >> 3) + 1);
+        return doubling_pages + (index - doubling_slots) / page_size;
     }
 
-    fn pageOffset(index: u32) usize {
-        return if (index < first_page_size) @intCast(index) else @intCast((index - first_page_size) % page_size);
+    inline fn pageOffset(index: u32) usize {
+        if (index < doubling_slots) {
+            const k: u5 = @intCast(31 - @clz((index >> 3) + 1));
+            return index - ((@as(u32, 1) << k) - 1) * first_page_size;
+        }
+        return (index - doubling_slots) % page_size;
+    }
+
+    fn pageSlots(page: usize) usize {
+        return if (page < doubling_pages) first_page_size << @intCast(page) else page_size;
     }
 
     pub fn ensurePages(self: *NodeStore, count: u32) !void {
         const required = pageCount(count);
         while (self.pages.items.len < required) {
-            const size: usize = if (self.pages.items.len == 0) first_page_size else page_size;
+            const size: usize = pageSlots(self.pages.items.len);
             const page = try self.allocator.alloc(NodeData, size);
             // The page is owned by `pages` only once the append succeeds; an
             // allocation failure must not strand it.
