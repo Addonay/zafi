@@ -2,7 +2,7 @@
     // Default dependency name for this package (the module itself is called
     // `zafi`; see build.zig).
     .name = .zafi,
-    .version = "0.2.0",
+    .version = "0.3.0",
     // Generated for this standalone package; never reused from a parent.
     .dependencies = .{
         .serde = .{

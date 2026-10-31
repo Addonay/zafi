@@ -80,6 +80,14 @@ while comparing different work.
   scenario whose signal is under `MIN_SIGNAL` times its own baseline is reported
   as `noise` and excluded rather than contributing a meaningless ratio.
 
+## Current method (2026-10-31)
+
+Both harnesses use glibc `malloc` and report peak live bytes; every tree is
+built and torn down inside the iteration, plus two retained-tree scenarios
+(`rebuild_flex_1000`, `relayout_grid_50x50`). The current results are in the
+top-level README. The rounds below used a reused arena on the Zig side and are
+kept as history only; they are not comparable.
+
 ## Round 3 (2026-10-03, Taffy pinned at `22f941e`)
 
 Measured with `zig build bench-compare -- --repeat 5`. Ratios are
