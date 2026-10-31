@@ -276,6 +276,8 @@ pub const NodeStore = struct {
     }
 };
 
+const ScratchStack = @import("../util/scratch_stack.zig").ScratchStack;
+
 pub const Tree = struct {
     allocator: std.mem.Allocator,
     nodes: NodeStore,
@@ -284,14 +286,13 @@ pub const Tree = struct {
     /// uses Taffy's default (zero-size) measure; `compute_layout_with_measure`
     /// installs the caller's callback for the duration of the run.
     measure_function: ?interfaces.MeasureFunc = null,
-    /// Per-tree arena for layout-pass temporaries (line lists, placement
-    /// scratch, track arrays, occupancy intervals, ...). Allocations made from
-    /// `scratch_allocator()` are owned by the tree and valid until the next
-    /// top-level layout pass (or `reset_scratch`/`clear`); nothing allocated
-    /// from it is allowed to escape the pass that requested it. Resetting
-    /// keeps the arena's capacity, so repeated passes reuse the same block
-    /// instead of returning to the backing allocator.
-    scratch: std.heap.ArenaAllocator,
+    /// Per-tree stack allocator for layout-pass temporaries (line lists,
+    /// placement scratch, track arrays, occupancy intervals, ...). Allocations
+    /// made from `scratch_allocator()` are owned by the tree and valid until the
+    /// next top-level layout pass (or `reset_scratch`/`clear`), unless the
+    /// caching wrapper releases a child layout's temporaries early (see
+    /// `scratch_mark`). Chunks are retained across passes.
+    scratch: ScratchStack,
     /// Per-tree arena for mutation-time working memory (input snapshots,
     /// validation sets). Reset at the start of each public mutation entry point
     /// and retained between them, so the steady-state cost of validation is zero
@@ -314,7 +315,7 @@ pub const Tree = struct {
         return .{
             .allocator = allocator,
             .nodes = NodeStore.init(allocator),
-            .scratch = std.heap.ArenaAllocator.init(allocator),
+            .scratch = ScratchStack.init(allocator),
             .mutation_arena = std.heap.ArenaAllocator.init(allocator),
         };
     }
@@ -357,6 +358,17 @@ pub const Tree = struct {
     /// Allocator for layout-pass temporaries. Memory is owned by the tree and
     /// invalidated by the next top-level layout pass, `reset_scratch`, `clear`
     /// or `deinit`. Never store an escaping pointer/reference in it.
+    /// The current top of the scratch stack (see `scratch_release`).
+    pub fn scratch_mark(self: *Tree) ScratchStack.Mark {
+        return self.scratch.mark();
+    }
+
+    /// Pop every scratch allocation made since `mark`; nothing allocated
+    /// after it may be referenced afterwards.
+    pub fn scratch_release(self: *Tree, mark: ScratchStack.Mark) void {
+        self.scratch.release(mark);
+    }
+
     pub fn scratch_allocator(self: *Tree) std.mem.Allocator {
         return self.scratch.allocator();
     }
@@ -366,7 +378,7 @@ pub const Tree = struct {
     /// layout pass begins; only needed manually when driving the compute
     /// functions directly without `compute_layout`/`compute_child_layout`.
     pub fn reset_scratch(self: *Tree) void {
-        _ = self.scratch.reset(.retain_capacity);
+        self.scratch.reset();
     }
 
     /// Number of live nodes, in O(1).

@@ -160,6 +160,21 @@ pub fn LayoutTree(comptime Self: type) type {
         /// A host without a scratch allocator can return a long-lived arena and
         /// reset it in `begin_layout_pass`; a host that does not care about
         /// allocation churn can return its general allocator.
+        /// Optional: hosts with a stack-like scratch allocator can let the
+        /// caching wrapper reclaim a finished child layout's temporaries early.
+        pub const ScratchMark = if (@hasDecl(Self, "scratch_mark")) @typeInfo(@TypeOf(Self.scratch_mark)).@"fn".return_type.? else void;
+
+        pub const scratch_mark = if (@hasDecl(Self, "scratch_mark")) scratchMarkImpl else scratchMarkNoop;
+        pub const scratch_release = if (@hasDecl(Self, "scratch_release")) scratchReleaseImpl else scratchReleaseNoop;
+        inline fn scratchMarkImpl(tree: *Self) ScratchMark {
+            return tree.scratch_mark();
+        }
+        inline fn scratchMarkNoop(_: *Self) void {}
+        inline fn scratchReleaseImpl(tree: *Self, mark: ScratchMark) void {
+            tree.scratch_release(mark);
+        }
+        inline fn scratchReleaseNoop(_: *Self, _: void) void {}
+
         pub inline fn scratch_allocator(tree: *Self) std.mem.Allocator {
             comptime require_method(Self, "scratch_allocator");
             if (comptime @hasDecl(Self, "scratch_allocator")) return tree.scratch_allocator();

@@ -5,6 +5,7 @@ pub const math = @import("math.zig");
 pub const parse = @import("parse.zig");
 pub const print = @import("print.zig");
 pub const resolve = @import("resolve.zig");
+pub const scratch_stack = @import("scratch_stack.zig");
 pub const sys = @import("sys.zig");
 
 test {
@@ -13,5 +14,6 @@ test {
     _ = @import("parse.zig");
     _ = @import("print.zig");
     _ = @import("resolve.zig");
+    _ = @import("scratch_stack.zig");
     _ = @import("sys.zig");
 }
