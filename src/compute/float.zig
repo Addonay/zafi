@@ -167,7 +167,7 @@ const FloatFitter = struct {
 
 /// A context for placing floated boxes
 pub const FloatContext = struct {
-    allocator: std.mem.Allocator = std.heap.page_allocator,
+    allocator: std.mem.Allocator,
     /// The available_space space constraint that applies to the root Block Formatting Context
     /// for which this `FloatContext` manages floats.
     available_width: f32 = 0,
