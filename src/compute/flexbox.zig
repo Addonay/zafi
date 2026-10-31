@@ -1684,7 +1684,7 @@ fn container_max_content_size(comptime Tree: type, tree_ref: *Tree, available_sp
             };
 
             item.content_flex_fraction = blk: {
-                const diff = content_contribution - item.flex_basis;
+                const diff = content_contribution - item.margin.main_axis_sum(constants.dir) - item.flex_basis;
                 if (diff > 0.0) {
                     break :blk diff / math.f32_max(1.0, item.flex_grow);
                 } else if (diff < 0.0) {
@@ -1706,6 +1706,10 @@ fn container_max_content_size(comptime Tree: type, tree_ref: *Tree, available_sp
         // then clamp that result by the max main size floored by the min main size.
         //
         // The flex container's max-content size is the largest sum of the afore-calculated sizes of all items within a single line.
+        // A row container that wraps is at least as large as its largest item, which matters when
+        // negative margins make the sum of the item sizes smaller than the largest item.
+        const floor_by_largest_item = constants.is_wrap and constants.dir.is_row();
+        var largest_item_size: f32 = 0.0;
         var item_main_size_sum: f32 = 0.0;
         for (line.items) |*item| {
             const flex_fraction = item.content_flex_fraction;
@@ -1721,11 +1725,13 @@ fn container_max_content_size(comptime Tree: type, tree_ref: *Tree, available_sp
             const size = item.flex_basis + flex_contribution;
             item.outer_target_size.set_main(constants.dir, size);
             item.target_size.set_main(constants.dir, size);
-            item_main_size_sum += size;
+            const outer_size = size + item.margin.main_axis_sum(constants.dir);
+            if (floor_by_largest_item) largest_item_size = math.f32_max(largest_item_size, outer_size);
+            item_main_size_sum += outer_size;
         }
 
         const gap_sum = sum_axis_gaps(constants.gap.main(constants.dir), line.items.len);
-        main_size = math.f32_max(main_size, item_main_size_sum + gap_sum);
+        main_size = math.f32_max(main_size, math.f32_max(largest_item_size, item_main_size_sum + gap_sum));
     }
 
     return main_size + main_content_box_inset;
