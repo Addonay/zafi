@@ -14,3 +14,5 @@ target/
 .DS_Store
 
 __pycache__
+# Claude Code local state (agent worktrees)
+.claude/
