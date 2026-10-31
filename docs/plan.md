@@ -1,4 +1,4 @@
-# zlay roadmap: beyond Taffy 0.14 parity
+# zafi roadmap: beyond Taffy 0.14 parity
 
 **Status:** proposed roadmap (2026-09-12), synthesized from five research tracks:
 production-engine comparison, lightweight/embeddable-engine comparison, incremental
@@ -6,7 +6,7 @@ layout architecture, verification/product strategy, and a codebase audit.
 Sections marked *target* are provisional engineering goals, not measured results;
 only cited measurements are claims.
 
-**Scope:** evolve zlay from a behavior-compatible Taffy 0.14 port into a
+**Scope:** evolve zafi from a behavior-compatible Taffy 0.14 port into a
 first-class standalone Zig layout engine: correctness under change and failure,
 memory and speed, an incremental API surface, a stable C ABI, and a verification
 program strong enough to gate releases.
@@ -72,7 +72,7 @@ These corrections matter because `audit/research-*.md` are used as planning inpu
    Some tree-allocator allocations remain elsewhere (see M1/M2).
 3. The research documents predate benchmark round 2 in places; prefer
    `audit/bench_compare.txt` for current ratios.
-4. Upstream Taffy `main` is **ahead** of zlay's pin (`1b918ba`, v0.14.0-7).
+4. Upstream Taffy `main` is **ahead** of zafi's pin (`1b918ba`, v0.14.0-7).
    Upstream is a source of ideas, never an oracle; the pinned revision is the
    compatibility contract.
 
@@ -334,21 +334,21 @@ features have browser-derived fixtures in their own group.
    `Layout`, `LayoutInput/Output`, `TaffyError`, measure callback. Mark
    everything else `experimental`. SemVer policy with `@compileError` guards for
    removals; compile README/example snippets as tests.
-2. C ABI v0.1: opaque `zlay_tree`; `zlay_node{index, generation}` by value; POD
+2. C ABI v0.1: opaque `zafi_tree`; `zafi_node{index, generation}` by value; POD
    `extern struct` wire types with `{struct_size, abi_version}` headers; single
    measure callback + `user_data`; `int32_t` error codes + last-error accessor;
-   caller-supplied allocator ownership; `zlay_abi_version` +
-   `zlay_abi_is_compatible`.
-3. Hand-author `include/zlay.h`; diff against `-femit-h` output in CI; symbol
-   version script (`zlay_*` global, `local: *`) + SONAME; `abidiff` at release.
+   caller-supplied allocator ownership; `zafi_abi_version` +
+   `zafi_abi_is_compatible`.
+3. Hand-author `include/zafi.h`; diff against `-femit-h` output in CI; symbol
+   version script (`zafi_*` global, `local: *`) + SONAME; `abidiff` at release.
 4. Packaging: static + shared artifacts, `pkg-config`, install headers, add
    `include/` to the package manifest.
 
 **Acceptance:** C and C++ consumers compile and run; `nm -D` shows only
-`zlay_*`; `abidiff` clean across a simulated minor bump; version negotiation
+`zafi_*`; `abidiff` clean across a simulated minor bump; version negotiation
 rejects incompatible majors.
 
-**Touch:** `src/root.zig`, new `src/capi/`, new `include/zlay.h`, `build.zig`,
+**Touch:** `src/root.zig`, new `src/capi/`, new `include/zafi.h`, `build.zig`,
 `build.zig.zon`, CI.
 
 ### M6 — Platform reach: WASM/freestanding, feature gates, FP determinism
@@ -383,7 +383,7 @@ passes.
 
 **Work**
 
-1. **`zlay.frame` facade.** Declarative per-frame scene declaration over a
+1. **`zafi.frame` facade.** Declarative per-frame scene declaration over a
    retained `TaffyTree`: hashed-path stable ids (ImGui-style id stack),
    per-frame arena, explicit prune/hide policy. First-frame geometry is exact —
    no DVUI-style two-frame warm-up.
@@ -541,7 +541,7 @@ the multi-tree level; C/C++ ABI smoke tests; compiled README examples.
 
 **Local evidence:** `report.md`; `audit/research-algorithms.md`;
 `audit/research-performance.md`; `audit/bench_compare*.txt`; `README.md`;
-`src/port.md`.
+`docs/port.md`.
 
 **Upstream primary sources used by the research tracks:**
 

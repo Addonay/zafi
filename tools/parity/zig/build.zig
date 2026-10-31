@@ -12,7 +12,7 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption(bool, "serde", false);
 
-    const zlay_mod = b.addModule("zlay", .{
+    const zafi_mod = b.addModule("zafi", .{
         .root_source_file = b.path("../../../src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("main.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "zlay", .module = zlay_mod }},
+            .imports = &.{.{ .name = "zafi", .module = zafi_mod }},
         }),
     });
 

@@ -101,7 +101,7 @@ fn serializeCompactLength(value: compact_length.CompactLength, serializer: anyty
     // serializer has a fixed two-error set (`OutOfMemory`, `WriteFailed`), so
     // a custom error cannot be propagated here; calc instead serializes as its
     // raw bits (`0`), which deserialization rejects as an invalid tag. This is
-    // the one known serde wire divergence and is documented in report.md.
+    // the one known serde wire divergence and is documented in docs/report.md on the dev branch.
     if (value.is_calc()) {
         try serializer.serializeInt(@as(u64, 0));
         return;

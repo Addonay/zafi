@@ -1,4 +1,4 @@
-# zlay benchmarks: matched Taffy (Rust) vs Zig port
+# zafi benchmarks: matched Taffy (Rust) vs Zig port
 
 Two harnesses run the same six scenarios with the same iteration counts, so
 `compare.py` can print a direct ratio table:
@@ -140,7 +140,7 @@ the CPU-time/wall-clock disagreement above is unrelated to it.
 
 ## Earlier rounds
 
-Rounds 1 and 2 (2026-09-12) are kept in `report.md` §2.4 together with the
+Rounds 1 and 2 (2026-09-12) are kept in `docs/report.md` §2.4 together with the
 optimization list they produced. Their absolute numbers were taken on a
 less-loaded host and their ratios were computed with the `Debug` library
 described above, so they are recorded as history rather than as results.

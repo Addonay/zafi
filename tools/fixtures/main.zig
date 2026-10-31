@@ -3,7 +3,7 @@
 //! Walks `.references/taffy/tests/xml/**` (path baked in via `build_options`),
 //! builds each `<test>` tree with the port, computes layout and compares the
 //! recursive expectation tree within Taffy's 0.1px tolerance. This is the
-//! parity gate described in `port.md` and `report.md`.
+//! parity gate described in `docs/port.md` and `docs/report.md`.
 //!
 //! Usage (through the package build):
 //!   zig build fixtures                          # all groups
@@ -27,15 +27,15 @@
 //! `position` explicitly, so the flag does not affect it.
 
 const std = @import("std");
-const zlay = @import("zlay");
+const zafi = @import("zafi");
 const xml = @import("xml.zig");
 const build_options = @import("build_options");
 
-const Style = zlay.Style;
-const grid = zlay.style.grid;
+const Style = zafi.Style;
+const grid = zafi.style.grid;
 
 const ExpectedNode = struct {
-    node_id: zlay.NodeId,
+    node_id: zafi.NodeId,
     x: f32,
     y: f32,
     width: f32,
@@ -59,7 +59,7 @@ const Options = struct {
     /// port's `Style.position` default (and Taffy's `Position::default()`);
     /// override only for historical fixture corpora generated when Taffy's default
     /// was `relative`.
-    default_position: zlay.Position = .static,
+    default_position: zafi.Position = .static,
 };
 
 const GroupStats = struct {
@@ -144,26 +144,26 @@ const Runner = struct {
 
         const use_rounding = parseUseRounding(doc.attribute("use-rounding")) catch return "invalid use-rounding";
 
-        var tree = zlay.Tree.init(self.gpa);
+        var tree = zafi.Tree.init(self.gpa);
         defer tree.deinit();
 
         const expected_tree = self.buildTree(alloc, &tree, input_root, expected_root, null, self.options.default_position) catch |err| {
             return std.fmt.allocPrint(alloc, "tree build error: {s}", .{@errorName(err)}) catch "tree build error";
         };
 
-        const available = zlay.Size(zlay.AvailableSpace){
+        const available = zafi.Size(zafi.AvailableSpace){
             .width = parseAvailableSpace(viewport.attribute("width")) catch return "invalid viewport width",
             .height = parseAvailableSpace(viewport.attribute("height")) catch return "invalid viewport height",
         };
         tree.use_rounding = use_rounding;
-        const evictions_before = zlay.tree.cache.mode_change_evictions;
-        tree.compute_layout_with_measure(expected_tree.node_id, available, zlay.testing.fixture_measure_function) catch |err| {
+        const evictions_before = zafi.tree.cache.mode_change_evictions;
+        tree.compute_layout_with_measure(expected_tree.node_id, available, zafi.testing.fixture_measure_function) catch |err| {
             return std.fmt.allocPrint(alloc, "compute error: {s}", .{@errorName(err)}) catch "compute error";
         };
 
         // Taffy's runner asserts this too: a single pass over fresh caches must
         // lay every node out with one sizing mode / margin collapsibility.
-        if (zlay.tree.cache.mode_change_evictions != evictions_before)
+        if (zafi.tree.cache.mode_change_evictions != evictions_before)
             return "cache mode changed during a layout pass over fresh caches";
 
         var details = std.ArrayList(u8).empty;
@@ -175,25 +175,25 @@ const Runner = struct {
     fn buildTree(
         self: *Runner,
         alloc: std.mem.Allocator,
-        tree: *zlay.Tree,
+        tree: *zafi.Tree,
         input: *const xml.Element,
         expected: *const xml.Element,
-        parent: ?zlay.NodeId,
-        default_position: zlay.Position,
+        parent: ?zafi.NodeId,
+        default_position: zafi.Position,
     ) !*ExpectedNode {
         const style = try buildStyle(input, default_position);
-        var node_id: zlay.NodeId = undefined;
+        var node_id: zafi.NodeId = undefined;
         if (input.children.len > 0) {
             node_id = try tree.new_leaf(style);
         } else {
             const raw_text = input.text;
             if (raw_text.len > 0) {
-                const context = try alloc.create(zlay.testing.TestNodeContext);
-                const writing_mode: zlay.testing.WritingMode = if (input.attribute("writing-mode")) |mode|
+                const context = try alloc.create(zafi.testing.TestNodeContext);
+                const writing_mode: zafi.testing.WritingMode = if (input.attribute("writing-mode")) |mode|
                     (if (std.mem.startsWith(u8, mode, "vertical")) .vertical else .horizontal)
                 else
                     .horizontal;
-                context.* = zlay.testing.TestNodeContext.ahem_text(std.mem.trim(u8, raw_text, " \t\r\n"), writing_mode);
+                context.* = zafi.testing.TestNodeContext.ahem_text(std.mem.trim(u8, raw_text, " \t\r\n"), writing_mode);
                 node_id = try tree.new_leaf_with_context(style, @ptrCast(context));
             } else {
                 node_id = try tree.new_leaf(style);
@@ -237,9 +237,9 @@ fn parseUseRounding(raw: ?[]const u8) !bool {
     return error.InvalidUseRounding;
 }
 
-fn parseAvailableSpace(raw: ?[]const u8) !zlay.AvailableSpace {
+fn parseAvailableSpace(raw: ?[]const u8) !zafi.AvailableSpace {
     const value = raw orelse return .max_content;
-    return zlay.AvailableSpace.from_str(value);
+    return zafi.AvailableSpace.from_str(value);
 }
 
 fn parseAttr(comptime T: type, node: *const xml.Element, name: []const u8) !?T {
@@ -272,76 +272,76 @@ fn parsePlacement(node: *const xml.Element, name: []const u8) !grid.GridPlacemen
     return try grid.grid_placement_from_str(raw);
 }
 
-fn buildStyle(node: *const xml.Element, default_position: zlay.Position) !Style {
+fn buildStyle(node: *const xml.Element, default_position: zafi.Position) !Style {
     var style = Style{};
 
-    style.display = try attrOr(zlay.Display, node, "display", .flex);
-    style.direction = try attrOr(zlay.Direction, node, "direction", .ltr);
-    style.box_sizing = try attrOr(zlay.BoxSizing, node, "box-sizing", .border_box);
-    style.overflow.x = try attrOr(zlay.Overflow, node, "overflow-x", .visible);
-    style.overflow.y = try attrOr(zlay.Overflow, node, "overflow-y", .visible);
+    style.display = try attrOr(zafi.Display, node, "display", .flex);
+    style.direction = try attrOr(zafi.Direction, node, "direction", .ltr);
+    style.box_sizing = try attrOr(zafi.BoxSizing, node, "box-sizing", .border_box);
+    style.overflow.x = try attrOr(zafi.Overflow, node, "overflow-x", .visible);
+    style.overflow.y = try attrOr(zafi.Overflow, node, "overflow-y", .visible);
     style.scrollbar_width = try attrOr(f32, node, "scrollbar-width", 0);
-    style.contain = try attrOr(zlay.Contain, node, "contain", .{});
-    style.float = try attrOr(zlay.style.float.Float, node, "float", .none);
-    style.clear = try attrOr(zlay.style.float.Clear, node, "clear", .none);
-    style.position = try attrOr(zlay.Position, node, "position", default_position);
+    style.contain = try attrOr(zafi.Contain, node, "contain", .{});
+    style.float = try attrOr(zafi.style.float.Float, node, "float", .none);
+    style.clear = try attrOr(zafi.style.float.Clear, node, "clear", .none);
+    style.position = try attrOr(zafi.Position, node, "position", default_position);
 
     style.size = .{
-        .width = try attrOr(zlay.Dimension, node, "width", zlay.Dimension.auto),
-        .height = try attrOr(zlay.Dimension, node, "height", zlay.Dimension.auto),
+        .width = try attrOr(zafi.Dimension, node, "width", zafi.Dimension.auto),
+        .height = try attrOr(zafi.Dimension, node, "height", zafi.Dimension.auto),
     };
     style.min_size = .{
-        .width = try attrOr(zlay.LengthPercentageAuto, node, "min-width", zlay.LengthPercentageAuto.auto()),
-        .height = try attrOr(zlay.LengthPercentageAuto, node, "min-height", zlay.LengthPercentageAuto.auto()),
+        .width = try attrOr(zafi.LengthPercentageAuto, node, "min-width", zafi.LengthPercentageAuto.auto()),
+        .height = try attrOr(zafi.LengthPercentageAuto, node, "min-height", zafi.LengthPercentageAuto.auto()),
     };
     style.max_size = .{
-        .width = try attrOr(zlay.LengthPercentageAuto, node, "max-width", zlay.LengthPercentageAuto.auto()),
-        .height = try attrOr(zlay.LengthPercentageAuto, node, "max-height", zlay.LengthPercentageAuto.auto()),
+        .width = try attrOr(zafi.LengthPercentageAuto, node, "max-width", zafi.LengthPercentageAuto.auto()),
+        .height = try attrOr(zafi.LengthPercentageAuto, node, "max-height", zafi.LengthPercentageAuto.auto()),
     };
     style.inset = .{
-        .top = try attrOr(zlay.LengthPercentageAuto, node, "top", zlay.LengthPercentageAuto.auto()),
-        .left = try attrOr(zlay.LengthPercentageAuto, node, "left", zlay.LengthPercentageAuto.auto()),
-        .bottom = try attrOr(zlay.LengthPercentageAuto, node, "bottom", zlay.LengthPercentageAuto.auto()),
-        .right = try attrOr(zlay.LengthPercentageAuto, node, "right", zlay.LengthPercentageAuto.auto()),
+        .top = try attrOr(zafi.LengthPercentageAuto, node, "top", zafi.LengthPercentageAuto.auto()),
+        .left = try attrOr(zafi.LengthPercentageAuto, node, "left", zafi.LengthPercentageAuto.auto()),
+        .bottom = try attrOr(zafi.LengthPercentageAuto, node, "bottom", zafi.LengthPercentageAuto.auto()),
+        .right = try attrOr(zafi.LengthPercentageAuto, node, "right", zafi.LengthPercentageAuto.auto()),
     };
     style.margin = .{
-        .top = try attrOr(zlay.LengthPercentageAuto, node, "margin-top", zlay.LengthPercentageAuto.zero()),
-        .left = try attrOr(zlay.LengthPercentageAuto, node, "margin-left", zlay.LengthPercentageAuto.zero()),
-        .bottom = try attrOr(zlay.LengthPercentageAuto, node, "margin-bottom", zlay.LengthPercentageAuto.zero()),
-        .right = try attrOr(zlay.LengthPercentageAuto, node, "margin-right", zlay.LengthPercentageAuto.zero()),
+        .top = try attrOr(zafi.LengthPercentageAuto, node, "margin-top", zafi.LengthPercentageAuto.zero()),
+        .left = try attrOr(zafi.LengthPercentageAuto, node, "margin-left", zafi.LengthPercentageAuto.zero()),
+        .bottom = try attrOr(zafi.LengthPercentageAuto, node, "margin-bottom", zafi.LengthPercentageAuto.zero()),
+        .right = try attrOr(zafi.LengthPercentageAuto, node, "margin-right", zafi.LengthPercentageAuto.zero()),
     };
     style.padding = .{
-        .top = try attrOr(zlay.LengthPercentage, node, "padding-top", zlay.LengthPercentage.zero()),
-        .left = try attrOr(zlay.LengthPercentage, node, "padding-left", zlay.LengthPercentage.zero()),
-        .bottom = try attrOr(zlay.LengthPercentage, node, "padding-bottom", zlay.LengthPercentage.zero()),
-        .right = try attrOr(zlay.LengthPercentage, node, "padding-right", zlay.LengthPercentage.zero()),
+        .top = try attrOr(zafi.LengthPercentage, node, "padding-top", zafi.LengthPercentage.zero()),
+        .left = try attrOr(zafi.LengthPercentage, node, "padding-left", zafi.LengthPercentage.zero()),
+        .bottom = try attrOr(zafi.LengthPercentage, node, "padding-bottom", zafi.LengthPercentage.zero()),
+        .right = try attrOr(zafi.LengthPercentage, node, "padding-right", zafi.LengthPercentage.zero()),
     };
     style.border = .{
-        .top = try attrOr(zlay.LengthPercentage, node, "border-top", zlay.LengthPercentage.zero()),
-        .left = try attrOr(zlay.LengthPercentage, node, "border-left", zlay.LengthPercentage.zero()),
-        .bottom = try attrOr(zlay.LengthPercentage, node, "border-bottom", zlay.LengthPercentage.zero()),
-        .right = try attrOr(zlay.LengthPercentage, node, "border-right", zlay.LengthPercentage.zero()),
+        .top = try attrOr(zafi.LengthPercentage, node, "border-top", zafi.LengthPercentage.zero()),
+        .left = try attrOr(zafi.LengthPercentage, node, "border-left", zafi.LengthPercentage.zero()),
+        .bottom = try attrOr(zafi.LengthPercentage, node, "border-bottom", zafi.LengthPercentage.zero()),
+        .right = try attrOr(zafi.LengthPercentage, node, "border-right", zafi.LengthPercentage.zero()),
     };
     style.gap = .{
-        .width = try attrOr(zlay.LengthPercentage, node, "column-gap", zlay.LengthPercentage.zero()),
-        .height = try attrOr(zlay.LengthPercentage, node, "row-gap", zlay.LengthPercentage.zero()),
+        .width = try attrOr(zafi.LengthPercentage, node, "column-gap", zafi.LengthPercentage.zero()),
+        .height = try attrOr(zafi.LengthPercentage, node, "row-gap", zafi.LengthPercentage.zero()),
     };
 
     style.aspect_ratio = try parseAttr(f32, node, "aspect-ratio");
-    style.align_items = try parseAttr(zlay.AlignItems, node, "align-items");
-    style.align_self = try parseAttr(zlay.AlignSelf, node, "align-self");
-    style.justify_items = try parseAttr(zlay.JustifyItems, node, "justify-items");
-    style.justify_self = try parseAttr(zlay.JustifySelf, node, "justify-self");
-    style.align_content = try parseAttr(zlay.AlignContent, node, "align-content");
-    style.justify_content = try parseAttr(zlay.JustifyContent, node, "justify-content");
+    style.align_items = try parseAttr(zafi.AlignItems, node, "align-items");
+    style.align_self = try parseAttr(zafi.AlignSelf, node, "align-self");
+    style.justify_items = try parseAttr(zafi.JustifyItems, node, "justify-items");
+    style.justify_self = try parseAttr(zafi.JustifySelf, node, "justify-self");
+    style.align_content = try parseAttr(zafi.AlignContent, node, "align-content");
+    style.justify_content = try parseAttr(zafi.JustifyContent, node, "justify-content");
 
-    style.text_align = try attrOr(zlay.style.block.TextAlign, node, "text-align", .auto);
-    style.flex_direction = try attrOr(zlay.style.flex.FlexDirection, node, "flex-direction", .row);
-    style.flex_wrap = try attrOr(zlay.style.flex.FlexWrap, node, "flex-wrap", .no_wrap);
+    style.text_align = try attrOr(zafi.style.block.TextAlign, node, "text-align", .auto);
+    style.flex_direction = try attrOr(zafi.style.flex.FlexDirection, node, "flex-direction", .row);
+    style.flex_wrap = try attrOr(zafi.style.flex.FlexWrap, node, "flex-wrap", .no_wrap);
     style.flex_line_count = try attrOr(u16, node, "flex-line-count", 1);
     style.flex_grow = try attrOr(f32, node, "flex-grow", 0);
     style.flex_shrink = try attrOr(f32, node, "flex-shrink", 1);
-    style.flex_basis = try attrOr(zlay.Dimension, node, "flex-basis", zlay.Dimension.auto);
+    style.flex_basis = try attrOr(zafi.Dimension, node, "flex-basis", zafi.Dimension.auto);
 
     style.grid_auto_flow = try attrOr(grid.GridAutoFlow, node, "grid-auto-flow", .row);
     if (node.attribute("grid-template-rows")) |raw| {
@@ -440,8 +440,8 @@ fn appendMessage(alloc: std.mem.Allocator, details: *std.ArrayList(u8), comptime
 
 fn compareNode(
     alloc: std.mem.Allocator,
-    tree: *zlay.Tree,
-    node_id: zlay.NodeId,
+    tree: *zafi.Tree,
+    node_id: zafi.NodeId,
     expected: *const ExpectedNode,
     use_rounding: bool,
     path: []const u8,
@@ -451,7 +451,7 @@ fn compareNode(
     if (depth > 64) return 0;
     var failures: usize = 0;
     const actual = (if (use_rounding) tree.layout_of(node_id) else tree.unrounded_layout(node_id)) catch {
-        appendMessage(alloc, details, "{s}: zlay lookup failed\n", .{path});
+        appendMessage(alloc, details, "{s}: zafi lookup failed\n", .{path});
         return 1;
     };
     if (!nearlyEqual(actual.location.x, expected.x) or
@@ -467,7 +467,7 @@ fn compareNode(
         }
     }
     if (expected.scroll_width != null and expected.scroll_height != null) {
-        const actual_scroll = zlay.Size(f32){ .width = actual.scroll_width(), .height = actual.scroll_height() };
+        const actual_scroll = zafi.Size(f32){ .width = actual.scroll_width(), .height = actual.scroll_height() };
         if (!nearlyEqual(actual_scroll.width, expected.scroll_width.?) or !nearlyEqual(actual_scroll.height, expected.scroll_height.?)) {
             failures += 1;
             if (failures <= 8) {
@@ -481,7 +481,7 @@ fn compareNode(
     // Resolved track lists are asserted only when both the expectation and the
     // computed detailed info are available, mirroring Taffy's `tests/xml.rs`.
     const detailed = tree.detailed_layout_info(node_id) catch .none;
-    const actual_grid: ?*const zlay.compute.grid.DetailedGridInfo = switch (detailed) {
+    const actual_grid: ?*const zafi.compute.grid.DetailedGridInfo = switch (detailed) {
         .none => null,
         .grid => |pointer| @ptrCast(@alignCast(pointer)),
     };
@@ -546,7 +546,7 @@ fn parseArgs(args: []const [:0]const u8) !Options {
         } else if (std.mem.eql(u8, arg, "--default-position")) {
             index += 1;
             if (index >= args.len) return error.MissingArgument;
-            options.default_position = zlay.Position.from_str(args[index]) catch return error.InvalidPosition;
+            options.default_position = zafi.Position.from_str(args[index]) catch return error.InvalidPosition;
         }
     }
     return options;

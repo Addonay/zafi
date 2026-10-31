@@ -1,7 +1,7 @@
 .{
     // Default dependency name for this package (the module itself is called
-    // `zlay`; see build.zig).
-    .name = .zlay,
+    // `zafi`; see build.zig).
+    .name = .zafi,
     .version = "0.2.0",
     // Generated for this standalone package; never reused from a parent.
     .dependencies = .{
@@ -10,7 +10,7 @@
             .hash = "serde-1.2.2-1DszTxNsGQB0pwXk4nyJcSPq0_Z2XLXrZY0ISwq5nARW",
         },
     },
-    .fingerprint = 0x31343ede0d6ce2d0, // Changing this has security and trust implications.
+    .fingerprint = 0x6b1a2b2e365df182, // Changing this has security and trust implications.
     // Toolchain floor. `build.zig` and the sources track Zig 0.17 development
     // builds; this is the oldest revision the package is tested against.
     .minimum_zig_version = "0.17.0",

@@ -1,4 +1,4 @@
-# zlay — Taffy feature-parity report
+# zafi — Taffy feature-parity report
 
 **Status: behavioral parity achieved** against the tracked Taffy revision, on
 its full generated fixture corpus.
@@ -210,7 +210,7 @@ performance consequences, measured:
    are sorted, and the items are permuted once. Worth 19% on
    `mixed_flex_grid_block`.
 3. **The benchmark harness was measuring a Debug build.** `build.zig` created
-   one `zlay` module at the global `-Doptimize` and reused it for the harness,
+   one `zafi` module at the global `-Doptimize` and reused it for the harness,
    so the library ran with safety checks and no optimization while Taffy ran
    optimized. Fixing this is what moved the geometric mean from a meaningless
    1.293× to a real ~1.01×.
@@ -476,7 +476,7 @@ with a before/after ratio.
 ## 8. Reproduce
 
 ```sh
-cd zlay
+cd zafi
 
 zig build test --summary all               # 87/87
 zig build test -Dserde=true --summary all  # 97/97 (Taffy wire-format serde)
@@ -500,4 +500,4 @@ bash tools/fetch-reference.sh              # restore pinned Taffy
 | `audit/api_audit.md`, `audit/file_inventory.md` | regenerated static surface audit |
 | `audit/flexbox.md`, `grid.md`, `block-float.md`, `style-core.md`, `tree-compute.md` | original gap audits (kept as the historical record) |
 | `plan.md` | campaign plan and baseline |
-| `src/port.md` | porting ledger with its completion gates |
+| `docs/port.md` | porting ledger with its completion gates |

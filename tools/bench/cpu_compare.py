@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-RUST_BIN = HERE / "rust" / "target" / "release" / "zlay-bench-rust"
+RUST_BIN = HERE / "rust" / "target" / "release" / "zafi-bench-rust"
 
 SCENARIOS = [
     "tree_creation_10k",

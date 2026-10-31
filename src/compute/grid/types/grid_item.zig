@@ -377,7 +377,7 @@ pub const GridItem = struct {
             self.keyword_adjusted_available_space(Tree, grid_area_size_value, map_available_space(available_space, .min_content), tree_ref),
             .inherent_size,
             axis.as_abs_naive(),
-            .{ .start = false, .end = false }) catch @panic("zlay: grid item min content measurement failed");
+            .{ .start = false, .end = false }) catch @panic("zafi: grid item min content measurement failed");
     }
 
     /// Retrieve the item's min content contribution from the cache or compute it
@@ -407,7 +407,7 @@ pub const GridItem = struct {
             self.keyword_adjusted_available_space(Tree, grid_area_size_value, map_available_space(available_space, .max_content), tree_ref),
             .inherent_size,
             axis.as_abs_naive(),
-            .{ .start = false, .end = false }) catch @panic("zlay: grid item max content measurement failed");
+            .{ .start = false, .end = false }) catch @panic("zafi: grid item max content measurement failed");
     }
 
     /// Retrieve the item's max content contribution from the cache or compute it

@@ -1,0 +1,12 @@
+.{
+    // Development tooling for zafi (dev branch only): Taffy fixture corpus,
+    // benchmarks against Rust Taffy, API audit and parity harness.
+    .name = .zafi_tools,
+    .version = "0.0.0",
+    .fingerprint = 0x9053db8234fdbe9f,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .zafi = .{ .path = ".." },
+    },
+    .paths = .{""},
+}

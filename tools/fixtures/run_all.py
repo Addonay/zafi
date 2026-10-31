@@ -26,7 +26,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent  # package root
 FIXTURE_ROOT = ROOT / ".references" / "taffy" / "tests" / "xml"
-EXE = ROOT / "zig-out" / "bin" / "fixtures"
+EXE = HERE.parent / "zig-out" / "bin" / "fixtures"
 
 
 def collect(groups: list[str] | None, filter_text: str | None) -> list[tuple[str, str]]:
