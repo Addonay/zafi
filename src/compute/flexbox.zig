@@ -138,6 +138,15 @@ pub const FlexItem = struct {
             !self.margin_is_auto.cross_start(dir) and
             !self.margin_is_auto.cross_end(dir);
     }
+
+    /// Returns true if the item is stretched in the cross axis: neither of its cross-axis margins
+    /// are `auto`, and its cross size is `stretch` or it is `align-self: stretch` with an `auto` cross size.
+    pub fn is_stretched(self: FlexItem, dir: flex.FlexDirection) bool {
+        const cross_size = self.size_style.cross(dir);
+        return !self.margin_is_auto.cross_start(dir) and
+            !self.margin_is_auto.cross_end(dir) and
+            (cross_size.is_stretch() or (is_stretch_alignment(self.align_self) and cross_size.is_auto()));
+    }
 };
 
 /// A line of [`FlexItem`] used for intermediate computation
@@ -348,6 +357,12 @@ tree_ref,
         parent_size,
         inputs.available_space);
 
+    // A container with no children has no flex items or lines, so its size follows directly
+    // from its own style and the available space.
+    if (try TreeApi.child_count(tree_ref, node_id) == 0) {
+        return compute_empty_container_layout(Tree, tree_ref, node_id, inputs, &constants);
+    }
+
     // 9. Flex Layout Algorithm
 
     // 9.1. Initial Setup
@@ -399,12 +414,7 @@ tree_ref,
     // If only the container's main size has been requested then we are done, as
     // nothing below changes it. This avoids measuring the cross size of every item.
     if (inputs.run_mode == .compute_size) {
-        const main_axis_is_requested_axis = switch (inputs.axis) {
-            .horizontal => constants.dir.is_row(),
-            .vertical => constants.dir.is_column(),
-            .both => false,
-        };
-        if (main_axis_is_requested_axis) {
+        if (constants.dir.main_axis_is_requested_axis(layout.requested_axis_into_absolute(inputs.axis))) {
             var size = geometry.F32Size{ .width = 0, .height = 0 };
             size.set_main(constants.dir, constants.container_size.main(constants.dir));
             return layout.LayoutOutput.from_outer_size(size);
@@ -420,7 +430,7 @@ tree_ref,
 
     // 7. Determine the hypothetical cross size of each item.
     for (flex_lines) |*line| {
-        try determine_hypothetical_cross_size(Tree, tree_ref, line, &constants, available_space);
+        try determine_hypothetical_cross_size(Tree, tree_ref, line, &constants, known_dimensions, available_space);
     }
 
     // Calculate child baselines. This function is internally smart and only computes child baselines
@@ -483,13 +493,6 @@ tree_ref,
     var candidates: layout.OofCandidates = .empty;
     try collect_oof_candidates(Tree, tree_ref, node_id, &constants, flex_lines, &candidates);
 
-    const absolute_position_inset = constants.border.add(Rect(f32){
-        .left = if (constants.layout_direction.is_rtl()) constants.scrollbar_gutter.x else 0.0,
-        .right = if (constants.layout_direction.is_rtl()) 0.0 else constants.scrollbar_gutter.x,
-        .top = 0.0,
-        .bottom = constants.scrollbar_gutter.y,
-    });
-
     if (has_hidden_children) {
         const len = try TreeApi.child_count(tree_ref, node_id);
         var hidden_order: usize = 0;
@@ -540,6 +543,22 @@ tree_ref,
         }
     } else null;
 
+    return flex_container_output(&constants, inflow_overflow_rect, candidates, first_vertical_baseline);
+}
+
+/// Build the layout output of a flex container from the results of its final layout pass.
+fn flex_container_output(
+    constants: *const AlgoConstants,
+    inflow_overflow_rect: Rect(f32),
+    candidates: layout.OofCandidates,
+    first_vertical_baseline: ?f32) layout.LayoutOutput {
+    const absolute_position_inset = constants.border.add(Rect(f32){
+        .left = if (constants.layout_direction.is_rtl()) constants.scrollbar_gutter.x else 0.0,
+        .right = if (constants.layout_direction.is_rtl()) 0.0 else constants.scrollbar_gutter.x,
+        .top = 0.0,
+        .bottom = constants.scrollbar_gutter.y,
+    });
+
     return .{
         .size = constants.container_size,
         .scrollable_overflow_rect = inflow_overflow_rect,
@@ -550,6 +569,46 @@ tree_ref,
             .offset = .{ .x = absolute_position_inset.left, .y = absolute_position_inset.top },
         },
     };
+}
+
+/// Compute the layout of a flex container with no children. This is the remainder of
+/// `compute_preliminary` with zero flex items and zero flex lines, without generating either.
+fn compute_empty_container_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId, inputs: layout.LayoutInput, constants: *AlgoConstants) !layout.LayoutOutput {
+    const known_dimensions = inputs.known_dimensions;
+    const available_space = determine_available_space(known_dimensions, inputs.available_space, constants);
+    const no_lines: []FlexLine = &.{};
+
+    if (constants.node_inner_size.main(constants.dir)) |inner_main_size| {
+        const outer_main_size = inner_main_size + constants.content_box_inset.main_axis_sum(constants.dir);
+        constants.inner_container_size.set_main(constants.dir, inner_main_size);
+        constants.container_size.set_main(constants.dir, outer_main_size);
+    } else {
+        // Sets constants.container_size and constants.outer_container_size
+        try determine_container_main_size(Tree, tree_ref, available_space, no_lines, constants);
+        constants.node_inner_size.set_main(constants.dir, constants.inner_container_size.main(constants.dir));
+        constants.node_outer_size.set_main(constants.dir, constants.container_size.main(constants.dir));
+    }
+
+    // If only the container's main size has been requested then we are done.
+    if (inputs.run_mode == .compute_size and
+        constants.dir.main_axis_is_requested_axis(layout.requested_axis_into_absolute(inputs.axis)))
+    {
+        var size = geometry.F32Size{ .width = 0, .height = 0 };
+        size.set_main(constants.dir, constants.container_size.main(constants.dir));
+        return layout.LayoutOutput.from_outer_size(size);
+    }
+
+    _ = determine_container_cross_size(no_lines, known_dimensions, constants);
+    if (inputs.run_mode == .compute_size) {
+        return layout.LayoutOutput.from_outer_size(constants.container_size);
+    }
+
+    // With no items there is no inflow overflow and no out-of-flow candidates to collect from them.
+    const inflow_overflow_rect = finalize_inflow_overflow(constants, geometry.RECT_F32_ZERO);
+    var candidates: layout.OofCandidates = .empty;
+    try collect_oof_candidates(Tree, tree_ref, node_id, constants, no_lines, &candidates);
+
+    return flex_container_output(constants, inflow_overflow_rect, candidates, null);
 }
 
 /// Emit out-of-flow (`position: absolute` / `position: fixed`) children as
@@ -1034,14 +1093,11 @@ inline fn determine_flex_base_size(comptime Tree: type, tree_ref: *Tree,
             }
         }
 
-        // Percentage padding and border resolve against the container's inline size (its
-        // width), whichever axis is the main axis.
-        const container_width = constants.node_inner_size.width;
-        const box_sizing_adjustment = if (child_style.box_sizing == .content_box) blk: {
-            const padding = resolve_length_rect(child_style.padding, container_width);
-            const border = resolve_length_rect(child_style.border, container_width);
-            break :blk padding.sum_axes().add(border.sum_axes()).main(dir);
-        } else 0.0;
+        // The item's padding and border were resolved once when the flex items were generated
+        const box_sizing_adjustment = if (child_style.box_sizing == .content_box)
+            child.padding.sum_axes().add(child.border.sum_axes()).main(dir)
+        else
+            0.0;
         // Percentage flex basis values resolve against the container's inner main size, but only
         // if that size is definite. A known main size which is derived from the container's own
         // content is treated as indefinite here.
@@ -1087,7 +1143,9 @@ inline fn determine_flex_base_size(comptime Tree: type, tree_ref: *Tree,
                 };
                 break :blk null;
             } else blk: {
-                if (resolved_flex_basis orelse main_size) |basis| {
+                // A main size is only used in place of an auto flex basis: an unresolved
+                // percentage flex basis behaves as `content`.
+                if (resolved_flex_basis orelse (if (flex_basis_style.is_auto()) main_size else null)) |basis| {
                     child.flex_basis_is_definite = true;
                     break :flex_basis basis;
                 }
@@ -1673,7 +1731,7 @@ fn container_max_content_size(comptime Tree: type, tree_ref: *Tree, available_sp
             };
 
             item.content_flex_fraction = blk: {
-                const diff = content_contribution - item.flex_basis;
+                const diff = content_contribution - item.margin.main_axis_sum(constants.dir) - item.flex_basis;
                 if (diff > 0.0) {
                     break :blk diff / math.f32_max(1.0, item.flex_grow);
                 } else if (diff < 0.0) {
@@ -1695,6 +1753,10 @@ fn container_max_content_size(comptime Tree: type, tree_ref: *Tree, available_sp
         // then clamp that result by the max main size floored by the min main size.
         //
         // The flex container's max-content size is the largest sum of the afore-calculated sizes of all items within a single line.
+        // A row container that wraps is at least as large as its largest item, which matters when
+        // negative margins make the sum of the item sizes smaller than the largest item.
+        const floor_by_largest_item = constants.is_wrap and constants.dir.is_row();
+        var largest_item_size: f32 = 0.0;
         var item_main_size_sum: f32 = 0.0;
         for (line.items) |*item| {
             const flex_fraction = item.content_flex_fraction;
@@ -1710,11 +1772,13 @@ fn container_max_content_size(comptime Tree: type, tree_ref: *Tree, available_sp
             const size = item.flex_basis + flex_contribution;
             item.outer_target_size.set_main(constants.dir, size);
             item.target_size.set_main(constants.dir, size);
-            item_main_size_sum += size;
+            const outer_size = size + item.margin.main_axis_sum(constants.dir);
+            if (floor_by_largest_item) largest_item_size = math.f32_max(largest_item_size, outer_size);
+            item_main_size_sum += outer_size;
         }
 
         const gap_sum = sum_axis_gaps(constants.gap.main(constants.dir), line.items.len);
-        main_size = math.f32_max(main_size, item_main_size_sum + gap_sum);
+        main_size = math.f32_max(main_size, math.f32_max(largest_item_size, item_main_size_sum + gap_sum));
     }
 
     return main_size + main_content_box_inset;
@@ -1795,41 +1859,34 @@ inline fn resolve_flexible_lengths(line: *FlexLine, constants: *const AlgoConsta
         // a. Check for flexible items. If all the flex items on the line are frozen,
         //    free space has been distributed; exit this loop.
 
-        var all_frozen = true;
-        for (line.items) |*child| {
-            if (!child.frozen) {
-                all_frozen = false;
-                break;
-            }
-        }
-        if (all_frozen) break;
-
-        // b. Calculate the remaining free space as for initial free space, above.
+        // a. and b. are computed in a single pass over the items: the outer sizes used
+        //    for the free space calculation and the flex factor sums of the unfrozen items.
+        //    If all the flex items on the line are frozen, free space has been
+        //    distributed; exit this loop.
+        //
+        //    Calculate the remaining free space as for initial free space, above.
         //    If the sum of the unfrozen flex items' flex factors is less than one,
         //    multiply the initial free space by this sum. If the magnitude of this
         //    value is less than the magnitude of the remaining free space, use this
         //    as the remaining free space.
 
-        const used_space: f32 = total_main_axis_gap + blk: {
-            var sum: f32 = 0.0;
-            for (line.items) |*child| {
-                if (child.frozen) {
-                    sum += child.outer_target_size.main(constants.dir);
-                } else {
-                    sum += child.flex_basis + child.margin.main_axis_sum(constants.dir);
-                }
-            }
-            break :blk sum;
-        };
-
+        var all_frozen = true;
+        var items_space: f32 = 0.0;
         var sum_flex_grow: f32 = 0.0;
         var sum_flex_shrink: f32 = 0.0;
         for (line.items) |*child| {
-            if (!child.frozen) {
+            if (child.frozen) {
+                items_space += child.outer_target_size.main(constants.dir);
+            } else {
+                all_frozen = false;
+                items_space += child.flex_basis + child.margin.main_axis_sum(constants.dir);
                 sum_flex_grow += child.flex_grow;
                 sum_flex_shrink += child.flex_shrink;
             }
         }
+        if (all_frozen) break;
+
+        const used_space: f32 = total_main_axis_gap + items_space;
 
         const free_space: f32 = if (growing and sum_flex_grow < 1.0)
             math.f32_maybe_min(
@@ -1940,9 +1997,18 @@ inline fn resolve_flexible_lengths(line: *FlexLine, constants: *const AlgoConsta
 inline fn determine_hypothetical_cross_size(comptime Tree: type, tree_ref: *Tree,
     line: *FlexLine,
     constants: *const AlgoConstants,
+    known_dimensions: Size(?f32),
     available_space: Size(AvailableSpace)) !void {
     const TreeApi = LayoutTree(Tree);
+    const line_cross_size_is_known = !constants.is_wrap and known_dimensions.cross(constants.dir) != null;
     for (line.items) |*child| {
+        // An item stretched to a line of known cross size takes its cross size from that line, which is
+        // determined later, so it is not measured here. Items that participate in baseline alignment are
+        // still measured, as their baseline depends on their cross size.
+        if (line_cross_size_is_known and child.is_stretched(constants.dir) and !child.participates_in_baseline_alignment(constants.dir)) {
+            continue;
+        }
+
         const padding_border_sum = child.padding.cross_axis_sum(constants.dir) + child.border.cross_axis_sum(constants.dir);
 
         // The available space passed to the child excludes the child's margins
@@ -2214,12 +2280,7 @@ inline fn determine_used_cross_size(comptime Tree: type, tree_ref: *Tree,
                     // For some reason this particular usage of max_width is an exception to the rule that max_width's transfer
                     // using the aspect_ratio (if set). Both Chrome and Firefox agree on this. And reading the spec, it seems like
                     // a reasonable interpretation. Although it seems to me that the spec *should* apply aspect_ratio here.
-                    // Percentage padding and border resolve against the container's inline
-                    // size (its width) on all four sides, not against its height for the
-                    // top/bottom sides.
-                    const padding = resolve_length_rect(child_style.padding, constants.node_inner_size.width);
-                    const border = resolve_length_rect(child_style.border, constants.node_inner_size.width);
-                    const pb_sum = padding.sum_axes().add(border.sum_axes());
+                    const pb_sum = child.padding.sum_axes().add(child.border.sum_axes());
                     const box_sizing_adjustment = if (child_style.box_sizing == .content_box) pb_sum else geometry.SIZE_F32_ZERO;
 
                     const max_size_ignoring_aspect_ratio = size_maybe_add(
@@ -2543,23 +2604,23 @@ fn calculate_flex_item(comptime Tree: type, tree_ref: *Tree,
         item.margin.cross_start(direction) +
         cross_relative_inset;
 
+    // Scroll containers' baselines are determined from their content as if scrolled to the initial
+    // position, but are additionally clamped to their border box.
+    // See https://github.com/w3c/csswg-drafts/issues/7660
+    const inner_baseline = blk: {
+        const baseline = layout_output.baselines.first orelse size.height;
+        if (item.overflow.y.is_scroll_container()) {
+            break :blk @max(@min(baseline, size.height), 0.0);
+        }
+        break :blk baseline;
+    };
+
     if (direction.is_row()) {
         const baseline_offset_cross =
             total_offset_cross + item.offset_cross + effective_line_offset_cross + item.margin.cross_start(direction);
-        // Scroll containers' baselines are determined from their content as if scrolled to the initial
-        // position, but are additionally clamped to their border box.
-        // See https://github.com/w3c/csswg-drafts/issues/7660
-        const inner_baseline = blk: {
-            const baseline = layout_output.baselines.first orelse size.height;
-            if (item.overflow.y.is_scroll_container()) {
-                break :blk @max(@min(baseline, size.height), 0.0);
-            }
-            break :blk baseline;
-        };
         item.baseline = baseline_offset_cross + inner_baseline;
     } else {
         const baseline_offset_main = total_offset_main.* + item.offset_main + item.margin.main_start(direction);
-        const inner_baseline = layout_output.baselines.first orelse size.height;
         item.baseline = baseline_offset_main + inner_baseline;
     }
 
@@ -2709,18 +2770,24 @@ tree_ref,
         }
     }
 
+    return finalize_inflow_overflow(constants, overflow_rect);
+}
+
+/// Extend the inflow overflow rect of a flex container by its own padding and border when it is a
+/// scroll container.
+fn finalize_inflow_overflow(constants: *const AlgoConstants, overflow_rect: Rect(f32)) Rect(f32) {
+    var rect = overflow_rect;
     // A scroll container's own padding at the end of the content is part of its scrollable
     // overflow region, so it is included in the overflow rect. Boxes that are not scroll
     // containers do not extend their overflow region by their own padding.
     if (constants.is_scroll_container) {
-        overflow_rect.right += if (constants.layout_direction.is_rtl())
+        rect.right += if (constants.layout_direction.is_rtl())
             constants.content_box_inset.left - constants.border.left - constants.scrollbar_gutter.x
         else
             constants.content_box_inset.right - constants.border.right - constants.scrollbar_gutter.x;
-        overflow_rect.bottom += constants.content_box_inset.bottom - constants.border.bottom - constants.scrollbar_gutter.y;
+        rect.bottom += constants.content_box_inset.bottom - constants.border.bottom - constants.scrollbar_gutter.y;
     }
-
-    return overflow_rect;
+    return rect;
 }
 
 /// Resolve the sizing keywords (`min-content`, `max-content`, `fit-content`, `fit-content(...)`,

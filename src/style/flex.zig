@@ -24,6 +24,15 @@ pub const FlexDirection = enum {
     pub fn is_reverse(self: FlexDirection) bool {
         return self == .row_reverse or self == .column_reverse;
     }
+    /// Is the main axis the (single) axis that a size was requested for? `requested` is the
+    /// requested axis, or `null` when both axes were requested.
+    pub fn main_axis_is_requested_axis(self: FlexDirection, requested: ?geometry.AbsoluteAxis) bool {
+        const axis = requested orelse return false;
+        return switch (axis) {
+            .horizontal => self.is_row(),
+            .vertical => self.is_column(),
+        };
+    }
     pub fn main_axis(self: FlexDirection) geometry.AbsoluteAxis {
         return if (self.is_row()) .horizontal else .vertical;
     }
