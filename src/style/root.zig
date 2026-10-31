@@ -279,6 +279,9 @@ pub const CoreStyle = struct {
     pub fn is_compressible_replaced(self: CoreStyle) bool {
         return self.value.is_compressible_replaced();
     }
+    pub fn is_replaced(self: CoreStyle) bool {
+        return self.value.is_replaced();
+    }
     pub fn box_sizing(self: CoreStyle) BoxSizing {
         return self.value.box_sizing_value();
     }
@@ -483,7 +486,12 @@ pub const Style = struct {
     dummy: void = {},
     display: Display = .flex,
     item_is_table: bool = false,
+    /// A replaced element (image, video, canvas, ...).
     item_is_replaced: bool = false,
+    /// A compressible non-replaced element with an intrinsic size (form controls:
+    /// `input`, `select`, `textarea`, ...). Resolves `auto` width to its intrinsic
+    /// size like a replaced element, but still stretches between abspos insets.
+    item_is_compressible_replaced: bool = false,
     box_sizing: BoxSizing = .border_box,
     direction: Direction = .ltr,
     overflow: geometry.Point(Overflow) = .{ .x = .visible, .y = .visible },
@@ -587,7 +595,13 @@ pub const Style = struct {
         return self.justify_self;
     }
 
+    /// A replaced element or form control (https://drafts.csswg.org/css-sizing-3/#compressible).
     pub fn is_compressible_replaced(self: Style) bool {
+        return self.item_is_replaced or self.item_is_compressible_replaced;
+    }
+    /// A replaced element proper: unlike form controls, an `auto`-sized replaced
+    /// element is not stretched between its insets under `normal` alignment.
+    pub fn is_replaced(self: Style) bool {
         return self.item_is_replaced;
     }
 
@@ -709,7 +723,7 @@ pub fn is_containing_block(value: Style) ContainingBlockClaims {
     return value.is_containing_block();
 }
 pub fn is_compressible_replaced(value: Style) bool {
-    return value.item_is_replaced;
+    return value.is_compressible_replaced();
 }
 pub fn box_sizing(value: Style) BoxSizing {
     return value.box_sizing;

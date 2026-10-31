@@ -242,6 +242,14 @@ fn parseAvailableSpace(raw: ?[]const u8) !zafi.AvailableSpace {
     return zafi.AvailableSpace.from_str(value);
 }
 
+/// `align-self`/`justify-self`: `auto` (or absent) is null, i.e. use the
+/// container's `*-items` value.
+fn parseSelfAlignment(node: *const xml.Element, name: []const u8) !?zafi.AlignSelf {
+    const raw = node.attribute(name) orelse return null;
+    if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, raw, " "), "auto")) return null;
+    return try parseValue(zafi.AlignSelf, raw);
+}
+
 fn parseAttr(comptime T: type, node: *const xml.Element, name: []const u8) !?T {
     const raw = node.attribute(name) orelse return null;
     return try parseValue(T, raw);
@@ -328,12 +336,12 @@ fn buildStyle(node: *const xml.Element, default_position: zafi.Position) !Style 
     };
 
     style.aspect_ratio = try parseAttr(f32, node, "aspect-ratio");
-    style.align_items = try parseAttr(zafi.AlignItems, node, "align-items");
-    style.align_self = try parseAttr(zafi.AlignSelf, node, "align-self");
-    style.justify_items = try parseAttr(zafi.JustifyItems, node, "justify-items");
-    style.justify_self = try parseAttr(zafi.JustifySelf, node, "justify-self");
-    style.align_content = try parseAttr(zafi.AlignContent, node, "align-content");
-    style.justify_content = try parseAttr(zafi.JustifyContent, node, "justify-content");
+    style.align_items = try attrOr(zafi.AlignItems, node, "align-items", .NORMAL);
+    style.align_self = try parseSelfAlignment(node, "align-self");
+    style.justify_items = try attrOr(zafi.JustifyItems, node, "justify-items", .NORMAL);
+    style.justify_self = try parseSelfAlignment(node, "justify-self");
+    style.align_content = try attrOr(zafi.AlignContent, node, "align-content", .NORMAL);
+    style.justify_content = try attrOr(zafi.JustifyContent, node, "justify-content", .NORMAL);
 
     style.text_align = try attrOr(zafi.style.block.TextAlign, node, "text-align", .auto);
     style.flex_direction = try attrOr(zafi.style.flex.FlexDirection, node, "flex-direction", .row);

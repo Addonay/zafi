@@ -243,7 +243,7 @@ const BlockItem = struct {
     /// Items that are replaced elements resolve an auto width to their intrinsic size
     /// rather than being stretch-sized
     /// <https://www.w3.org/TR/CSS22/visudet.html#block-replaced-width>
-    is_replaced: bool,
+    is_compressible_replaced: bool,
 
     /// Whether the child is a non-independent block or inline node
     is_in_same_bfc: bool,
@@ -558,6 +558,7 @@ tree_ref,
         resolved_content_box_inset,
         resolved_border,
         text_align,
+        justify_items,
         direction,
         own_margins_collapse_with_children,
         is_scroll_container,
@@ -792,7 +793,7 @@ fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
 
         const is_block = child_style.is_block();
         const is_table = child_style.is_table();
-        const is_replaced = child_style.is_compressible_replaced();
+        const is_compressible_replaced = child_style.is_compressible_replaced();
         const is_scroll_container = overflow.x.is_scroll_container() or overflow.y.is_scroll_container();
         const contain = child_style.contain;
 
@@ -808,7 +809,7 @@ fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
             .node_id = child_node_id,
             .order = order,
             .is_table = is_table,
-            .is_replaced = is_replaced,
+            .is_compressible_replaced = is_compressible_replaced,
             .is_in_same_bfc = is_in_same_bfc,
             .is_leaf = child_count_value == 0,
             .float = float_value,
@@ -915,6 +916,7 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
     resolved_content_box_inset: geometry.Rect(f32),
     resolved_border: geometry.Rect(f32),
     text_align: style.block.TextAlign,
+    justify_items: style.alignment.AlignItems,
     direction: style.Direction,
     own_margins_collapse_with_children: geometry.Line(bool),
     is_scroll_container: bool,
@@ -1132,17 +1134,36 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             }
         }
 
-        // Tables and replaced elements are not stretch-sized: they resolve their own size
-        const known_dimensions = if (item.is_table or item.is_replaced)
+        // `justify-self` on an in-flow block-level box (css-align-3 §6.1.1). `auto`
+        // takes the container's `justify-items`; `normal` lays the box out by the
+        // default block rules. `stretch` does too: those rules already stretch an
+        // auto-width box, so it only differs from `normal` for tables and replaced
+        // boxes, which would otherwise resolve their own width.
+        const justify_self = alignment.resolve_self_relative(item.justify_self orelse justify_items, item.direction, direction, true);
+        const is_stretch = justify_self.keyword == .stretch;
+        const non_stretch_justify_self: ?style.alignment.AlignItems = switch (justify_self.keyword) {
+            .normal, .stretch => null,
+            else => justify_self,
+        };
+
+        // Unless stretched, tables and compressible replaced elements resolve their own width
+        // <https://www.w3.org/TR/CSS22/visudet.html#block-replaced-width>
+        const known_dimensions = if ((item.is_table or item.is_compressible_replaced) and !is_stretch)
             SIZE_NONE
         else blk: {
+            // The automatic width of a block-level box whose `justify-self` is neither
+            // `normal` nor `stretch` is `fit-content` rather than stretch
+            const width_style = if (non_stretch_justify_self != null and item.size_style.width.is_auto())
+                style.dimension.Dimension.fit_content
+            else
+                item.size_style.width;
             // Items with a sizing keyword width resolve their width either directly or by
             // measuring the item under the corresponding available_space space constraint. `auto`
             // (the common case) and an already-known width resolve without consulting the
             // sizing keywords.
             var keyword_width: ?f32 = null;
-            if (item.size.width == null and !item.size_style.width.is_auto()) {
-                if (sizing_keyword.resolve_sizing_keyword(item.size_style.width, stretch_width, container_inner_width)) |resolution| {
+            if (item.size.width == null and !width_style.is_auto()) {
+                if (sizing_keyword.resolve_sizing_keyword(width_style, stretch_width, container_inner_width)) |resolution| {
                     keyword_width = switch (resolution) {
                         .exact => |width| width,
                         .measure => |item_available_width| try TreeApi.measure_child_size(tree_ref, 
@@ -1346,9 +1367,26 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             };
         };
 
-        // Apply alignment
+        // Apply alignment. `justify-self` aligns the margin box within its alignment
+        // container and takes precedence over legacy `text-align`, but auto margins
+        // (which have already absorbed the free space) take precedence over it.
+        const has_auto_x_margin = item_margin.left == null or item_margin.right == null;
         const item_outer_width = item_layout.size.width + resolved_margin.horizontal_axis_sum();
-        if (item_outer_width < container_inner_width) {
+        if (non_stretch_justify_self != null and !has_auto_x_margin) {
+            const js = non_stretch_justify_self.?;
+            // The alignment container is the containing block, except that a
+            // BFC-establishing box next to a float aligns within the space the float
+            // leaves (that slot is already inset by the item's margins).
+            const container_start = if (item_avoids_floats) float_avoiding_position.x - resolved_margin.left else resolved_content_box_inset.left;
+            const justify_free_space = if (item_avoids_floats) float_avoiding_width - item_layout.size.width else container_inner_width - item_outer_width;
+            const keyword: style.alignment.AlignItemsKeyword = if (js.safety == .safe and justify_free_space < 0) .start else js.keyword;
+            const offset: f32 = switch (keyword) {
+                .center => justify_free_space / 2.0,
+                .end, .flex_end, .self_end => if (!direction.is_rtl()) justify_free_space else 0,
+                else => if (direction.is_rtl()) justify_free_space else 0,
+            };
+            location.x = container_start + resolved_margin.left + inset_offset.x + offset;
+        } else if (non_stretch_justify_self == null and item_outer_width < container_inner_width) {
             const align_free_space = container_inner_width - item_outer_width;
             switch (text_align) {
                 .auto => {},
@@ -1376,6 +1414,14 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             first_baseline = if (child_baseline) |baseline| location.y + baseline else null;
         }
 
+        // Used auto margins include float-avoidance offsets, unlike the alignment
+        // margins above.
+        var used_margin = resolved_margin;
+        if (item_avoids_floats) {
+            if (item_margin.left == null) used_margin.left += float_avoiding_position.x - resolved_content_box_inset.left;
+            if (item_margin.right == null) used_margin.right += container_outer_width - resolved_content_box_inset.right - float_avoiding_position.x - float_avoiding_width;
+        }
+
         // Defer `set_unrounded_layout` to the post-loop pass in `compute_inner` so that
         // `align-content` can shift `location.y` before the layout is committed to the tree.
         item.final_layout = if (store_layouts) layout.Layout{
@@ -1386,7 +1432,7 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             .location = location,
             .padding = item.padding,
             .border = item.border,
-            .margin = resolved_margin,
+            .margin = used_margin,
         } else null;
 
         {

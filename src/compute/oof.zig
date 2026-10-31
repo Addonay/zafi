@@ -437,7 +437,7 @@ pub fn layout_oof_box(comptime Tree: type, tree_ref: *Tree,
     const max_size = math.optional_size_maybe_add(resolveAutoSize(child_style.max_size, area_size).maybe_apply_aspect_ratio(aspect_ratio), to_optional_size(box_sizing_adjustment));
     var known_dimensions = math.optional_size_maybe_clamp(style_size, min_size, max_size);
 
-    const is_replaced = child_style.is_compressible_replaced();
+    const is_replaced = child_style.is_replaced();
     const is_table = child_style.is_table();
     const item_direction = child_style.direction;
     const justify_self = alignment_common.resolve_self_relative(child_style.justify_self orelse alignment.AlignSelf.NORMAL, item_direction, direction, true);
