@@ -93,6 +93,9 @@ pub const NodeData = struct {
     /// carry the generation they were created with; a mismatch means the id is
     /// stale.
     generation: u40 = 0,
+    /// Stamp used by child-list validation to detect duplicates in O(n) without
+    /// allocating (compared against `Tree.visit_epoch`; never wraps).
+    visit_mark: u64 = 0,
     style: style.Style,
     unrounded_layout: layout.Layout = .{},
     final_layout: layout.Layout = .{},
@@ -236,6 +239,7 @@ pub const NodeStore = struct {
         node_data.hoisted_children = .empty;
         node_data.detailed_layout_info = .none;
         node_data.detailed_info_deinit = null;
+        node_data.visit_mark = 0;
         self.live_count += 1;
         return node.fromParts(index, node_data.generation) orelse error.NodeIdExhausted;
     }
@@ -280,6 +284,8 @@ pub const Tree = struct {
     /// allocations. Kept separate from `scratch` so a layout pass cannot
     /// invalidate a snapshot a mutation is still reading.
     mutation_arena: std.heap.ArenaAllocator,
+    /// Epoch for `NodeData.visit_mark` (child-list duplicate detection).
+    visit_epoch: u64 = 0,
     /// True while a layout pass is active. The scratch arena is reset only
     /// when a pass starts outside every other pass, so re-entrant child
     /// computes (the algorithms call back through `compute_child_layout`)
@@ -416,21 +422,23 @@ pub const Tree = struct {
 
     /// Validate a requested child list without touching the graph.
     fn validateChildList(self: *Tree, parent_id: NodeId, child_list: []const NodeId) ![]const NodeId {
-        _ = self.get_node(parent_id) orelse return error.InvalidParentNode;
+        const parent_node = self.get_node(parent_id) orelse return error.InvalidParentNode;
         if (child_list.len == 0) return child_list;
 
-        const allocator = self.mutationArenaAllocator();
-        // Duplicate detection uses a hash set so the check stays O(n) for large
-        // child lists; the arena makes it allocation-free after warm-up.
-        var seen = std.AutoHashMapUnmanaged(NodeId, void){};
-        defer seen.deinit(allocator);
-        try seen.ensureTotalCapacity(allocator, @intCast(child_list.len));
-
+        // A root parent's only ancestor is itself, so no child (other than the
+        // parent itself) can close a cycle: skip the ancestor walks entirely.
+        const parent_is_root = parent_node.parent == null;
+        // Duplicates are found by stamping each child with a fresh epoch: O(n),
+        // no allocation (replaces a per-call hash set).
+        self.visit_epoch += 1;
+        const epoch = self.visit_epoch;
         for (child_list) |child_id| {
-            _ = self.get_node(child_id) orelse return error.InvalidChildNode;
+            const child = self.get_node_mut(child_id) orelse return error.InvalidChildNode;
             if (child_id == parent_id) return error.Cycle;
-            if (try seen.fetchPut(allocator, child_id, {})) |_| return error.DuplicateChild;
-            if (self.isAncestor(child_id, parent_id)) return error.Cycle;
+            if (child.visit_mark == epoch) return error.DuplicateChild;
+            child.visit_mark = epoch;
+            // A childless node cannot be an ancestor of anything but itself.
+            if (!parent_is_root and child.children.items.len != 0 and self.isAncestor(child_id, parent_id)) return error.Cycle;
         }
         return child_list;
     }
@@ -1200,4 +1208,32 @@ test "taffy set_children validates before mutating" {
     try testing.expectEqual(@as(usize, 1), try tree.child_count(a));
     try testing.expectEqual(@as(usize, 0), try tree.child_count(b));
     try testing.expectEqual(a, (try tree.parent(x)).?);
+}
+
+test "child-list validation rejects duplicates and cycles without mutating" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    const b = try t.new_leaf(.{});
+    const c = try t.new_leaf(.{});
+
+    // Duplicates in one list, for a root parent and a non-root parent.
+    const root = try t.new_leaf(.{});
+    try testing.expectError(error.DuplicateChild, t.set_children(root, &.{ a, b, a }));
+    try testing.expectEqual(@as(usize, 0), (try t.children(root)).len);
+    try t.set_children(root, &.{ a, b });
+    try testing.expectError(error.DuplicateChild, t.set_children(a, &.{ c, c }));
+
+    // A child may not be its own parent or an ancestor of its new parent.
+    try testing.expectError(error.Cycle, t.add_child(a, a));
+    try t.add_child(a, c); // root -> a -> c
+    try testing.expectError(error.Cycle, t.add_child(c, root));
+    try testing.expectError(error.Cycle, t.add_child(c, a));
+    try testing.expectError(error.Cycle, t.set_children(c, &.{ b, root }));
+    try testing.expectEqual(@as(usize, 2), (try t.children(root)).len);
+
+    // Repeated validations reuse the stamps correctly.
+    for (0..3) |_| try t.set_children(root, &.{ b, a });
+    try testing.expectEqual(b, (try t.children(root))[0]);
 }
