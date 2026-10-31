@@ -411,7 +411,10 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
         (if (overflow.y.is_scroll_container()) @max(@min(b, height.?), 0) else b)
     else
         null;
-    return .{ .contribution = contribution, .y = vertical_result.offset, .height = height.?, .baseline = item_baseline };
+    // The y position recorded for the container's baseline excludes the relative
+    // offset, which does not move the container's baseline (Taffy 8bb96a2).
+    const y_without_relative_offset = vertical_result.offset - relative_offset(position, inset_vertical, .ltr);
+    return .{ .contribution = contribution, .y = y_without_relative_offset, .height = height.?, .baseline = item_baseline };
 }
 
 fn is_stretch(value: AlignItems) bool {
@@ -491,16 +494,18 @@ pub fn align_item_within_area(
         break :blk alignment_based_offset;
     } else alignment_based_offset;
 
-    var start = grid_area.start + offset_within_area;
-    if (position == .relative) {
-        const relative_inset: ?f32 = if (direction.is_rtl())
-            (if (inset.end) |pos| -pos else inset.start)
-        else
-            (inset.start orelse if (inset.end) |pos| -pos else null);
-        start += relative_inset orelse 0;
-    }
-
+    const start = grid_area.start + offset_within_area + relative_offset(position, inset, direction);
     return .{ .offset = start, .margin = resolved_margin };
+}
+
+/// The offset `position: relative` applies in one axis.
+fn relative_offset(position: style.Position, inset: geometry.Line(?f32), direction: style.Direction) f32 {
+    if (position != .relative) return 0;
+    const relative_inset: ?f32 = if (direction.is_rtl())
+        (if (inset.end) |pos| -pos else inset.start)
+    else
+        (inset.start orelse if (inset.end) |pos| -pos else null);
+    return relative_inset orelse 0;
 }
 
 fn resolve_length_rect_or_zero(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
