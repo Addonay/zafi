@@ -768,13 +768,17 @@ pub const Tree = struct {
         return output;
     }
 
-    pub fn cache_store(self: *Tree, id: NodeId, input: *const layout.LayoutInput, output: layout.LayoutOutput) void {
+    /// Fails with `OutOfMemory` (failing the layout) when the final layout's
+    /// out-of-flow candidates cannot be copied: silently leaving the node
+    /// uncached would let its ancestors cache, breaking "an empty cache implies
+    /// empty ancestor caches" and so later invalidation.
+    pub fn cache_store(self: *Tree, id: NodeId, input: *const layout.LayoutInput, output: layout.LayoutOutput) error{OutOfMemory}!void {
         const node_data = self.get_node_mut(id) orelse return;
         if (input.run_mode == .perform_layout) {
-            // Keep the final layout's candidates alongside it, or not cache it at all.
-            const owned = self.allocator.dupe(layout.OofCandidate, output.oof_candidates.items) catch {
+            // Keep the final layout's candidates alongside it, or fail the layout.
+            const owned = self.allocator.dupe(layout.OofCandidate, output.oof_candidates.items) catch |err| {
                 _ = node_data.cache.clear();
-                return;
+                return err;
             };
             self.allocator.free(node_data.cached_oof_candidates);
             node_data.cached_oof_candidates = owned;

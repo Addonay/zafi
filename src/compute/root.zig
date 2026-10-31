@@ -594,3 +594,51 @@ test "cached child layouts still surface their out-of-flow candidates" {
     try testing.expectEqual(@as(f32, 50), (try t.layout_of(root)).size.height);
     try testing.expectEqual(@as(f32, 40), (try t.layout_of(b)).location.y);
 }
+
+test "allocation failures never leave a stale layout behind (cache invalidation invariant)" {
+    const testing = std.testing;
+    var fail_index: usize = 0;
+    var completed = false;
+    while (fail_index < 200 and !completed) : (fail_index += 1) {
+        var failing = FailOnce{ .backing = testing.allocator, .fail_at = fail_index };
+        var t = tree.Tree.init(failing.allocator());
+        defer t.deinit();
+        // relative root -> static block A (height 10) -> absolute descendant
+        const abs = t.new_leaf(.{ .position = .absolute, .size = .{ .width = style.dimension.Dimension.length(5), .height = style.dimension.Dimension.length(5) } }) catch continue;
+        const a = t.new_with_children(.{ .display = .block, .size = .{ .width = style.dimension.Dimension.auto, .height = style.dimension.Dimension.length(10) } }, &.{abs}) catch continue;
+        const root = t.new_with_children(.{ .display = .block, .position = .relative }, &.{a}) catch continue;
+        t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .max_content }) catch continue;
+        t.set_style(a, .{ .display = .block, .size = .{ .width = style.dimension.Dimension.auto, .height = style.dimension.Dimension.length(50) } }) catch continue;
+        t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .max_content }) catch continue;
+        // Whatever failed earlier, a layout that reports success must be correct.
+        try testing.expectEqual(@as(f32, 50), (try t.layout_of(root)).size.height);
+        if (!failing.failed) completed = true;
+    }
+    try testing.expect(completed);
+}
+
+/// Fails exactly one allocation (the `fail_at`-th), so code paths that swallow
+/// an allocation failure keep running and expose any inconsistent state.
+const FailOnce = struct {
+    backing: std.mem.Allocator,
+    fail_at: usize,
+    count: usize = 0,
+    failed: bool = false,
+
+    fn allocator(self: *FailOnce) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const self: *FailOnce = @ptrCast(@alignCast(ctx));
+        defer self.count += 1;
+        if (self.count == self.fail_at) {
+            self.failed = true;
+            return null;
+        }
+        return self.backing.rawAlloc(len, alignment, ret);
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const self: *FailOnce = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, ret);
+    }
+};

@@ -80,7 +80,7 @@ pub const ScratchStack = struct {
         const c = self.chunks.items[index];
         const base = @intFromPtr(c.ptr);
         const start = alignment.forward(base + offset) - base;
-        if (start + len > c.len) return null;
+        if (start > c.len or len > c.len - start) return null;
         self.chunk = index;
         self.offset = start + len;
         return c.ptr + start;
@@ -102,7 +102,8 @@ pub const ScratchStack = struct {
         const at = if (self.chunk < self.chunks.items.len) self.chunk + 1 else self.chunks.items.len;
         var freed: usize = 0;
         for (self.chunks.items[at..]) |c| freed += c.len;
-        const size = @max(min_chunk_size, freed, len + alignment.toByteUnits());
+        const request = std.math.add(usize, len, alignment.toByteUnits()) catch return null;
+        const size = @max(min_chunk_size, freed, request);
         const new_chunk = self.backing.alloc(u8, size) catch return null;
         for (self.chunks.items[at..]) |c| self.backing.free(c);
         self.chunks.shrinkRetainingCapacity(at);
@@ -125,7 +126,7 @@ pub const ScratchStack = struct {
         if (!self.isTop(memory)) return new_len <= memory.len;
         const c = self.chunks.items[self.chunk];
         const start = @intFromPtr(memory.ptr) - @intFromPtr(c.ptr);
-        if (start + new_len > c.len) return false;
+        if (new_len > c.len - start) return false;
         self.offset = start + new_len;
         return true;
     }
@@ -167,4 +168,12 @@ test "scratch stack bumps, pops LIFO frees and releases to marks" {
     try testing.expectEqual(@as(u32, 7), x[0]);
     stack.reset();
     try testing.expectEqual(@as(usize, 0), stack.mark().offset);
+}
+
+test "scratch stack reports huge requests as out of memory instead of overflowing" {
+    var stack = ScratchStack.init(std.testing.allocator);
+    defer stack.deinit();
+    try std.testing.expectError(error.OutOfMemory, stack.allocator().alloc(u8, std.math.maxInt(usize)));
+    _ = try stack.allocator().alloc(u8, 16);
+    try std.testing.expectError(error.OutOfMemory, stack.allocator().alloc(u8, std.math.maxInt(usize) - 8));
 }
