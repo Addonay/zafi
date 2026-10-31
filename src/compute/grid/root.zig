@@ -185,7 +185,9 @@ pub const DetailedGridTracksInfo = struct {
             .{ .start = start_position, .end = @max(start_position, end_position) };
     }
 
-    pub fn write_track_list(self: DetailedGridTracksInfo, writer: anytype) !void {
+    /// Serialize as a `grid-template-*` track list. Sizes are divided by `zoom`
+    /// (the CSS zoom factor, 1 for none) as browsers report them (Taffy 679d054).
+    pub fn write_track_list(self: DetailedGridTracksInfo, writer: anytype, zoom: f32) !void {
         if (self.positions.len == 0) return writer.writeAll("none");
         for (self.positions, 0..) |position, index| {
             const names = self.names_for_line(index);
@@ -198,7 +200,7 @@ pub const DetailedGridTracksInfo = struct {
                 try writer.writeAll("] ");
             }
             var number_buffer: [64]u8 = undefined;
-            const size_text = std.fmt.bufPrint(&number_buffer, "{d}px", .{position.end - position.start}) catch "0px";
+            const size_text = std.fmt.bufPrint(&number_buffer, "{d}px", .{(position.end - position.start) / zoom}) catch "0px";
             try writer.writeAll(size_text);
             if (index + 1 < self.positions.len) try writer.writeAll(" ");
         }
@@ -213,11 +215,13 @@ pub const DetailedGridTracksInfo = struct {
         }
     }
 
-    pub fn to_track_list_string(self: DetailedGridTracksInfo) []const u8 {
+    /// The track list as a string owned by the caller (free with `allocator`).
+    pub fn to_track_list_string(self: DetailedGridTracksInfo, allocator: std.mem.Allocator, zoom: f32) ![]u8 {
         var output = std.ArrayList(u8).empty;
-        var sink = ArrayListSink{ .list = &output, .allocator = std.heap.page_allocator };
-        self.write_track_list(&sink) catch @panic("Taffy detailed grid string allocation failed");
-        return output.toOwnedSlice(std.heap.page_allocator) catch @panic("Taffy detailed grid string allocation failed");
+        errdefer output.deinit(allocator);
+        var sink = ArrayListSink{ .list = &output, .allocator = allocator };
+        try self.write_track_list(&sink, zoom);
+        return output.toOwnedSlice(allocator);
     }
 };
 
@@ -247,17 +251,19 @@ pub const DetailedGridInfo = struct {
     /// boxes after the layout pass's scratch arena is gone.
     line_names: ?named.OwnedLineIndex = null,
 
-    pub fn write_grid_template_rows(self: DetailedGridInfo, writer: anytype) !void {
-        return self.rows.write_track_list(writer);
+    pub fn write_grid_template_rows(self: DetailedGridInfo, writer: anytype, zoom: f32) !void {
+        return self.rows.write_track_list(writer, zoom);
     }
-    pub fn write_grid_template_columns(self: DetailedGridInfo, writer: anytype) !void {
-        return self.columns.write_track_list(writer);
+    pub fn write_grid_template_columns(self: DetailedGridInfo, writer: anytype, zoom: f32) !void {
+        return self.columns.write_track_list(writer, zoom);
     }
-    pub fn grid_template_rows(self: DetailedGridInfo) []const u8 {
-        return self.rows.to_track_list_string();
+    /// Caller owns the returned string.
+    pub fn grid_template_rows(self: DetailedGridInfo, allocator: std.mem.Allocator, zoom: f32) ![]u8 {
+        return self.rows.to_track_list_string(allocator, zoom);
     }
-    pub fn grid_template_columns(self: DetailedGridInfo) []const u8 {
-        return self.columns.to_track_list_string();
+    /// Caller owns the returned string.
+    pub fn grid_template_columns(self: DetailedGridInfo, allocator: std.mem.Allocator, zoom: f32) ![]u8 {
+        return self.columns.to_track_list_string(allocator, zoom);
     }
 
     pub fn item_grid_area(self: DetailedGridInfo, index: usize) ?struct { location: geometry.Point(f32), size: geometry.Size(f32) } {

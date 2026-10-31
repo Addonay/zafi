@@ -296,7 +296,8 @@ pub fn track_sizing_algorithm(comptime Tree: type, tree_ref: *Tree,
     const axis_available_space_for_expansion: AvailableSpace = if (inner_node_size.get(axis)) |available_space|
         .{ .definite = available_space }
     else switch (available_grid_space.get(axis)) {
-        .min_content => .min_content,
+        // Flexible rows still expand under a block-axis min-content constraint (Taffy e2fbe56)
+        .min_content => if (axis == .inline_axis) .min_content else .max_content,
         .max_content, .definite => .max_content,
     };
 

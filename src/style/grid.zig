@@ -827,8 +827,8 @@ pub const TrackSizingFunction = struct {
         return .{ .min = minimum, .max = maximum };
     }
     pub fn has_fixed_component(self: TrackSizingFunction) bool {
-        // Taffy: `self.min.0.is_length_or_percentage() || self.max.0.is_length_or_percentage()`
-        return self.min.value.is_length_or_percentage() or self.max.value.is_length_or_percentage();
+        // calc() track sizes count as fixed for auto-repeat (Taffy 63779e5)
+        return self.min.value.is_length_percentage_or_calc() or self.max.value.is_length_percentage_or_calc();
     }
 
     pub fn from_length(value: f32) TrackSizingFunction {
