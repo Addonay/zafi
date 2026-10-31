@@ -27,6 +27,7 @@ const coordinates = @import("types/coordinates.zig");
 const grid_track_counts = @import("types/grid_track_counts.zig");
 const named = @import("types/named.zig");
 const cell_occupancy = @import("types/cell_occupancy.zig");
+const scrollable_overflow = @import("../common/scrollable_overflow.zig");
 const LayoutTree = @import("../../tree/interfaces.zig").LayoutTree;
 
 pub const explicit_grid = @import("explicit_grid.zig");
@@ -56,6 +57,12 @@ pub const DetailedGridTracksInfo = struct {
     positive_implicit_tracks: u16 = 0,
     empty_axis_line: ?f32 = null,
     line_names: []const []const []const u8 = &.{},
+    /// Sorted, disjoint index ranges (into `positions`) of collapsed `auto-fit`
+    /// tracks, whose adjacent gutters overlap when resolving absolute grid-area
+    /// edges. Empty unless a track collapsed.
+    collapsed_tracks: []const TrackRange = &.{},
+
+    pub const TrackRange = struct { start: usize, end: usize };
 
     pub fn names_for_line(self: DetailedGridTracksInfo, index: usize) []const []const u8 {
         if (index < self.negative_implicit_tracks) return &.{};
@@ -67,20 +74,46 @@ pub const DetailedGridTracksInfo = struct {
         return self.names_for_line(index);
     }
 
-    pub fn positions_from_grid_track_layout(allocator: std.mem.Allocator, tracks: []const GridTrack) ![]geometry.Line(f32) {
-        var positions = std.ArrayList(geometry.Line(f32)).empty;
+    /// Each track's start/end relative to the border box, plus the index ranges
+    /// of runs of collapsed `auto-fit` tracks (which still appear, zero-sized).
+    pub fn positions_from_grid_track_layout(allocator: std.mem.Allocator, tracks: []const GridTrack) !struct { positions: []geometry.Line(f32), collapsed: []TrackRange } {
+        var positions = try std.ArrayList(geometry.Line(f32)).initCapacity(allocator, tracks.len / 2 + 1);
+        var collapsed = std.ArrayList(TrackRange).empty;
         for (tracks) |track| {
-            // Collapsed auto-fit tracks still appear in the resolved list as
-            // zero-sized tracks, so they are not filtered out here.
-            if (track.kind == .track) {
-                try positions.append(allocator, .{ .start = track.offset, .end = track.offset + track.base_size });
+            if (track.kind != .track) continue;
+            if (track.is_collapsed) {
+                const index = positions.items.len;
+                if (collapsed.items.len > 0 and collapsed.items[collapsed.items.len - 1].end == index) {
+                    collapsed.items[collapsed.items.len - 1].end += 1;
+                } else {
+                    try collapsed.append(allocator, .{ .start = index, .end = index + 1 });
+                }
             }
+            try positions.append(allocator, .{ .start = track.offset, .end = track.offset + track.base_size });
         }
-        return positions.toOwnedSlice(allocator);
+        return .{ .positions = try positions.toOwnedSlice(allocator), .collapsed = try collapsed.toOwnedSlice(allocator) };
+    }
+
+    /// A track edge, excluding gutters that overlap across a collapsed track run:
+    /// a start edge follows the shared gutter, an end edge precedes it.
+    fn absolute_track_edge(self: DetailedGridTracksInfo, index: usize, is_start: bool, is_reversed: bool) f32 {
+        var track = self.positions[index];
+        for (self.collapsed_tracks) |range| {
+            if (range.end <= index) continue;
+            if (range.start <= index) {
+                const adjacent: ?usize = if (is_start) range.end else if (range.start > 0) range.start - 1 else null;
+                if (adjacent) |adj| {
+                    if (adj < self.positions.len) track = self.positions[adj];
+                }
+            }
+            break;
+        }
+        return if (is_start != is_reversed) track.start else track.end;
     }
 
     pub fn from_grid_tracks_and_track_count(allocator: std.mem.Allocator, counts: TrackCounts, tracks: []const GridTrack, line_names: []const []const []const u8) !DetailedGridTracksInfo {
-        const positions = try positions_from_grid_track_layout(allocator, tracks);
+        const layout_positions = try positions_from_grid_track_layout(allocator, tracks);
+        const positions = layout_positions.positions;
         var sizes = try allocator.alloc(f32, positions.len);
         for (positions, 0..) |position, index| sizes[index] = position.end - position.start;
         return .{
@@ -91,6 +124,7 @@ pub const DetailedGridTracksInfo = struct {
             .positive_implicit_tracks = counts.positive_implicit,
             .empty_axis_line = if (positions.len == 0 and tracks.len > 0) tracks[0].offset else null,
             .line_names = line_names,
+            .collapsed_tracks = layout_positions.collapsed,
         };
     }
 
@@ -121,7 +155,7 @@ pub const DetailedGridTracksInfo = struct {
 
         const start_position = if (start_track) |line_index|
             (if (line_index < self.positions.len)
-                (if (is_reversed) self.positions[line_index].end else self.positions[line_index].start)
+                self.absolute_track_edge(line_index, true, is_reversed)
             else if (self.positions.len > 0)
                 (if (is_reversed) self.positions[self.positions.len - 1].start else self.positions[self.positions.len - 1].end)
             else
@@ -137,17 +171,24 @@ pub const DetailedGridTracksInfo = struct {
             }
             const prev = line_index - 1;
             break :blk if (prev < self.positions.len)
-                (if (is_reversed) self.positions[prev].start else self.positions[prev].end)
+                self.absolute_track_edge(prev, false, is_reversed)
             else if (self.positions.len > 0)
                 (if (is_reversed) self.positions[0].end else self.positions[0].start)
             else
                 (self.empty_axis_line orelse (if (is_reversed) padding_start else padding_end));
         } else if (is_reversed) padding_start else padding_end;
 
-        return .{ .start = @min(start_position, end_position), .end = @max(start_position, end_position) };
+        // An area whose lines all fall within a collapsed run is zero-sized and
+        // anchored at its logical start edge (as in Chrome).
+        return if (is_reversed)
+            .{ .start = @min(start_position, end_position), .end = start_position }
+        else
+            .{ .start = start_position, .end = @max(start_position, end_position) };
     }
 
-    pub fn write_track_list(self: DetailedGridTracksInfo, writer: anytype) !void {
+    /// Serialize as a `grid-template-*` track list. Sizes are divided by `zoom`
+    /// (the CSS zoom factor, 1 for none) as browsers report them (Taffy 679d054).
+    pub fn write_track_list(self: DetailedGridTracksInfo, writer: anytype, zoom: f32) !void {
         if (self.positions.len == 0) return writer.writeAll("none");
         for (self.positions, 0..) |position, index| {
             const names = self.names_for_line(index);
@@ -160,7 +201,7 @@ pub const DetailedGridTracksInfo = struct {
                 try writer.writeAll("] ");
             }
             var number_buffer: [64]u8 = undefined;
-            const size_text = std.fmt.bufPrint(&number_buffer, "{d}px", .{position.end - position.start}) catch "0px";
+            const size_text = std.fmt.bufPrint(&number_buffer, "{d}px", .{(position.end - position.start) / zoom}) catch "0px";
             try writer.writeAll(size_text);
             if (index + 1 < self.positions.len) try writer.writeAll(" ");
         }
@@ -175,11 +216,13 @@ pub const DetailedGridTracksInfo = struct {
         }
     }
 
-    pub fn to_track_list_string(self: DetailedGridTracksInfo) []const u8 {
+    /// The track list as a string owned by the caller (free with `allocator`).
+    pub fn to_track_list_string(self: DetailedGridTracksInfo, allocator: std.mem.Allocator, zoom: f32) ![]u8 {
         var output = std.ArrayList(u8).empty;
-        var sink = ArrayListSink{ .list = &output, .allocator = std.heap.page_allocator };
-        self.write_track_list(&sink) catch @panic("Taffy detailed grid string allocation failed");
-        return output.toOwnedSlice(std.heap.page_allocator) catch @panic("Taffy detailed grid string allocation failed");
+        errdefer output.deinit(allocator);
+        var sink = ArrayListSink{ .list = &output, .allocator = allocator };
+        try self.write_track_list(&sink, zoom);
+        return output.toOwnedSlice(allocator);
     }
 };
 
@@ -209,17 +252,19 @@ pub const DetailedGridInfo = struct {
     /// boxes after the layout pass's scratch arena is gone.
     line_names: ?named.OwnedLineIndex = null,
 
-    pub fn write_grid_template_rows(self: DetailedGridInfo, writer: anytype) !void {
-        return self.rows.write_track_list(writer);
+    pub fn write_grid_template_rows(self: DetailedGridInfo, writer: anytype, zoom: f32) !void {
+        return self.rows.write_track_list(writer, zoom);
     }
-    pub fn write_grid_template_columns(self: DetailedGridInfo, writer: anytype) !void {
-        return self.columns.write_track_list(writer);
+    pub fn write_grid_template_columns(self: DetailedGridInfo, writer: anytype, zoom: f32) !void {
+        return self.columns.write_track_list(writer, zoom);
     }
-    pub fn grid_template_rows(self: DetailedGridInfo) []const u8 {
-        return self.rows.to_track_list_string();
+    /// Caller owns the returned string.
+    pub fn grid_template_rows(self: DetailedGridInfo, allocator: std.mem.Allocator, zoom: f32) ![]u8 {
+        return self.rows.to_track_list_string(allocator, zoom);
     }
-    pub fn grid_template_columns(self: DetailedGridInfo) []const u8 {
-        return self.columns.to_track_list_string();
+    /// Caller owns the returned string.
+    pub fn grid_template_columns(self: DetailedGridInfo, allocator: std.mem.Allocator, zoom: f32) ![]u8 {
+        return self.columns.to_track_list_string(allocator, zoom);
     }
 
     pub fn item_grid_area(self: DetailedGridInfo, index: usize) ?struct { location: geometry.Point(f32), size: geometry.Size(f32) } {
@@ -325,8 +370,8 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         content_box_inset.left += scrollbar_gutter.x;
     }
 
-    const align_content = node_style.align_content orelse style.alignment.AlignContent.STRETCH;
-    const justify_content = node_style.justify_content orelse style.alignment.AlignContent.STRETCH;
+    const align_content = if (node_style.align_content.keyword == .normal) style.alignment.AlignContent.STRETCH else node_style.align_content;
+    const justify_content = if (node_style.justify_content.keyword == .normal) style.alignment.AlignContent.STRETCH else node_style.justify_content;
     const align_items = node_style.align_items;
     const justify_items = node_style.justify_items;
 
@@ -434,13 +479,16 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
     name_resolver.set_explicit_column_count(explicit_col_count);
     name_resolver.set_explicit_row_count(explicit_row_count);
 
-    // 3. Implicit Grid: Estimate Track Counts
-    var in_flow_child_ids = std.ArrayList(NodeId).empty;
-    defer in_flow_child_ids.deinit(scratch);
-    try in_flow_child_ids.ensureTotalCapacity(scratch, in_flow_children.items.len);
-    for (in_flow_children.items) |entry| try in_flow_child_ids.append(scratch, entry.node);
+    // Resolve each item's named lines once, before the grid size estimate, so
+    // implicit tracks implied by named lines are estimated too (Taffy 4f18a82).
+    const item_placements = try scratch.alloc(placement.AxisPlacement, in_flow_children.items.len);
+    defer scratch.free(item_placements);
+    for (in_flow_children.items, item_placements) |entry, *item_placement| {
+        item_placement.* = placement.resolve_child_placement(&name_resolver, TreeApi.get_style(tree_ref, entry.node), explicit_col_count, explicit_row_count);
+    }
 
-    const estimate = implicit_grid.compute_grid_size_estimate(Tree, explicit_col_count, explicit_row_count, in_flow_child_ids.items, tree_ref);
+    // 3. Implicit Grid: Estimate Track Counts
+    const estimate = implicit_grid.compute_grid_size_estimate(explicit_col_count, explicit_row_count, item_placements);
 
     // 4. Grid Item Placement
     var items = std.ArrayList(GridItem).empty;
@@ -456,9 +504,9 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         in_flow_children.items,
         tree_ref,
         node_style.grid_auto_flow,
-        align_items orelse style.alignment.AlignItems.STRETCH,
-        justify_items orelse style.alignment.AlignItems.STRETCH,
-        &name_resolver);
+        align_items,
+        justify_items,
+        item_placements);
 
     // Extract track counts from previous step (auto-placement can expand the number of tracks)
     const final_col_counts = cell_occupancy_matrix.track_counts(.horizontal);
@@ -490,6 +538,10 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         }
     }
 
+    // One lazily-allocated sort buffer for every track sizing run of this layout
+    var sort_scratch = track_sizing.SortScratch.init(scratch);
+    defer sort_scratch.deinit();
+
     // Run track sizing algorithm for Inline axis
     track_sizing.track_sizing_algorithm(
         Tree,
@@ -505,10 +557,23 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         rows.items,
         items.items,
         estimate_track_max_definite(Tree),
-        has_baseline_aligned_item);
+        has_baseline_aligned_item,
+            &sort_scratch);
     var initial_column_sum: f32 = 0;
     for (columns.items) |track| initial_column_sum += track.base_size;
     if (inner_node_size.width == null) inner_node_size.width = initial_column_sum;
+
+    // If only the container's width has been requested then row sizing can be
+    // skipped entirely (avoiding measuring every item's height): column sizing
+    // is not re-run when only computing the container's size.
+    if (inputs.run_mode == .compute_size and inputs.axis == .horizontal) {
+        const width = maybe_clamp_and_max(
+            initial_column_sum + content_box_inset.horizontal_axis_sum(),
+            min_size.width,
+            max_size.width,
+            padding_border_size.width);
+        return layout.LayoutOutput.from_outer_size(.{ .width = width, .height = 0 });
+    }
 
     for (items.items) |*item| item.grid_area_size_cache = null;
 
@@ -528,10 +593,9 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         items.items,
         estimate_track_base_size(Tree),
         false, // TODO: Support baseline alignment in the vertical axis
-    );
+            &sort_scratch);
     var initial_row_sum: f32 = 0;
     for (rows.items) |track| initial_row_sum += track.base_size;
-    if (inner_node_size.height == null) inner_node_size.height = initial_row_sum;
 
     // 6. Compute container size
     const resolved_style_size = geometry.Size(?f32){
@@ -560,27 +624,14 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         return layout.LayoutOutput.from_outer_size(container_border_box);
     }
 
-    // 7. Resolve percentage track base sizes
-    // In the case of an indefinitely sized container these resolve to zero during the
-    // "Initialise Tracks" step and therefore need to be re-resolved here.
-    if (!available_grid_space.width.is_definite()) {
-        for (columns.items) |*column| {
-            const minimum = column.min_track_sizing_function.resolved_percentage_size(container_content_box.width);
-            const maximum = column.max_track_sizing_function.resolved_percentage_size(container_content_box.width);
-            column.base_size = math.option_maybe_clamp(column.base_size, minimum, maximum) orelse column.base_size;
-        }
-    }
-    if (!available_grid_space.height.is_definite()) {
-        for (rows.items) |*row| {
-            const minimum = row.min_track_sizing_function.resolved_percentage_size(container_content_box.height);
-            const maximum = row.max_track_sizing_function.resolved_percentage_size(container_content_box.height);
-            row.base_size = math.option_maybe_clamp(row.base_size, minimum, maximum) orelse row.base_size;
-        }
-    }
+    // The container's size is now determined, so percentages resolve against its
+    // content box when re-running track sizing. This may be a no-op if the size was
+    // known upfront (it then already equals `inner_node_size`).
+    inner_node_size = .{ .width = container_content_box.width, .height = container_content_box.height };
 
     // Column sizing must be re-run (once) if:
-    //   - The grid container's width was initially indefinite and there are any columns
-    //     with percentage track sizing functions
+    //   - The grid container's width is indefinite and there are any columns with
+    //     percentage track sizing functions
     //   - Any grid item crossing an intrinsically sized track's min content contribution
     //     width has changed
     var rerun_column_sizing = false;
@@ -600,7 +651,7 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
             break;
         }
     }
-    const parent_width_indefinite = !inputs.available_space.width.is_definite();
+    const parent_width_indefinite = outer_node_size.width == null;
     rerun_column_sizing = parent_width_indefinite and has_percentage_column;
 
     if (!rerun_column_sizing) {
@@ -617,10 +668,8 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
             item.max_content_contribution_cache.width = null;
             item.minimum_contribution_cache.width = null;
 
-            if (has_changed) {
-                intrinsic_column_contribution_changed = true;
-                break;
-            }
+            // Every item must be visited (no early exit): this loop updates each item's caches.
+            if (has_changed) intrinsic_column_contribution_changed = true;
         }
         rerun_column_sizing = intrinsic_column_contribution_changed;
     } else {
@@ -633,13 +682,30 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         }
     }
 
+    // Row sizing must be re-run (once) if:
+    //   - The grid container's height is indefinite and there are any rows with
+    //     percentage track sizing functions
+    //   - Column sizing was re-run and any grid item crossing an intrinsically sized
+    //     track's min content contribution height has changed
+    const parent_height_indefinite = outer_node_size.height == null;
+    var rerun_row_sizing = parent_height_indefinite and has_percentage_row;
     var intrinsic_row_contribution_changed = false;
+
+    if (rerun_row_sizing) {
+        // Clear intrinsic height caches
+        for (items.items) |*item| {
+            item.grid_area_size_cache = null;
+            item.min_content_contribution_cache.height = null;
+            item.max_content_contribution_cache.height = null;
+            item.minimum_contribution_cache.height = null;
+        }
+    }
 
     if (rerun_column_sizing) {
         // Re-run track sizing algorithm for Inline axis
         track_sizing.track_sizing_algorithm(
             Tree,
-tree_ref,
+            tree_ref,
             .inline_axis,
             inner_min_size.get(.inline_axis),
             inner_max_size.get(.inline_axis),
@@ -651,19 +717,15 @@ tree_ref,
             rows.items,
             items.items,
             estimate_track_base_size(Tree),
-            has_baseline_aligned_item);
+            has_baseline_aligned_item,
+            &sort_scratch);
 
-        // Row sizing must be re-run (once) if:
-        //   - The grid container's height was initially indefinite and there are any
-        //     rows with percentage track sizing functions
-        //   - Any grid item crossing an intrinsically sized track's min content
-        //     contribution height has changed
-        const parent_height_indefinite = !inputs.available_space.height.is_definite();
-        var rerun_row_sizing = parent_height_indefinite and has_percentage_row;
-
+        // The column widths may have changed, so the items' intrinsic height
+        // contributions need recomputing (unless row sizing is re-run anyway, in
+        // which case the caches have already been cleared).
         if (!rerun_row_sizing) {
             for (items.items) |*item| {
-                if (!item.crosses_intrinsic_column) continue;
+                if (!item.crosses_intrinsic_row) continue;
                 const grid_area_size = item.grid_area_size(Tree, .block, rows.items, columns.items, inner_node_size, estimate_track_base_size(Tree), tree_ref);
                 const available_space = grid_area_size.with(.block, null);
                 const new_min_content_contribution = item.min_content_contribution(Tree, .block, tree_ref, grid_area_size, available_space);
@@ -675,41 +737,31 @@ tree_ref,
                 item.max_content_contribution_cache.height = null;
                 item.minimum_contribution_cache.height = null;
 
-                if (has_changed) {
-                    intrinsic_row_contribution_changed = true;
-                    break;
-                }
+                // Every item must be visited (no early exit): this loop updates each item's caches.
+                if (has_changed) intrinsic_row_contribution_changed = true;
             }
             rerun_row_sizing = intrinsic_row_contribution_changed;
-        } else {
-            for (items.items) |*item| {
-                // Clear intrinsic height caches
-                item.grid_area_size_cache = null;
-                item.min_content_contribution_cache.height = null;
-                item.max_content_contribution_cache.height = null;
-                item.minimum_contribution_cache.height = null;
-            }
         }
+    }
 
-        if (rerun_row_sizing) {
-            // Re-run track sizing algorithm for Block axis
-            track_sizing.track_sizing_algorithm(
-                Tree,
-tree_ref,
-                .block,
-                inner_min_size.get(.block),
-                inner_max_size.get(.block),
-                align_content,
-                justify_content,
-                available_grid_space,
-                inner_node_size,
-                rows.items,
-                columns.items,
-                items.items,
-                estimate_track_base_size(Tree),
-                false, // TODO: Support baseline alignment in the vertical axis
-            );
-        }
+    if (rerun_row_sizing) {
+        // Re-run track sizing algorithm for Block axis
+        track_sizing.track_sizing_algorithm(
+            Tree,
+            tree_ref,
+            .block,
+            inner_min_size.get(.block),
+            inner_max_size.get(.block),
+            align_content,
+            justify_content,
+            available_grid_space,
+            inner_node_size,
+            rows.items,
+            columns.items,
+            items.items,
+            estimate_track_base_size(Tree),
+            false, // TODO: Support baseline alignment in the vertical axis
+            &sort_scratch);
     }
 
     if ((intrinsic_column_contribution_changed and !has_percentage_column) or
@@ -771,8 +823,20 @@ tree_ref,
     // 9. Size, Align, and Position Grid Items
 
     var item_overflow_rect = geometry.Rect(f32){ .left = 0, .right = 0, .top = 0, .bottom = 0 };
+    const padding_box_inset = border.add(geometry.Rect(f32){
+        .left = if (direction.is_rtl()) scrollbar_gutter.x else 0.0,
+        .right = if (direction.is_rtl()) 0.0 else scrollbar_gutter.x,
+        .top = 0.0,
+        .bottom = scrollbar_gutter.y,
+    });
+    const overflow_container = scrollable_overflow.ScrollableOverflowContainer{
+        .parent_is_scroll_container = is_scroll_container,
+        .parent_size = .{ .width = container_border_box.width - padding_box_inset.horizontal_axis_sum(), .height = 0 },
+        .reversed = .{ .x = direction.is_rtl(), .y = false },
+        .padding = padding,
+    };
 
-    const container_alignment_styles = geometry.InBothAbsAxis(?style.alignment.AlignItems){
+    const container_alignment_styles = geometry.InBothAbsAxis(style.alignment.AlignItems){
         .horizontal = justify_items,
         .vertical = align_items,
     };
@@ -807,12 +871,12 @@ tree_ref,
             container_alignment_styles,
             item.baseline_shim,
             direction,
-            container_border_box.width,
-            border,
-            is_scroll_container,
+            padding_box_inset,
+            &overflow_container,
             &item.oof_candidates);
         item.y_position = result.y;
         item.height = result.height;
+        item.baseline = result.baseline;
         item_overflow_rect = item_overflow_rect.@"union"(result.contribution);
     }
 
@@ -894,18 +958,8 @@ tree_ref,
         // to the container's, so they must be resolved before the static position is
         // derived from them.
         const item_direction = child_style.direction;
-        const x_alignment = (if (child_style.justify_self) |value|
-            common.alignment.resolve_self_relative(value, item_direction, direction, true)
-        else if (container_alignment_styles.horizontal) |value|
-            common.alignment.resolve_self_relative(value, item_direction, direction, true)
-        else
-            style.alignment.AlignItems.START);
-        const y_alignment = (if (child_style.align_self) |value|
-            common.alignment.resolve_self_relative(value, item_direction, direction, false)
-        else if (container_alignment_styles.vertical) |value|
-            common.alignment.resolve_self_relative(value, item_direction, direction, false)
-        else
-            style.alignment.AlignItems.START);
+        const x_alignment = common.alignment.resolve_self_relative(child_style.justify_self orelse container_alignment_styles.horizontal, item_direction, direction, true);
+        const y_alignment = common.alignment.resolve_self_relative(child_style.align_self orelse container_alignment_styles.vertical, item_direction, direction, false);
 
         // The static-position rectangle: the grid area determined by the grid-placement
         // properties when this grid is the child's containing block, and otherwise the
@@ -960,14 +1014,9 @@ tree_ref,
     // If there are no in-flow items then return the container size and the overflow
     // (no baseline)
     if (items.items.len == 0) {
-        var overflow_rect = item_overflow_rect;
-        if (is_scroll_container) {
-            overflow_rect.right += if (direction.is_rtl()) padding.left else padding.right;
-            overflow_rect.bottom += padding.bottom;
-        }
         return layout.LayoutOutput{
             .size = container_border_box,
-            .scrollable_overflow_rect = overflow_rect,
+            .scrollable_overflow_rect = gridFinalizeOverflow(item_overflow_rect, container_border_box, border, scrollbar_gutter, padding, direction, is_scroll_container),
             .oof_candidates = oof_candidates,
             .oof_positioning_area = oof_positioning_area,
         };
@@ -998,11 +1047,7 @@ tree_ref,
     // A scroll container's own padding at the end of the content is part of its
     // scrollable overflow region. The out-of-flow contribution is merged in by the
     // out-of-flow positioning pass, which owns the out-of-flow boxes' geometry.
-    var scrollable_overflow_rect = item_overflow_rect;
-    if (is_scroll_container) {
-        scrollable_overflow_rect.right += if (direction.is_rtl()) padding.left else padding.right;
-        scrollable_overflow_rect.bottom += padding.bottom;
-    }
+    const scrollable_overflow_rect = gridFinalizeOverflow(item_overflow_rect, container_border_box, border, scrollbar_gutter, padding, direction, is_scroll_container);
 
     return layout.LayoutOutput{
         .size = container_border_box,
@@ -1380,4 +1425,25 @@ test "grid fr track subtracts container padding" {
     }, &[_]NodeId{child});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 20 } });
     try testing.expectEqual(@as(f32, 80), (try tree_ref.layout_of(child)).size.width);
+}
+
+/// A grid container's scrollable overflow: in RTL the overflow reaches the
+/// right-edge scroll origin, and a scroll container includes its own end
+/// padding (Taffy c256056).
+fn gridFinalizeOverflow(item_overflow_rect: geometry.Rect(f32), container_border_box: geometry.F32Size, border: geometry.Rect(f32), scrollbar_gutter: geometry.Point(f32), padding: geometry.Rect(f32), direction: style.Direction, is_scroll_container: bool) layout.ScrollableOverflow {
+    const client_width = @max(container_border_box.width - border.horizontal_axis_sum() - scrollbar_gutter.x, 0);
+    const rtl = direction.is_rtl();
+    const overflow_rect = if (is_scroll_container)
+        item_overflow_rect.@"union"(.{
+            .left = if (rtl) @min(client_width - padding.left, 0) else 0,
+            .right = if (rtl) client_width else padding.right,
+            .top = 0,
+            .bottom = padding.bottom,
+        })
+    else
+        item_overflow_rect.@"union"(.{ .left = 0, .right = if (rtl) client_width else 0, .top = 0, .bottom = 0 });
+    return scrollable_overflow.finalize_scrollable_overflow(overflow_rect, .{
+        .width = container_border_box.width - border.horizontal_axis_sum() - scrollbar_gutter.x,
+        .height = container_border_box.height - border.vertical_axis_sum() - scrollbar_gutter.y,
+    }, .{ .x = rtl, .y = false }, is_scroll_container);
 }

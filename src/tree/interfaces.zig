@@ -29,6 +29,13 @@
 //!     pub fn cache_get(self: *MyTree, id: NodeId, input: *const LayoutInput) Error!?LayoutOutput { ... }
 //!     pub fn cache_store(self: *MyTree, id: NodeId, input: *const LayoutInput, out: LayoutOutput) Error!void { ... }
 //!
+//!     Caching contract: `out.oof_candidates` lives in pass-scoped scratch memory.
+//!     If `cache_store` caches a `perform_layout` result it must keep its own
+//!     copy of those candidates, and `cache_get` must return them again (as a
+//!     fresh scratch-allocated list) on a hit: they are how absolutely
+//!     positioned descendants reach a containing block further up the tree.
+//!     `Cache` stores sizes and metadata only; see `Tree.cache_store`.
+//!
 //!     pub fn set_unrounded_layout(self: *MyTree, id: NodeId, value: Layout) Error!void { ... }
 //!     pub fn unrounded_layout(self: *const MyTree, id: NodeId) Error!Layout { ... }
 //!     pub fn set_final_layout(self: *MyTree, id: NodeId, value: Layout) Error!void { ... }
@@ -160,6 +167,40 @@ pub fn LayoutTree(comptime Self: type) type {
         /// A host without a scratch allocator can return a long-lived arena and
         /// reset it in `begin_layout_pass`; a host that does not care about
         /// allocation churn can return its general allocator.
+        /// Optional: hosts with a stack-like scratch allocator can let the
+        /// caching wrapper reclaim a finished child layout's temporaries early.
+        pub const ScratchMark = if (@hasDecl(Self, "scratch_mark")) @typeInfo(@TypeOf(Self.scratch_mark)).@"fn".return_type.? else void;
+
+        /// Optional: whether `node_id`'s cached layout was computed while
+        /// sharing a float context with floats in it (or placed floats into
+        /// one). Such a result must not be served to a later shared-context
+        /// layout, because a hit cannot replay or see those floats. Hosts
+        /// without the hook are treated as always coupled, i.e. same-BFC block
+        /// children are then never served from the cache (correct, slower).
+        pub const cache_float_coupled = if (@hasDecl(Self, "cache_float_coupled")) cacheFloatCoupledImpl else cacheFloatCoupledDefault;
+        pub const set_cache_float_coupled = if (@hasDecl(Self, "set_cache_float_coupled")) setCacheFloatCoupledImpl else setCacheFloatCoupledNoop;
+        inline fn cacheFloatCoupledImpl(tree: *Self, node_id: NodeId) bool {
+            return tree.cache_float_coupled(node_id);
+        }
+        inline fn cacheFloatCoupledDefault(_: *Self, _: NodeId) bool {
+            return true;
+        }
+        inline fn setCacheFloatCoupledImpl(tree: *Self, node_id: NodeId, value: bool) void {
+            tree.set_cache_float_coupled(node_id, value);
+        }
+        inline fn setCacheFloatCoupledNoop(_: *Self, _: NodeId, _: bool) void {}
+
+        pub const scratch_mark = if (@hasDecl(Self, "scratch_mark")) scratchMarkImpl else scratchMarkNoop;
+        pub const scratch_release = if (@hasDecl(Self, "scratch_release")) scratchReleaseImpl else scratchReleaseNoop;
+        inline fn scratchMarkImpl(tree: *Self) ScratchMark {
+            return tree.scratch_mark();
+        }
+        inline fn scratchMarkNoop(_: *Self) void {}
+        inline fn scratchReleaseImpl(tree: *Self, mark: ScratchMark) void {
+            tree.scratch_release(mark);
+        }
+        inline fn scratchReleaseNoop(_: *Self, _: void) void {}
+
         pub inline fn scratch_allocator(tree: *Self) std.mem.Allocator {
             comptime require_method(Self, "scratch_allocator");
             if (comptime @hasDecl(Self, "scratch_allocator")) return tree.scratch_allocator();

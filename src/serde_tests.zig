@@ -34,14 +34,14 @@ test "compact length wrappers serialize to Taffy wire numbers" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    // Values captured from the Rust oracle.
+    // Values from tools/serde_oracle (audit/serde_format_rust.txt).
     try expectSerialized(allocator, LengthPercentage.length(3.5), "5375000576");
-    try expectSerialized(allocator, LengthPercentage.percent(0.25), "9638510592");
+    try expectSerialized(allocator, LengthPercentage.percent(0.25), "22523412480");
     try expectSerialized(allocator, LengthPercentageAuto.auto(), "12884901888");
     try expectSerialized(allocator, Dimension.from_length(1.0), "5360320512");
-    try expectSerialized(allocator, Dimension.fit_content_px(9.0), "99875815424");
+    try expectSerialized(allocator, Dimension.fit_content_px(9.0), "185775161344");
     try expectSerialized(allocator, grid.MinTrackSizingFunction.length(10.0), "5387583488");
-    try expectSerialized(allocator, grid.MaxTrackSizingFunction.fr(1.0), "18245222400");
+    try expectSerialized(allocator, grid.MaxTrackSizingFunction.fr(1.0), "82669731840");
 }
 
 fn expectSerialized(allocator: std.mem.Allocator, value: anytype, expected: []const u8) !void {
@@ -161,9 +161,9 @@ test "style round-trips through JSON with Taffy enum spellings" {
     try testing.expectEqual(@as(f32, 7.0), parsed.margin.right.value.value());
     try testing.expectEqual(@as(f32, 3.5), parsed.padding.left.value.value());
     try testing.expectEqual(@as(?f32, 2.0), parsed.aspect_ratio);
-    try testing.expectEqual(alignment.AlignItemsKeyword.center, parsed.align_items.?.keyword);
-    try testing.expectEqual(alignment.AlignmentSafety.safe, parsed.align_items.?.safety);
-    try testing.expectEqual(alignment.AlignItemsKeyword.self_start, parsed.justify_items.?.keyword);
+    try testing.expectEqual(alignment.AlignItemsKeyword.center, parsed.align_items.keyword);
+    try testing.expectEqual(alignment.AlignmentSafety.safe, parsed.align_items.safety);
+    try testing.expectEqual(alignment.AlignItemsKeyword.self_start, parsed.justify_items.keyword);
     try testing.expectEqual(block.TextAlign.legacy_center, parsed.text_align);
     try testing.expectEqual(flex.FlexDirection.column_reverse, parsed.flex_direction);
     try testing.expectEqual(flex.FlexWrap.wrap_reverse, parsed.flex_wrap);
@@ -178,12 +178,10 @@ test "style deserializes Taffy's Rust-generated wire format" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    // Captured from the tracked Rust crate (`serde_json::to_string`) with the
-    // same style as the round-trip test below, at the revision named in
-    // tools/pin.env. `position` serializes as `Static` there because that is
-    // upstream's default; regenerate if the pin moves.
+    // STYLE_DIMS from tools/serde_oracle at the revision named in tools/pin.env
+    // (dev branch); regenerate when the pin moves.
     const rust_json =
-        \\{"dummy":null,"display":"Flex","item_is_table":false,"item_is_replaced":false,"box_sizing":"BorderBox","direction":"Ltr","overflow":{"x":"Visible","y":"Visible"},"scrollbar_width":0.0,"contain":0,"float":"None","clear":"None","position":"Static","inset":{"left":12884901888,"right":12884901888,"top":12884901888,"bottom":12884901888},"size":{"width":9646899200,"height":5390204928},"min_size":{"width":12884901888,"height":12884901888},"max_size":{"width":12884901888,"height":12884901888},"aspect_ratio":2.0,"margin":{"left":12884901888,"right":5383389184,"top":4294967296,"bottom":4294967296},"padding":{"left":5375000576,"right":4294967296,"top":4294967296,"bottom":4294967296},"border":{"left":4294967296,"right":4294967296,"top":4294967296,"bottom":4294967296},"align_items":null,"align_self":null,"justify_items":null,"justify_self":null,"align_content":null,"justify_content":null,"gap":{"width":9638510592,"height":4294967296},"text_align":"Auto","flex_direction":"Row","flex_wrap":"NoWrap","flex_line_count":1,"flex_basis":12884901888,"flex_grow":0.0,"flex_shrink":1.0,"grid_template_rows":[],"grid_template_columns":[],"grid_auto_rows":[],"grid_auto_columns":[],"grid_auto_flow":"Row","grid_template_areas":null,"grid_template_column_names":[],"grid_template_row_names":[],"grid_row":{"start":"Auto","end":"Auto"},"grid_column":{"start":"Auto","end":"Auto"}}
+        \\{"dummy":null,"display":"Flex","item_is_table":false,"item_is_replaced":false,"item_is_compressible_replaced":false,"box_sizing":"BorderBox","direction":"Ltr","overflow":{"x":"Visible","y":"Visible"},"scrollbar_width":0.0,"contain":0,"float":"None","clear":"None","position":"Static","inset":{"left":12884901888,"right":12884901888,"top":12884901888,"bottom":12884901888},"size":{"width":22531801088,"height":5390204928},"min_size":{"width":12884901888,"height":12884901888},"max_size":{"width":12884901888,"height":12884901888},"aspect_ratio":2.0,"margin":{"left":12884901888,"right":5383389184,"top":4294967296,"bottom":4294967296},"padding":{"left":5375000576,"right":4294967296,"top":4294967296,"bottom":4294967296},"border":{"left":4294967296,"right":4294967296,"top":4294967296,"bottom":4294967296},"align_items":"Normal","align_self":null,"justify_items":"Normal","justify_self":null,"align_content":"Normal","justify_content":"Normal","gap":{"width":22523412480,"height":4294967296},"text_align":"Auto","flex_direction":"Row","flex_wrap":"NoWrap","flex_line_count":1,"flex_basis":12884901888,"flex_grow":0.0,"flex_shrink":1.0,"grid_template_rows":[],"grid_template_columns":[],"grid_auto_rows":[],"grid_auto_columns":[],"grid_auto_flow":"Row","grid_template_areas":null,"grid_template_column_names":[],"grid_template_row_names":[],"grid_row":{"start":"Auto","end":"Auto"},"grid_column":{"start":"Auto","end":"Auto"}}
     ;
     const parsed = try json.fromSlice(Style, allocator, rust_json);
     try testing.expectEqual(Display.flex, parsed.display);
@@ -241,6 +239,15 @@ test "alignment wire names and rejection match Taffy" {
     const parsed = try json.fromSlice(alignment.AlignItems, allocator, "\"SafeSelfEnd\"");
     try testing.expectEqual(alignment.AlignItemsKeyword.self_end, parsed.keyword);
     try testing.expectEqual(alignment.AlignmentSafety.safe, parsed.safety);
+
+    // `normal` and the explicit `unsafe` modifier (Taffy e1fd88d, a4dff69).
+    try testing.expectEqualStrings("\"Normal\"", try toJson(allocator, alignment.AlignItems.NORMAL));
+    try testing.expectEqualStrings("\"Normal\"", try toJson(allocator, alignment.AlignContent.NORMAL));
+    try testing.expectEqualStrings("\"UnsafeEnd\"", try toJson(allocator, alignment.AlignItems.END.with_safety(.unsafe)));
+    const unsafe_end = try json.fromSlice(alignment.AlignItems, allocator, "\"UnsafeEnd\"");
+    try testing.expectEqual(alignment.AlignmentSafety.unsafe, unsafe_end.safety);
+    const bare_end = try json.fromSlice(alignment.AlignItems, allocator, "\"End\"");
+    try testing.expectEqual(alignment.AlignmentSafety.default, bare_end.safety);
 
     // Rust accepts only exact PascalCase names.
     try testing.expectError(error.WrongType, json.fromSlice(alignment.AlignItems, allocator, "\"center\""));
@@ -340,4 +347,57 @@ test "contain serializes as its u8 bit set" {
 
     const parsed = try json.fromSlice(Contain, allocator, "3");
     try testing.expect(parsed.layout and parsed.paint);
+}
+
+test "default and enum styles serialize byte-identically to Taffy" {
+    const testing = std.testing;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // STYLE_DEFAULT / STYLE_ENUMS from tools/serde_oracle. The only formatting
+    // difference is that serde.zig writes integral floats as `0` where Rust
+    // writes `0.0` (the same JSON number), so Rust's `.0` is normalized away.
+    try expectSameJson(allocator,
+        \\{"dummy":null,"display":"Flex","item_is_table":false,"item_is_replaced":false,"item_is_compressible_replaced":false,"box_sizing":"BorderBox","direction":"Ltr","overflow":{"x":"Visible","y":"Visible"},"scrollbar_width":0.0,"contain":0,"float":"None","clear":"None","position":"Static","inset":{"left":12884901888,"right":12884901888,"top":12884901888,"bottom":12884901888},"size":{"width":12884901888,"height":12884901888},"min_size":{"width":12884901888,"height":12884901888},"max_size":{"width":12884901888,"height":12884901888},"aspect_ratio":null,"margin":{"left":4294967296,"right":4294967296,"top":4294967296,"bottom":4294967296},"padding":{"left":4294967296,"right":4294967296,"top":4294967296,"bottom":4294967296},"border":{"left":4294967296,"right":4294967296,"top":4294967296,"bottom":4294967296},"align_items":"Normal","align_self":null,"justify_items":"Normal","justify_self":null,"align_content":"Normal","justify_content":"Normal","gap":{"width":4294967296,"height":4294967296},"text_align":"Auto","flex_direction":"Row","flex_wrap":"NoWrap","flex_line_count":1,"flex_basis":12884901888,"flex_grow":0.0,"flex_shrink":1.0,"grid_template_rows":[],"grid_template_columns":[],"grid_auto_rows":[],"grid_auto_columns":[],"grid_auto_flow":"Row","grid_template_areas":null,"grid_template_column_names":[],"grid_template_row_names":[],"grid_row":{"start":"Auto","end":"Auto"},"grid_column":{"start":"Auto","end":"Auto"}}
+    , try toJson(allocator, Style{}));
+
+    var enums = Style{};
+    enums.display = .grid;
+    enums.box_sizing = .content_box;
+    enums.direction = .rtl;
+    enums.overflow = .{ .x = .scroll, .y = .hidden };
+    enums.contain = Contain.LAYOUT.@"union"(Contain.PAINT);
+    enums.float = .left;
+    enums.clear = .both;
+    enums.position = .absolute;
+    enums.align_items = alignment.AlignItems.CENTER;
+    enums.align_self = alignment.AlignSelf.FLEX_END;
+    enums.justify_items = alignment.JustifyItems.SELF_START;
+    enums.justify_self = alignment.JustifySelf.SAFE_CENTER;
+    enums.align_content = alignment.AlignContent.SPACE_BETWEEN;
+    enums.justify_content = alignment.JustifyContent.SPACE_EVENLY;
+    enums.text_align = .legacy_center;
+    enums.flex_direction = .column_reverse;
+    enums.flex_wrap = .wrap_reverse;
+    enums.grid_auto_flow = .column_dense;
+    try expectSameJson(allocator,
+        \\{"dummy":null,"display":"Grid","item_is_table":false,"item_is_replaced":false,"item_is_compressible_replaced":false,"box_sizing":"ContentBox","direction":"Rtl","overflow":{"x":"Scroll","y":"Hidden"},"scrollbar_width":0.0,"contain":3,"float":"Left","clear":"Both","position":"Absolute","inset":{"left":12884901888,"right":12884901888,"top":12884901888,"bottom":12884901888},"size":{"width":12884901888,"height":12884901888},"min_size":{"width":12884901888,"height":12884901888},"max_size":{"width":12884901888,"height":12884901888},"aspect_ratio":null,"margin":{"left":4294967296,"right":4294967296,"top":4294967296,"bottom":4294967296},"padding":{"left":4294967296,"right":4294967296,"top":4294967296,"bottom":4294967296},"border":{"left":4294967296,"right":4294967296,"top":4294967296,"bottom":4294967296},"align_items":"Center","align_self":"FlexEnd","justify_items":"SelfStart","justify_self":"SafeCenter","align_content":"SpaceBetween","justify_content":"SpaceEvenly","gap":{"width":4294967296,"height":4294967296},"text_align":"LegacyCenter","flex_direction":"ColumnReverse","flex_wrap":"WrapReverse","flex_line_count":1,"flex_basis":12884901888,"flex_grow":0.0,"flex_shrink":1.0,"grid_template_rows":[],"grid_template_columns":[],"grid_auto_rows":[],"grid_auto_columns":[],"grid_auto_flow":"ColumnDense","grid_template_areas":null,"grid_template_column_names":[],"grid_template_row_names":[],"grid_row":{"start":"Auto","end":"Auto"},"grid_column":{"start":"Auto","end":"Auto"}}
+    , try toJson(allocator, enums));
+}
+
+/// Compare JSON text after dropping Rust's `.0` suffix on integral numbers.
+fn expectSameJson(allocator: std.mem.Allocator, rust: []const u8, zig: []const u8) !void {
+    var normalized = std.ArrayList(u8).empty;
+    var i: usize = 0;
+    while (i < rust.len) : (i += 1) {
+        if (rust[i] == '.' and i + 1 < rust.len and rust[i + 1] == '0' and i > 0 and std.ascii.isDigit(rust[i - 1]) and
+            (i + 2 == rust.len or rust[i + 2] == ',' or rust[i + 2] == '}' or rust[i + 2] == ']'))
+        {
+            i += 1;
+            continue;
+        }
+        try normalized.append(allocator, rust[i]);
+    }
+    try std.testing.expectEqualStrings(normalized.items, zig);
 }

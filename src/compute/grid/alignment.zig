@@ -118,6 +118,9 @@ pub const AlignAndPositionResult = struct {
     contribution: geometry.Rect(f32),
     y: f32,
     height: f32,
+    /// The item's first baseline from its final layout (clamped to the border box
+    /// for scroll containers), for the container's own baseline (Taffy e77a7a8).
+    baseline: ?f32,
 };
 
 /// Align and size a grid item into its final position
@@ -125,12 +128,12 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
     node: NodeId,
     order: u32,
     grid_area: geometry.Rect(f32),
-    container_alignment_styles: geometry.InBothAbsAxis(?AlignItems),
+    container_alignment_styles: geometry.InBothAbsAxis(AlignItems),
     baseline_shim: f32,
     direction: Direction,
-    container_border_box_width: f32,
-    container_border: geometry.Rect(f32),
-    container_is_scroll_container: bool,
+    /// The container's border plus scrollbar gutters (its padding-box frame)
+    padding_box_inset: geometry.Rect(f32),
+    overflow_container: *const scrollable_overflow.ScrollableOverflowContainer,
     bubbled_candidates: *tree_layout.OofCandidates) !AlignAndPositionResult {
     const TreeApi = LayoutTree(Tree);
     const grid_area_size = geometry.F32Size{ .width = grid_area.right - grid_area.left, .height = grid_area.bottom - grid_area.top };
@@ -143,12 +146,9 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
     const aspect_ratio = item_style.aspect_ratio;
     // Resolve writing-mode-relative self-start/self-end keywords against the item's own direction.
     const item_direction = item_style.direction;
-    const justify_self = if (item_style.justify_self) |item_alignment| resolve_self_relative(item_alignment, item_direction, direction, true) else null;
-    const align_self = if (item_style.align_self) |item_alignment| resolve_self_relative(item_alignment, item_direction, direction, false) else null;
-    const resolved_container_alignment = geometry.InBothAbsAxis(?AlignItems){
-        .horizontal = if (container_alignment_styles.horizontal) |item_alignment| resolve_self_relative(item_alignment, item_direction, direction, true) else null,
-        .vertical = if (container_alignment_styles.vertical) |item_alignment| resolve_self_relative(item_alignment, item_direction, direction, false) else null,
-    };
+    // `auto` (null) self-alignment takes the container's `*-items` value.
+    const justify_self = resolve_self_relative(item_style.justify_self orelse container_alignment_styles.horizontal, item_direction, direction, true);
+    const align_self = resolve_self_relative(item_style.align_self orelse container_alignment_styles.vertical, item_direction, direction, false);
 
     const position = item_style.position;
     const inset_horizontal = geometry.Line(?f32){
@@ -183,10 +183,18 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
     // Resolve default alignment styles if they are set on neither the parent or the node itself.
     // Note: if the child has a preferred aspect ratio but neither width or height are set, then
     // the width is stretched and the height is calculated from the width.
-    const horizontal_alignment = justify_self orelse resolved_container_alignment.horizontal orelse
-        (if (inherent_size.width != null or size_style.width.is_sizing_keyword()) AlignSelf.START else AlignSelf.STRETCH);
-    const vertical_alignment = align_self orelse resolved_container_alignment.vertical orelse
-        (if (inherent_size.height != null or size_style.height.is_sizing_keyword() or aspect_ratio != null) AlignSelf.START else AlignSelf.STRETCH);
+    // `normal` behaves as `start` for items with a definite (or keyword) size and
+    // for replaced elements (which are not stretched), `stretch` otherwise.
+    // https://www.w3.org/TR/css-grid-1/#grid-item-sizing
+    const is_replaced = item_style.is_replaced();
+    const horizontal_alignment = if (justify_self.keyword == .normal)
+        (if (inherent_size.width != null or size_style.width.is_sizing_keyword() or is_replaced) AlignSelf.START else AlignSelf.STRETCH)
+    else
+        justify_self;
+    const vertical_alignment = if (align_self.keyword == .normal)
+        (if (inherent_size.height != null or size_style.height.is_sizing_keyword() or aspect_ratio != null or is_replaced) AlignSelf.START else AlignSelf.STRETCH)
+    else
+        align_self;
     const alignment_styles = geometry.InBothAbsAxis(AlignSelf){ .horizontal = horizontal_alignment, .vertical = vertical_alignment };
 
     // Note: This is not a bug. It is part of the CSS spec that both horizontal and vertical
@@ -339,7 +347,7 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
 
     const horizontal_result = align_item_within_area(
         .{ .start = grid_area.left, .end = grid_area.right },
-        justify_self orelse alignment_styles.horizontal,
+        alignment_styles.horizontal,
         width.?,
         position,
         inset_horizontal,
@@ -348,7 +356,7 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
         direction);
     const vertical_result = align_item_within_area(
         .{ .start = grid_area.top, .end = grid_area.bottom },
-        align_self orelse alignment_styles.vertical,
+        alignment_styles.vertical,
         height.?,
         position,
         inset_vertical,
@@ -388,25 +396,31 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
         .margin = resolved_margin,
     });
 
-    // Contributions to the container's scrollable overflow rect are measured from the
-    // container's padding-box origin (mirrored for RTL).
-    const contribution_location = if (direction.is_rtl())
-        geometry.F32Point{ .x = container_border_box_width - (horizontal_result.offset + width.?) - container_border.right, .y = vertical_result.offset - container_border.top }
-    else
-        geometry.F32Point{ .x = horizontal_result.offset - container_border.left, .y = vertical_result.offset - container_border.top };
+    // Contributions to the container's scrollable overflow use physical
+    // coordinates in its padding-box frame (Taffy c256056).
+    const contribution_location = geometry.F32Point{ .x = horizontal_result.offset - padding_box_inset.left, .y = vertical_result.offset - padding_box_inset.top };
     const contribution = scrollable_overflow.compute_scrollable_overflow_contribution(
         contribution_location,
         .{ .width = width.?, .height = height.? },
-        layout_output.scrollable_overflow_rect,
+        layout_output.scrollable_overflow_rect.rect(),
+        border,
         overflow,
         contain,
-        container_is_scroll_container);
+        overflow_container,
+        resolved_margin);
 
-    return .{ .contribution = contribution, .y = vertical_result.offset, .height = height.? };
+    const item_baseline: ?f32 = if (layout_output.baselines.first) |b|
+        (if (overflow.y.is_scroll_container()) @max(@min(b, height.?), 0) else b)
+    else
+        null;
+    // The y position recorded for the container's baseline excludes the relative
+    // offset, which does not move the container's baseline (Taffy 8bb96a2).
+    const y_without_relative_offset = vertical_result.offset - relative_offset(position, inset_vertical, .ltr);
+    return .{ .contribution = contribution, .y = y_without_relative_offset, .height = height.?, .baseline = item_baseline };
 }
 
 fn is_stretch(value: AlignItems) bool {
-    return value.keyword == .stretch and value.safety == .unsafe;
+    return value.keyword == .stretch and value.safety == .default;
 }
 
 /// Taffy `AlignItems::resolve_self_relative`. Local copy because the shared
@@ -467,7 +481,7 @@ pub fn align_item_within_area(
         else
             grid_area_size - resolved_size - resolved_margin.end,
         .center => (grid_area_size - resolved_size + resolved_margin.start - resolved_margin.end) / 2,
-        .self_start, .self_end => unreachable,
+        .normal, .self_start, .self_end => unreachable,
     };
 
     const offset_within_area: f32 = if (position.is_out_of_flow()) blk: {
@@ -482,16 +496,18 @@ pub fn align_item_within_area(
         break :blk alignment_based_offset;
     } else alignment_based_offset;
 
-    var start = grid_area.start + offset_within_area;
-    if (position == .relative) {
-        const relative_inset: ?f32 = if (direction.is_rtl())
-            (if (inset.end) |pos| -pos else inset.start)
-        else
-            (inset.start orelse if (inset.end) |pos| -pos else null);
-        start += relative_inset orelse 0;
-    }
-
+    const start = grid_area.start + offset_within_area + relative_offset(position, inset, direction);
     return .{ .offset = start, .margin = resolved_margin };
+}
+
+/// The offset `position: relative` applies in one axis.
+fn relative_offset(position: style.Position, inset: geometry.Line(?f32), direction: style.Direction) f32 {
+    if (position != .relative) return 0;
+    const relative_inset: ?f32 = if (direction.is_rtl())
+        (if (inset.end) |pos| -pos else inset.start)
+    else
+        (inset.start orelse if (inset.end) |pos| -pos else null);
+    return relative_inset orelse 0;
 }
 
 fn resolve_length_rect_or_zero(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
@@ -544,4 +560,19 @@ fn map_optional_some(value: geometry.F32Size) geometry.Size(?f32) {
 
 fn map_optional_definite(value: geometry.F32Size) geometry.Size(AvailableSpace) {
     return .{ .width = .{ .definite = value.width }, .height = .{ .definite = value.height } };
+}
+
+test "normal alignment does not stretch replaced grid items" {
+    const testing = std.testing;
+    const zafi = @import("../../root.zig");
+    var t = zafi.Tree.init(testing.allocator);
+    defer t.deinit();
+    var context = zafi.testing.TestNodeContext.fixed(.{ .width = 20, .height = 10 });
+    const item = try t.new_leaf_with_context(.{ .item_is_replaced = true }, @ptrCast(&context));
+    const track = [_]zafi.GridTemplateComponent{.{ .single = zafi.TrackSizingFunction.from_length(100) }};
+    const root = try t.new_with_children(.{ .display = .grid, .grid_template_columns = &track, .grid_template_rows = &track }, &.{item});
+    try t.compute_layout_with_measure(root, .{ .width = .max_content, .height = .max_content }, zafi.testing.fixture_measure_function);
+    const l = try t.layout_of(item);
+    try testing.expectEqual(@as(f32, 20), l.size.width);
+    try testing.expectEqual(@as(f32, 10), l.size.height);
 }

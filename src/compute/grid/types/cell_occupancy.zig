@@ -35,6 +35,9 @@ const OccupiedInterval = struct {
 
 const TrackIntervals = struct {
     intervals: std.ArrayList(OccupiedInterval) = .empty,
+    /// The furthest end line of an auto-placed item starting in this
+    /// secondary-axis track (Taffy's sparse auto-placement cursor).
+    auto_placement_cursor: ?i16 = null,
 
     fn deinit(self: *TrackIntervals, allocator: std.mem.Allocator) void {
         self.intervals.deinit(allocator);
@@ -115,17 +118,9 @@ const TrackIntervals = struct {
         while (index > 0) {
             index -= 1;
             const interval = self.intervals.items[index];
+            // Intervals are sorted and disjoint: stop once they lie left of the range
+            if (interval.end <= range.start) return null;
             if (interval.overlaps(range)) return interval.end - 1;
-        }
-        return null;
-    }
-
-    fn last_of_state(self: *const TrackIntervals, state: CellOccupancyState) ?i16 {
-        var index = self.intervals.items.len;
-        while (index > 0) {
-            index -= 1;
-            const interval = self.intervals.items[index];
-            if (interval.state == state) return interval.end - 1;
         }
         return null;
     }
@@ -138,9 +133,6 @@ pub const CellOccupancyMatrix = struct {
     column_intervals: std.ArrayList(TrackIntervals),
     allocator: std.mem.Allocator,
 
-    pub fn with_track_counts(columns: grid_track_counts.TrackCounts, rows: grid_track_counts.TrackCounts) CellOccupancyMatrix {
-        return with_track_counts_using_allocator(std.heap.page_allocator, columns, rows);
-    }
 
     pub fn with_track_counts_using_allocator(allocator: std.mem.Allocator, columns: grid_track_counts.TrackCounts, rows: grid_track_counts.TrackCounts) CellOccupancyMatrix {
         var row_intervals = std.ArrayList(TrackIntervals).empty;
@@ -166,12 +158,6 @@ pub const CellOccupancyMatrix = struct {
     /// Compatibility constructor for the early first-pass callers. New code
     /// should pass TrackCounts so negative and positive implicit tracks remain
     /// visible to placement.
-    pub fn with_raw_track_counts(columns: usize, rows: usize) CellOccupancyMatrix {
-        return with_track_counts(
-            grid_track_counts.TrackCounts.from_raw(0, @intCast(columns), 0),
-            grid_track_counts.TrackCounts.from_raw(0, @intCast(rows), 0),
-        );
-    }
 
     fn track_lists(self: *const CellOccupancyMatrix, axis: geometry.AbsoluteAxis) []const TrackIntervals {
         return switch (axis) {
@@ -225,6 +211,10 @@ pub const CellOccupancyMatrix = struct {
         const row_span = if (primary_axis == .horizontal) secondary_span else primary_span;
         const col_span = if (primary_axis == .horizontal) primary_span else secondary_span;
         self.expand_to_fit_range(row_span, col_span);
+
+        if (value == .auto_placed and primary_span.start.value < primary_span.end.value and secondary_span.start.value < secondary_span.end.value) {
+            self.advance_auto_placement_cursor(primary_axis, secondary_span.start, primary_span.end);
+        }
 
         const row_range = self.rows.oz_line_range_to_track_range(row_span);
         const col_range = self.columns.oz_line_range_to_track_range(col_span);
@@ -283,12 +273,25 @@ pub const CellOccupancyMatrix = struct {
         };
     }
 
-    pub fn last_of_type(self: *const CellOccupancyMatrix, axis: geometry.AbsoluteAxis, start_at: coordinates.OriginZeroLine, state: CellOccupancyState) ?coordinates.OriginZeroLine {
+    /// The sparse placement cursor for items starting in the given secondary-axis track.
+    pub fn auto_placement_cursor(self: *const CellOccupancyMatrix, axis: geometry.AbsoluteAxis, start_at: coordinates.OriginZeroLine) ?coordinates.OriginZeroLine {
         const counts = self.track_counts(axis.other_axis());
         const index = counts.oz_line_to_next_track(start_at);
         const lists = self.track_lists(axis.other_axis());
         if (index < 0 or index >= lists.len) return null;
-        return if (lists[@intCast(index)].last_of_state(state)) |value| .{ .value = value } else null;
+        return if (lists[@intCast(index)].auto_placement_cursor) |value| .{ .value = value } else null;
+    }
+
+    /// Advance the sparse placement cursor to at least `primary_end`. The
+    /// secondary-axis track must already exist.
+    fn advance_auto_placement_cursor(self: *CellOccupancyMatrix, primary_axis: geometry.AbsoluteAxis, secondary_start: coordinates.OriginZeroLine, primary_end: coordinates.OriginZeroLine) void {
+        const index: usize = @intCast(self.track_counts(primary_axis.other_axis()).oz_line_to_next_track(secondary_start));
+        const tracks = switch (primary_axis) {
+            .horizontal => self.row_intervals.items,
+            .vertical => self.column_intervals.items,
+        };
+        const cursor = &tracks[index].auto_placement_cursor;
+        cursor.* = if (cursor.*) |current| @max(current, primary_end.value) else primary_end.value;
     }
 };
 
@@ -302,4 +305,43 @@ test "cell occupancy overwrites and jumps over occupied intervals" {
     try testing.expectEqual(@as(?i16, 1), matrix.line_area_collision_jump(.horizontal, line, .{ .start = .{ .value = 0 }, .end = .{ .value = 2 } }).?.value);
     matrix.mark_area_as(.horizontal, .{ .start = .{ .value = 0 }, .end = .{ .value = 1 } }, .{ .start = .{ .value = 0 }, .end = .{ .value = 2 } }, .definitely_placed);
     try testing.expect(matrix.row_is_occupied(0));
+}
+
+fn testLine(start: i16, end: i16) geometry.Line(coordinates.OriginZeroLine) {
+    return .{ .start = .{ .value = start }, .end = .{ .value = end } };
+}
+
+fn testCursor(matrix: *const CellOccupancyMatrix, axis: geometry.AbsoluteAxis, start: i16) ?i16 {
+    return if (matrix.auto_placement_cursor(axis, .{ .value = start })) |line| line.value else null;
+}
+
+test "auto-placed item only advances the cursor in its first secondary track (Taffy 16d3443)" {
+    const testing = std.testing;
+    for ([_]geometry.AbsoluteAxis{ .horizontal, .vertical }) |axis| {
+        var matrix = CellOccupancyMatrix.with_track_counts_using_allocator(testing.allocator, grid_track_counts.TrackCounts.from_raw(0, 4, 0), grid_track_counts.TrackCounts.from_raw(0, 4, 0));
+        defer matrix.deinit();
+        matrix.mark_area_as(axis, testLine(1, 3), testLine(1, 4), .auto_placed);
+        try testing.expectEqual(@as(?i16, 3), testCursor(&matrix, axis, 1));
+        try testing.expectEqual(@as(?i16, null), testCursor(&matrix, axis, 2));
+        try testing.expectEqual(@as(?i16, null), testCursor(&matrix, axis, 3));
+        try testing.expect(!matrix.line_area_is_unoccupied(axis, testLine(1, 3), testLine(2, 4)));
+    }
+}
+
+test "placement cursors survive interval merging and grid expansion (Taffy 16d3443)" {
+    const testing = std.testing;
+    for ([_]geometry.AbsoluteAxis{ .horizontal, .vertical }) |axis| {
+        var matrix = CellOccupancyMatrix.with_track_counts_using_allocator(testing.allocator, grid_track_counts.TrackCounts.from_raw(0, 4, 0), grid_track_counts.TrackCounts.from_raw(0, 4, 0));
+        defer matrix.deinit();
+        matrix.mark_area_as(axis, testLine(2, 4), testLine(1, 2), .auto_placed);
+        matrix.mark_area_as(axis, testLine(4, 8), testLine(0, 2), .auto_placed);
+        matrix.mark_area_as(axis, testLine(8, 10), testLine(1, 2), .definitely_placed);
+        matrix.mark_area_as(axis, testLine(-3, -1), testLine(-2, -1), .auto_placed);
+        matrix.mark_area_as(axis, testLine(12, 14), testLine(7, 8), .auto_placed);
+        matrix.mark_area_as(axis, testLine(0, 1), testLine(1, 2), .auto_placed);
+        try testing.expectEqual(@as(?i16, 4), testCursor(&matrix, axis, 1));
+        try testing.expectEqual(@as(?i16, 8), testCursor(&matrix, axis, 0));
+        try testing.expectEqual(@as(?i16, -1), testCursor(&matrix, axis, -2));
+        try testing.expectEqual(@as(?i16, 14), testCursor(&matrix, axis, 7));
+    }
 }

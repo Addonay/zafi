@@ -89,6 +89,7 @@ pub const compute_leaf_layout = compute.leaf.compute_leaf_layout;
 pub const compute_flexbox_layout = compute.flexbox.compute_flexbox_layout;
 pub const compute_grid_layout = compute.grid.compute_grid_layout;
 pub const compute_block_layout = compute.block.compute_block_layout;
+pub const compute_block_align_content_offset = compute.block.compute_block_align_content_offset;
 pub const compute_cached_layout = compute.compute_cached_layout;
 pub const compute_hidden_layout = compute.compute_hidden_layout;
 pub const compute_root_layout = compute.compute_root_layout;
@@ -103,6 +104,7 @@ test {
     _ = @import("compute/root.zig");
     _ = @import("util/root.zig");
     _ = @import("test.zig");
+    _ = @import("scroll_tests.zig");
     // Taffy-compatible serde tests are compiled only when the optional
     // dependency is enabled (`zig build test -Dserde=true`).
     if (@import("serde_support.zig").enabled) _ = @import("serde_tests.zig");

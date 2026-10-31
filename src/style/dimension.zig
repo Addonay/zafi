@@ -231,6 +231,14 @@ pub const Dimension = struct {
         return .{ .value = compact_length.CompactLength.fit_content_percent(value) };
     }
 
+    /// `fit-content(calc(...))`.
+    pub fn fit_content_calc(handle: *const anyopaque) Dimension {
+        return .{ .value = compact_length.CompactLength.fit_content_calc(handle) };
+    }
+    pub fn is_fit_content_calc(self: Dimension) bool {
+        return self.value.is_fit_content_calc();
+    }
+
     pub fn resolve(self: Dimension, basis: ?f32) ?f32 {
         return switch (self.value.tag()) {
             .length => self.value.value(),
@@ -293,6 +301,8 @@ pub const Dimension = struct {
             .stretch => .stretch,
             .content => .content,
             .calc => .calc,
+            .fit_content_calc => .fit_content_calc,
+            else => .auto,
         };
     }
 };
@@ -309,6 +319,7 @@ pub const ExpandedDimension = union(enum) {
     stretch,
     content,
     calc,
+    fit_content_calc,
 };
 
 pub fn dimensionToAvailable(value: Dimension) AvailableSpace {
@@ -391,7 +402,7 @@ pub fn dimension_from_expanded(value: ExpandedDimension) Dimension {
         .fit_content_percent => |number| Dimension.fit_content_percent(number),
         .stretch => Dimension.stretch,
         .content => Dimension.content,
-        .calc => @panic("calc dimension conversion requires an opaque handle"),
+        .calc, .fit_content_calc => @panic("calc dimension conversion requires an opaque handle"),
     };
 }
 

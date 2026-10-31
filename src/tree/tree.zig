@@ -93,13 +93,23 @@ pub const NodeData = struct {
     /// carry the generation they were created with; a mismatch means the id is
     /// stale.
     generation: u40 = 0,
+    /// Stamp used by child-list validation to detect duplicates in O(n) without
+    /// allocating (compared against `Tree.visit_epoch`; never wraps).
+    visit_mark: u64 = 0,
     style: style.Style,
     unrounded_layout: layout.Layout = .{},
     final_layout: layout.Layout = .{},
     children: std.ArrayList(NodeId),
     parent: ?NodeId = null,
     cache: cache.Cache = .{},
+    /// The out-of-flow candidates of the cached final layout, owned by the
+    /// tree. A cache hit must surface them again: they are how absolutely
+    /// positioned descendants reach a containing block further up.
+    cached_oof_candidates: []layout.OofCandidate = &.{},
     alive: bool = true,
+    /// The cached layout depends on an inherited float context (see
+    /// `LayoutTree.cache_float_coupled`).
+    cache_float_coupled: bool = false,
     /// Per-node measure context (Taffy's `NodeContext`). `has_context` mirrors
     /// Taffy's flag so a null context can still be a stored context.
     has_context: bool = false,
@@ -116,6 +126,8 @@ pub const NodeData = struct {
 
     fn deinit(self: *NodeData, allocator: std.mem.Allocator) void {
         freeDetailedInfo(self, allocator);
+        allocator.free(self.cached_oof_candidates);
+        self.cached_oof_candidates = &.{};
         self.hoisted_children.deinit(allocator);
         self.children.deinit(allocator);
     }
@@ -145,8 +157,15 @@ pub const NodeStore = struct {
     /// Slots in the first page. Small trees (the overwhelmingly common case for a
     /// retained tree plus a handful of edits) avoid paying for a full page.
     pub const first_page_size: usize = 8;
-    /// Slots in every page after the first.
-    pub const page_size: usize = 64;
+    /// Pages double from `first_page_size` up to this many slots, then stay
+    /// fixed. Small trees stay small, and full pages are large enough
+    /// (> 128 KiB) that general-purpose allocators serve them from mmap and
+    /// adapt to them, instead of trimming and re-faulting mid-sized heap chunks
+    /// on every tree teardown.
+    pub const page_size: usize = 128;
+    const doubling_pages = std.math.log2_int(usize, page_size / first_page_size);
+    /// Slots before the first fixed-size page: 8 + 16 + ... + page_size/2.
+    const doubling_slots = page_size - first_page_size;
 
     allocator: std.mem.Allocator,
     pages: std.ArrayListUnmanaged([]NodeData) = .empty,
@@ -162,23 +181,30 @@ pub const NodeStore = struct {
     }
 
     fn pageCount(count: u32) usize {
-        if (count <= first_page_size) return @intFromBool(count != 0);
-        const rest = count - first_page_size;
-        return 1 + (rest + page_size - 1) / page_size;
+        return if (count == 0) 0 else pageIndex(count - 1) + 1;
     }
 
-    fn pageIndex(index: u32) usize {
-        return if (index < first_page_size) 0 else 1 + (index - first_page_size) / page_size;
+    inline fn pageIndex(index: u32) usize {
+        if (index < doubling_slots) return 31 - @clz((index >> 3) + 1);
+        return doubling_pages + (index - doubling_slots) / page_size;
     }
 
-    fn pageOffset(index: u32) usize {
-        return if (index < first_page_size) @intCast(index) else @intCast((index - first_page_size) % page_size);
+    inline fn pageOffset(index: u32) usize {
+        if (index < doubling_slots) {
+            const k: u5 = @intCast(31 - @clz((index >> 3) + 1));
+            return index - ((@as(u32, 1) << k) - 1) * first_page_size;
+        }
+        return (index - doubling_slots) % page_size;
+    }
+
+    fn pageSlots(page: usize) usize {
+        return if (page < doubling_pages) first_page_size << @intCast(page) else page_size;
     }
 
     pub fn ensurePages(self: *NodeStore, count: u32) !void {
         const required = pageCount(count);
         while (self.pages.items.len < required) {
-            const size: usize = if (self.pages.items.len == 0) first_page_size else page_size;
+            const size: usize = pageSlots(self.pages.items.len);
             const page = try self.allocator.alloc(NodeData, size);
             // The page is owned by `pages` only once the append succeeds; an
             // allocation failure must not strand it.
@@ -230,12 +256,15 @@ pub const NodeStore = struct {
         node_data.children = .empty;
         node_data.parent = null;
         node_data.cache = .{};
+        node_data.cached_oof_candidates = &.{};
+        node_data.cache_float_coupled = false;
         node_data.alive = true;
         node_data.has_context = false;
         node_data.context = null;
         node_data.hoisted_children = .empty;
         node_data.detailed_layout_info = .none;
         node_data.detailed_info_deinit = null;
+        node_data.visit_mark = 0;
         self.live_count += 1;
         return node.fromParts(index, node_data.generation) orelse error.NodeIdExhausted;
     }
@@ -258,6 +287,8 @@ pub const NodeStore = struct {
     }
 };
 
+const ScratchStack = @import("../util/scratch_stack.zig").ScratchStack;
+
 pub const Tree = struct {
     allocator: std.mem.Allocator,
     nodes: NodeStore,
@@ -266,20 +297,21 @@ pub const Tree = struct {
     /// uses Taffy's default (zero-size) measure; `compute_layout_with_measure`
     /// installs the caller's callback for the duration of the run.
     measure_function: ?interfaces.MeasureFunc = null,
-    /// Per-tree arena for layout-pass temporaries (line lists, placement
-    /// scratch, track arrays, occupancy intervals, ...). Allocations made from
-    /// `scratch_allocator()` are owned by the tree and valid until the next
-    /// top-level layout pass (or `reset_scratch`/`clear`); nothing allocated
-    /// from it is allowed to escape the pass that requested it. Resetting
-    /// keeps the arena's capacity, so repeated passes reuse the same block
-    /// instead of returning to the backing allocator.
-    scratch: std.heap.ArenaAllocator,
+    /// Per-tree stack allocator for layout-pass temporaries (line lists,
+    /// placement scratch, track arrays, occupancy intervals, ...). Allocations
+    /// made from `scratch_allocator()` are owned by the tree and valid until the
+    /// next top-level layout pass (or `reset_scratch`/`clear`), unless the
+    /// caching wrapper releases a child layout's temporaries early (see
+    /// `scratch_mark`). Chunks are retained across passes.
+    scratch: ScratchStack,
     /// Per-tree arena for mutation-time working memory (input snapshots,
     /// validation sets). Reset at the start of each public mutation entry point
     /// and retained between them, so the steady-state cost of validation is zero
     /// allocations. Kept separate from `scratch` so a layout pass cannot
     /// invalidate a snapshot a mutation is still reading.
     mutation_arena: std.heap.ArenaAllocator,
+    /// Epoch for `NodeData.visit_mark` (child-list duplicate detection).
+    visit_epoch: u64 = 0,
     /// True while a layout pass is active. The scratch arena is reset only
     /// when a pass starts outside every other pass, so re-entrant child
     /// computes (the algorithms call back through `compute_child_layout`)
@@ -294,7 +326,7 @@ pub const Tree = struct {
         return .{
             .allocator = allocator,
             .nodes = NodeStore.init(allocator),
-            .scratch = std.heap.ArenaAllocator.init(allocator),
+            .scratch = ScratchStack.init(allocator),
             .mutation_arena = std.heap.ArenaAllocator.init(allocator),
         };
     }
@@ -337,6 +369,17 @@ pub const Tree = struct {
     /// Allocator for layout-pass temporaries. Memory is owned by the tree and
     /// invalidated by the next top-level layout pass, `reset_scratch`, `clear`
     /// or `deinit`. Never store an escaping pointer/reference in it.
+    /// The current top of the scratch stack (see `scratch_release`).
+    pub fn scratch_mark(self: *Tree) ScratchStack.Mark {
+        return self.scratch.mark();
+    }
+
+    /// Pop every scratch allocation made since `mark`; nothing allocated
+    /// after it may be referenced afterwards.
+    pub fn scratch_release(self: *Tree, mark: ScratchStack.Mark) void {
+        self.scratch.release(mark);
+    }
+
     pub fn scratch_allocator(self: *Tree) std.mem.Allocator {
         return self.scratch.allocator();
     }
@@ -346,7 +389,7 @@ pub const Tree = struct {
     /// layout pass begins; only needed manually when driving the compute
     /// functions directly without `compute_layout`/`compute_child_layout`.
     pub fn reset_scratch(self: *Tree) void {
-        _ = self.scratch.reset(.retain_capacity);
+        self.scratch.reset();
     }
 
     /// Number of live nodes, in O(1).
@@ -416,21 +459,23 @@ pub const Tree = struct {
 
     /// Validate a requested child list without touching the graph.
     fn validateChildList(self: *Tree, parent_id: NodeId, child_list: []const NodeId) ![]const NodeId {
-        _ = self.get_node(parent_id) orelse return error.InvalidParentNode;
+        const parent_node = self.get_node(parent_id) orelse return error.InvalidParentNode;
         if (child_list.len == 0) return child_list;
 
-        const allocator = self.mutationArenaAllocator();
-        // Duplicate detection uses a hash set so the check stays O(n) for large
-        // child lists; the arena makes it allocation-free after warm-up.
-        var seen = std.AutoHashMapUnmanaged(NodeId, void){};
-        defer seen.deinit(allocator);
-        try seen.ensureTotalCapacity(allocator, @intCast(child_list.len));
-
+        // A root parent's only ancestor is itself, so no child (other than the
+        // parent itself) can close a cycle: skip the ancestor walks entirely.
+        const parent_is_root = parent_node.parent == null;
+        // Duplicates are found by stamping each child with a fresh epoch: O(n),
+        // no allocation (replaces a per-call hash set).
+        self.visit_epoch += 1;
+        const epoch = self.visit_epoch;
         for (child_list) |child_id| {
-            _ = self.get_node(child_id) orelse return error.InvalidChildNode;
+            const child = self.get_node_mut(child_id) orelse return error.InvalidChildNode;
             if (child_id == parent_id) return error.Cycle;
-            if (try seen.fetchPut(allocator, child_id, {})) |_| return error.DuplicateChild;
-            if (self.isAncestor(child_id, parent_id)) return error.Cycle;
+            if (child.visit_mark == epoch) return error.DuplicateChild;
+            child.visit_mark = epoch;
+            // A childless node cannot be an ancestor of anything but itself.
+            if (!parent_is_root and child.children.items.len != 0 and self.isAncestor(child_id, parent_id)) return error.Cycle;
         }
         return child_list;
     }
@@ -717,11 +762,41 @@ pub const Tree = struct {
 
     pub fn cache_get(self: *Tree, id: NodeId, input: *const layout.LayoutInput) ?layout.LayoutOutput {
         const node_data = self.get_node_mut(id) orelse return null;
-        return node_data.cache.get(input.*);
+        var output = node_data.cache.get(input.*) orelse return null;
+        if (input.run_mode == .perform_layout and node_data.cached_oof_candidates.len != 0) {
+            // Hand out a pass-scoped copy: callers translate the list in place.
+            var candidates: layout.OofCandidates = .empty;
+            candidates.appendSlice(self.scratch_allocator(), node_data.cached_oof_candidates) catch return null;
+            output.oof_candidates = candidates;
+        }
+        return output;
     }
 
-    pub fn cache_store(self: *Tree, id: NodeId, input: *const layout.LayoutInput, output: layout.LayoutOutput) void {
-        if (self.get_node_mut(id)) |node_data| node_data.cache.store(input.*, output);
+    pub fn cache_float_coupled(self: *Tree, id: NodeId) bool {
+        const node_data = self.get_node(id) orelse return true;
+        return node_data.cache_float_coupled;
+    }
+
+    pub fn set_cache_float_coupled(self: *Tree, id: NodeId, value: bool) void {
+        if (self.get_node_mut(id)) |node_data| node_data.cache_float_coupled = value;
+    }
+
+    /// Fails with `OutOfMemory` (failing the layout) when the final layout's
+    /// out-of-flow candidates cannot be copied: silently leaving the node
+    /// uncached would let its ancestors cache, breaking "an empty cache implies
+    /// empty ancestor caches" and so later invalidation.
+    pub fn cache_store(self: *Tree, id: NodeId, input: *const layout.LayoutInput, output: layout.LayoutOutput) error{OutOfMemory}!void {
+        const node_data = self.get_node_mut(id) orelse return;
+        if (input.run_mode == .perform_layout) {
+            // Keep the final layout's candidates alongside it, or fail the layout.
+            const owned = self.allocator.dupe(layout.OofCandidate, output.oof_candidates.items) catch |err| {
+                _ = node_data.cache.clear();
+                return err;
+            };
+            self.allocator.free(node_data.cached_oof_candidates);
+            node_data.cached_oof_candidates = owned;
+        }
+        node_data.cache.store(input.*, output);
     }
 
     /// Clear this node's cached layout **and** invalidate every ancestor.
@@ -1200,4 +1275,32 @@ test "taffy set_children validates before mutating" {
     try testing.expectEqual(@as(usize, 1), try tree.child_count(a));
     try testing.expectEqual(@as(usize, 0), try tree.child_count(b));
     try testing.expectEqual(a, (try tree.parent(x)).?);
+}
+
+test "child-list validation rejects duplicates and cycles without mutating" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    const b = try t.new_leaf(.{});
+    const c = try t.new_leaf(.{});
+
+    // Duplicates in one list, for a root parent and a non-root parent.
+    const root = try t.new_leaf(.{});
+    try testing.expectError(error.DuplicateChild, t.set_children(root, &.{ a, b, a }));
+    try testing.expectEqual(@as(usize, 0), (try t.children(root)).len);
+    try t.set_children(root, &.{ a, b });
+    try testing.expectError(error.DuplicateChild, t.set_children(a, &.{ c, c }));
+
+    // A child may not be its own parent or an ancestor of its new parent.
+    try testing.expectError(error.Cycle, t.add_child(a, a));
+    try t.add_child(a, c); // root -> a -> c
+    try testing.expectError(error.Cycle, t.add_child(c, root));
+    try testing.expectError(error.Cycle, t.add_child(c, a));
+    try testing.expectError(error.Cycle, t.set_children(c, &.{ b, root }));
+    try testing.expectEqual(@as(usize, 2), (try t.children(root)).len);
+
+    // Repeated validations reuse the stamps correctly.
+    for (0..3) |_| try t.set_children(root, &.{ b, a });
+    try testing.expectEqual(b, (try t.children(root))[0]);
 }

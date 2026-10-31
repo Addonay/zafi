@@ -1,8 +1,13 @@
 //! Port of Taffy's `style/compact_length.rs`.
 //!
 //! Taffy stores its tagged values in one pointer-sized word; the port uses the
-//! same packed representation: the tag lives in the top 6 bits of a `u64` and
-//! the payload (an f32 bit pattern or a calc pointer) in the low 58 bits.
+//! same packed representation: the tag lives in the top 8 bits of a `u64` and
+//! the payload (an f32 bit pattern or a calc pointer) in the low 56 bits.
+//!
+//! Tag values are Taffy's (they are also the serde wire tags). Their low bits
+//! classify the variant so that the common predicates are single mask tests:
+//! bit 0 = not a calc pointer, bit 1 = keyword, bit 2 = uses a percentage,
+//! bit 3 = sizing keyword.
 
 const std = @import("std");
 
@@ -14,11 +19,20 @@ const serde_deserialize = serde_support.deserialize;
 pub const CompactLength = struct {
     bits: u64,
 
-    /// The low 58 bits hold the payload; the top 6 bits hold the tag.
-    pub const payload_mask: u64 = (1 << 58) - 1;
+    /// The low 56 bits hold the payload; the top 8 bits hold the tag.
+    pub const payload_mask: u64 = (1 << 56) - 1;
 
-    fn init(kind: CompactLengthTag, payload: u64) CompactLength {
-        return .{ .bits = (@as(u64, @backingInt(kind)) << 58) | (payload & payload_mask) };
+    pub const NON_POINTER_BIT: u8 = 0b0001;
+    pub const KEYWORD_BIT: u8 = 0b0010;
+    pub const PERCENTAGE_BIT: u8 = 0b0100;
+    pub const SIZING_KEYWORD_BIT: u8 = 0b1000;
+
+    inline fn init(kind: CompactLengthTag, payload: u64) CompactLength {
+        return .{ .bits = (@as(u64, @backingInt(kind)) << 56) | (payload & payload_mask) };
+    }
+
+    inline fn tagBits(self: CompactLength) u8 {
+        return @truncate(self.bits >> 56);
     }
 
     fn initValue(kind: CompactLengthTag, number: f32) CompactLength {
@@ -67,14 +81,20 @@ pub const CompactLength = struct {
     }
     pub fn calc(pointer: *const anyopaque) CompactLength {
         const address = @intFromPtr(pointer);
-        std.debug.assert(address < (1 << 58));
+        std.debug.assert(address < (1 << 56));
         return init(.calc, address);
+    }
+    /// `fit-content(calc(...))`: a fit-content() whose limit is a calc() value.
+    pub fn fit_content_calc(pointer: *const anyopaque) CompactLength {
+        const address = @intFromPtr(pointer);
+        std.debug.assert(address < (1 << 56));
+        return init(.fit_content_calc, address);
     }
 
     // -- Queries ------------------------------------------------------------
 
-    pub fn tag(self: CompactLength) CompactLengthTag {
-        return @fromBackingInt(@intCast(@as(u8, @truncate(self.bits >> 58))));
+    pub inline fn tag(self: CompactLength) CompactLengthTag {
+        return @fromBackingInt(self.tagBits());
     }
 
     pub fn value(self: CompactLength) f32 {
@@ -84,52 +104,70 @@ pub const CompactLength = struct {
     pub fn is_zero(self: CompactLength) bool {
         return self.tag() == .length and self.value() == 0;
     }
-    pub fn is_length_or_percentage(self: CompactLength) bool {
-        return self.tag() == .length or self.tag() == .percent;
+    /// A plain `calc()` (not `fit-content(calc())`).
+    pub inline fn is_plain_calc(self: CompactLength) bool {
+        return self.tagBits() & (NON_POINTER_BIT | KEYWORD_BIT) == 0;
     }
-    pub fn is_auto(self: CompactLength) bool {
+    pub inline fn is_fit_content_calc(self: CompactLength) bool {
+        return self.tagBits() & (NON_POINTER_BIT | KEYWORD_BIT) == KEYWORD_BIT;
+    }
+    /// Any variant holding a calc pointer.
+    pub inline fn has_calc(self: CompactLength) bool {
+        return self.tagBits() & NON_POINTER_BIT == 0;
+    }
+    pub inline fn is_length_or_percentage(self: CompactLength) bool {
+        return self.tagBits() & (NON_POINTER_BIT | KEYWORD_BIT) == NON_POINTER_BIT;
+    }
+    pub inline fn is_length_percentage_or_calc(self: CompactLength) bool {
+        return self.tagBits() & KEYWORD_BIT == 0;
+    }
+    pub inline fn is_auto(self: CompactLength) bool {
         return self.tag() == .auto;
     }
-    pub fn is_content(self: CompactLength) bool {
+    pub inline fn is_content(self: CompactLength) bool {
         return self.tag() == .content;
     }
-    pub fn is_min_content(self: CompactLength) bool {
+    pub inline fn is_min_content(self: CompactLength) bool {
         return self.tag() == .min_content;
     }
-    pub fn is_max_content(self: CompactLength) bool {
+    pub inline fn is_max_content(self: CompactLength) bool {
         return self.tag() == .max_content;
     }
-    pub fn is_fit_content(self: CompactLength) bool {
-        return self.tag() == .fit_content_px or self.tag() == .fit_content_percent;
+    pub inline fn is_fit_content(self: CompactLength) bool {
+        return switch (self.tag()) {
+            .fit_content_px, .fit_content_percent, .fit_content_calc => true,
+            else => false,
+        };
     }
-    pub fn is_sizing_keyword(self: CompactLength) bool {
-        return self.is_min_content() or self.is_max_content() or self.tag() == .fit_content_keyword or self.is_fit_content() or self.tag() == .stretch;
+    pub inline fn is_sizing_keyword(self: CompactLength) bool {
+        const mask = NON_POINTER_BIT | KEYWORD_BIT | SIZING_KEYWORD_BIT;
+        return self.tagBits() & mask == mask or self.is_fit_content_calc();
     }
-    pub fn is_max_or_fit_content(self: CompactLength) bool {
+    pub inline fn is_max_or_fit_content(self: CompactLength) bool {
         return self.is_max_content() or self.is_fit_content();
     }
-    pub fn is_max_content_alike(self: CompactLength) bool {
+    pub inline fn is_max_content_alike(self: CompactLength) bool {
         return self.tag() == .auto or self.is_max_content() or self.is_fit_content();
     }
-    pub fn is_min_or_max_content(self: CompactLength) bool {
+    pub inline fn is_min_or_max_content(self: CompactLength) bool {
         return self.is_min_content() or self.is_max_content();
     }
-    pub fn is_intrinsic(self: CompactLength) bool {
+    pub inline fn is_intrinsic(self: CompactLength) bool {
         return self.tag() == .auto or self.is_min_content() or self.is_max_content() or self.is_fit_content();
     }
-    pub fn is_fr(self: CompactLength) bool {
+    pub inline fn is_fr(self: CompactLength) bool {
         return self.tag() == .fr;
     }
-    pub fn uses_percentage(self: CompactLength) bool {
-        const tag_value = self.tag();
-        return tag_value == .percent or tag_value == .fit_content_percent or tag_value == .calc;
+    pub inline fn uses_percentage(self: CompactLength) bool {
+        return self.tagBits() & PERCENTAGE_BIT != 0;
     }
 
-    pub fn is_calc(self: CompactLength) bool {
-        return self.tag() == .calc;
+    /// Deprecated alias of `is_plain_calc` (Taffy renamed `is_calc`).
+    pub inline fn is_calc(self: CompactLength) bool {
+        return self.is_plain_calc();
     }
     pub fn calc_value(self: CompactLength) ?*const anyopaque {
-        if (self.tag() != .calc) return null;
+        if (!self.has_calc()) return null;
         return @ptrFromInt(self.bits & payload_mask);
     }
     pub fn resolved_percentage_size(self: CompactLength, parent_size: f32) ?f32 {
@@ -159,18 +197,19 @@ pub const CompactLength = struct {
 pub const CompactLengthInner = CompactLength;
 
 pub const CompactLengthTag = enum(u8) {
-    calc,
+    calc = 0b0000_0100,
+    fit_content_calc = 0b0000_0110,
     length = 0b0000_0001,
-    percent = 0b0000_0010,
+    percent = 0b0000_0101,
     auto = 0b0000_0011,
-    fr = 0b0000_0100,
-    min_content = 0b0000_0111,
-    max_content = 0b0000_1111,
-    fit_content_px = 0b0001_0111,
-    fit_content_percent = 0b0001_1111,
-    fit_content_keyword = 0b0010_0111,
-    stretch = 0b0010_1111,
-    content = 0b0011_0111,
+    fr = 0b0001_0011,
+    content = 0b0010_0011,
+    min_content = 0b0000_1011,
+    max_content = 0b0001_1011,
+    fit_content_px = 0b0010_1011,
+    fit_content_keyword = 0b0011_1011,
+    stretch = 0b0100_1011,
+    fit_content_percent = 0b0000_1111,
 };
 
 pub fn f32_to_bits(value: f32) u32 {
@@ -370,7 +409,7 @@ test "compact length tags and serialized bits match Taffy wire values" {
     const length_value = CompactLength.length(12.5);
     try testing.expectEqual(@as(u8, 1), @backingInt(length_value.tag()));
     try testing.expectEqual(length_value, from_serialized(length_value.serialized()));
-    try testing.expectEqual(@as(u8, 39), @backingInt(CompactLength.fit_content().tag()));
+    try testing.expectEqual(@as(u8, 59), @backingInt(CompactLength.fit_content().tag()));
     const auto_value = CompactLength.auto();
     try testing.expectEqual(auto_value, from_serialized(auto_value.serialized()));
 
@@ -386,15 +425,39 @@ test "compact length tags and serialized bits match Taffy wire values" {
     try testing.expectEqual(@as(f32, 2), CompactLength.fr(2).value());
     try testing.expectEqual(@as(f32, 0.5), CompactLength.percent(0.5).value());
 
-    // calc payloads are pointers stored in the low 58 bits.
+    // calc payloads are pointers stored in the low 56 bits.
     const handle: *const anyopaque = @ptrFromInt(0x1234);
     const calc_value = CompactLength.calc(handle);
     try testing.expectEqual(CompactLengthTag.calc, calc_value.tag());
     try testing.expectEqual(handle, calc_value.calc_value().?);
+    try testing.expect(calc_value.is_plain_calc() and calc_value.uses_percentage() and !calc_value.is_sizing_keyword());
+    const fit_calc = CompactLength.fit_content_calc(handle);
+    try testing.expect(fit_calc.is_fit_content_calc() and !fit_calc.is_plain_calc() and fit_calc.is_fit_content());
+    try testing.expect(fit_calc.is_sizing_keyword() and fit_calc.is_intrinsic() and fit_calc.uses_percentage());
+    try testing.expectEqual(handle, fit_calc.calc_value().?);
 
-    // Wire values captured from pinned Taffy 0.14.
+    // Wire values captured from Taffy c6421c1 (serde_json of each CompactLength).
     try testing.expectEqual(@as(u64, 5375000576), CompactLength.length(3.5).serialized());
-    try testing.expectEqual(@as(u64, 9646899200), CompactLength.percent(0.5).serialized());
+    try testing.expectEqual(CompactLength.length(3.5), from_serialized(@as(u64, 5375000576)));
+    try testing.expectEqual(@as(u64, 22531801088), CompactLength.percent(0.5).serialized());
+    try testing.expectEqual(CompactLength.percent(0.5), from_serialized(@as(u64, 22531801088)));
     try testing.expectEqual(@as(u64, 12884901888), CompactLength.auto().serialized());
+    try testing.expectEqual(CompactLength.auto(), from_serialized(@as(u64, 12884901888)));
+    try testing.expectEqual(@as(u64, 82678120448), CompactLength.fr(2).serialized());
+    try testing.expectEqual(CompactLength.fr(2), from_serialized(@as(u64, 82678120448)));
+    try testing.expectEqual(@as(u64, 47244640256), CompactLength.min_content().serialized());
+    try testing.expectEqual(CompactLength.min_content(), from_serialized(@as(u64, 47244640256)));
+    try testing.expectEqual(@as(u64, 115964116992), CompactLength.max_content().serialized());
+    try testing.expectEqual(CompactLength.max_content(), from_serialized(@as(u64, 115964116992)));
+    try testing.expectEqual(@as(u64, 185786695680), CompactLength.fit_content_length(24).serialized());
+    try testing.expectEqual(CompactLength.fit_content_length(24), from_serialized(@as(u64, 185786695680)));
+    try testing.expectEqual(@as(u64, 65473085440), CompactLength.fit_content_percent(0.25).serialized());
+    try testing.expectEqual(CompactLength.fit_content_percent(0.25), from_serialized(@as(u64, 65473085440)));
+    try testing.expectEqual(@as(u64, 253403070464), CompactLength.fit_content().serialized());
+    try testing.expectEqual(CompactLength.fit_content(), from_serialized(@as(u64, 253403070464)));
+    try testing.expectEqual(@as(u64, 322122547200), CompactLength.stretch().serialized());
+    try testing.expectEqual(CompactLength.stretch(), from_serialized(@as(u64, 322122547200)));
+    try testing.expectEqual(@as(u64, 150323855360), CompactLength.content().serialized());
+    try testing.expectEqual(CompactLength.content(), from_serialized(@as(u64, 150323855360)));
     try testing.expectEqual(CompactLength.percent(0.5), from_serialized(CompactLength.percent(0.5).serialized()));
 }

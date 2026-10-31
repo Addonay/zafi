@@ -52,6 +52,8 @@ const CustomNode = struct {
     detailed: ?*const anyopaque = null,
     detailed_deinit: ?*const fn (*const anyopaque, std.mem.Allocator) void = null,
     cache: cache.Cache = .{},
+    /// Candidates of the cached final layout (arena-owned; see cache_store).
+    cached_oof_candidates: []const layout.OofCandidate = &.{},
 };
 
 /// A host tree with a deliberately different storage strategy from `Tree`:
@@ -175,11 +177,22 @@ const CustomTree = struct {
     }
 
     pub fn cache_get(self: *CustomTree, id: NodeId, input: *const LayoutInput) ?LayoutOutput {
-        return self.at(id).cache.get(input.*);
+        const node_data = self.at(id);
+        var output = node_data.cache.get(input.*) orelse return null;
+        if (input.run_mode == .perform_layout and node_data.cached_oof_candidates.len != 0) {
+            var candidates: layout.OofCandidates = .empty;
+            candidates.appendSlice(self.scratch_allocator(), node_data.cached_oof_candidates) catch return null;
+            output.oof_candidates = candidates;
+        }
+        return output;
     }
 
     pub fn cache_store(self: *CustomTree, id: NodeId, input: *const LayoutInput, output: LayoutOutput) Error!void {
-        self.at(id).cache.store(input.*, output);
+        const node_data = self.at(id);
+        if (input.run_mode == .perform_layout) {
+            node_data.cached_oof_candidates = try self.arena.allocator().dupe(layout.OofCandidate, output.oof_candidates.items);
+        }
+        node_data.cache.store(input.*, output);
     }
 
     pub fn cache_clear(self: *CustomTree, id: NodeId) Error!void {

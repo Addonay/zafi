@@ -11,46 +11,64 @@ const geometry = @import("../../../geometry.zig");
 const style = @import("../../../style/root.zig");
 const grid = @import("../../../style/grid.zig");
 
+const coordinates = @import("coordinates.zig");
+const OriginZeroLine = coordinates.OriginZeroLine;
+
 const MAX_GRID_TRACKS: u32 = 10_000;
 
 pub const GridAreaEnd = enum { start, end };
+pub const GridAreaAxis = enum { row, column };
 
+/// The one-indexed line positions of a single grid line name (sorted, deduplicated).
 const LinePositions = std.ArrayListUnmanaged(u32);
+const LineNameMap = std.StringHashMapUnmanaged(LinePositions);
 
-fn freeLineNameMap(map: *std.StringHashMapUnmanaged(LinePositions), allocator: std.mem.Allocator) void {
+/// The one-indexed positions of the first line that starts and the first line
+/// that ends a named grid area in each axis: the first line named
+/// `<area>-start`/`<area>-end` (explicitly or by `grid-template-areas`). 0 means
+/// there is no such line.
+pub const AreaLines = struct {
+    row_start: u32 = 0,
+    row_end: u32 = 0,
+    column_start: u32 = 0,
+    column_end: u32 = 0,
+
+    fn line(self: *const AreaLines, axis: GridAreaAxis, end: GridAreaEnd) ?u32 {
+        const value = self.line_ptr_const(axis, end).*;
+        return if (value == 0) null else value;
+    }
+    fn line_ptr_const(self: *const AreaLines, axis: GridAreaAxis, end: GridAreaEnd) *const u32 {
+        return switch (axis) {
+            .row => if (end == .start) &self.row_start else &self.row_end,
+            .column => if (end == .start) &self.column_start else &self.column_end,
+        };
+    }
+    fn line_ptr(self: *AreaLines, axis: GridAreaAxis, end: GridAreaEnd) *u32 {
+        return @constCast(self.line_ptr_const(axis, end));
+    }
+};
+
+/// Map from area name to its edges. This is how the `<area>-start`/`<area>-end`
+/// names `grid-template-areas` generates are represented, without allocating a
+/// string for each.
+const GridAreasMap = std.StringHashMapUnmanaged(AreaLines);
+
+/// Split `<area>-start` / `<area>-end` into the area name and the edge.
+fn split_area_edge_name(name: []const u8) ?struct { area: []const u8, end: GridAreaEnd } {
+    if (std.mem.endsWith(u8, name, "-start")) return .{ .area = name[0 .. name.len - "-start".len], .end = .start };
+    if (std.mem.endsWith(u8, name, "-end")) return .{ .area = name[0 .. name.len - "-end".len], .end = .end };
+    return null;
+}
+
+fn axis_of(axis: geometry.AbsoluteAxis) GridAreaAxis {
+    return if (axis == .horizontal) .column else .row;
+}
+
+fn freeLineNameMap(map: *LineNameMap, allocator: std.mem.Allocator) void {
     var it = map.iterator();
     while (it.next()) |entry| entry.value_ptr.deinit(allocator);
     map.deinit(allocator);
 }
-
-/// Deep-copy one axis's line-name map, including the name keys.
-///
-/// On failure `target` is left empty: its (already-populated) value lists are
-/// freed, but the deep-copied keys are intentionally *not* freed here because the
-/// caller is an arena whose `deinit` releases every block wholesale.
-fn cloneLineNameMap(
-    source: *const std.StringHashMapUnmanaged(LinePositions),
-    allocator: std.mem.Allocator,
-    target: *std.StringHashMapUnmanaged(LinePositions),
-) !void {
-    errdefer freeLineNameMap(target, allocator);
-    try target.ensureTotalCapacity(allocator, source.count());
-    var it = source.iterator();
-    while (it.next()) |entry| {
-        const owned_key = try allocator.dupe(u8, entry.key_ptr.*);
-        const entry_ptr = try target.getOrPut(allocator, owned_key);
-        if (!entry_ptr.found_existing) entry_ptr.value_ptr.* = .empty;
-        try entry_ptr.value_ptr.appendSlice(allocator, entry.value_ptr.items);
-    }
-}
-
-const LineFilter = union(enum) {
-    all,
-    /// Keep positions `<= point` (Taffy: `partition_point(|line| *line <= point)`)
-    after_inclusive: u32,
-    /// Keep positions `< point` (Taffy: `partition_point(|line| *line < point)`)
-    before_exclusive: u32,
-};
 
 /// The (1-indexed line number, name) pairs used by detailed layout info.
 ///
@@ -60,62 +78,176 @@ const LineFilter = union(enum) {
 /// resolved value of `grid-template-rows`/`grid-template-columns` in browsers.
 const LineNamePair = struct { line: u32, name: []const u8 };
 
+/// Resolves named placements in one grid axis (Taffy's `NamedLineResolverAxis`).
+/// Shared by layout and by the persistent `OwnedLineIndex`, so both resolve
+/// identically.
+const AxisResolver = struct {
+    lines: *const LineNameMap,
+    areas: *const GridAreasMap,
+    axis: GridAreaAxis,
+    explicit_track_count: u16,
+
+    fn area_line(self: AxisResolver, area_name: []const u8, end: GridAreaEnd) ?u32 {
+        const area = self.areas.getPtr(area_name) orelse return null;
+        return area.line(self.axis, end);
+    }
+
+    /// Resolve named lines and spans into numeric placements.
+    fn resolve(self: AxisResolver, value: geometry.Line(grid.GridPlacement)) geometry.Line(grid.GridPlacement) {
+        // Fast path: placements without names (the common case) resolve to themselves.
+        const start_named = value.start == .named_line or value.start == .named_span;
+        const end_named = value.end == .named_line or value.end == .named_span;
+        if (!start_named and !end_named) return value;
+        const start: grid.GridPlacement = if (value.start == .named_line)
+            .{ .line = self.find_named_line(value.start.named_line.name, value.start.named_line.index, .start).value }
+        else
+            value.start;
+        const end: grid.GridPlacement = if (value.end == .named_line)
+            .{ .line = self.find_named_line(value.end.named_line.name, value.end.named_line.index, .end).value }
+        else
+            value.end;
+
+        // A named span is counted from the definite line on the other side.
+        // https://drafts.csswg.org/css-grid-2/#grid-span
+        if (start == .line and end == .named_span and start.line != 0) {
+            const after_start = coordinates.GridLine.from_i16(start.line).into_origin_zero_line(self.explicit_track_count).value + 1;
+            const n: i32 = @max(@as(i32, @intCast(end.named_span.count)), 1);
+            const end_line = self.nth_line_forwards(self.lines_named(end.named_span.name), .{ .value = after_start }, n);
+            return .{ .start = start, .end = .{ .line = end_line.into_grid_line(self.explicit_track_count).value } };
+        }
+        if (start == .named_span and end == .line and end.line != 0) {
+            const before_end = coordinates.GridLine.from_i16(end.line).into_origin_zero_line(self.explicit_track_count).value - 1;
+            const n: i32 = @max(@as(i32, @intCast(start.named_span.count)), 1);
+            const start_line = self.nth_line_backwards(self.lines_named(start.named_span.name), .{ .value = before_end }, n);
+            return .{ .start = .{ .line = start_line.into_grid_line(self.explicit_track_count).value }, .end = end };
+        }
+        return .{ .start = resolve_non_named(start), .end = resolve_non_named(end) };
+    }
+
+    /// The grid line for `<custom-ident>` or `<integer> <custom-ident>` (index 0 =
+    /// none given). https://drafts.csswg.org/css-grid-2/#line-placement
+    fn find_named_line(self: AxisResolver, name: []const u8, idx: i16, end: GridAreaEnd) coordinates.GridLine {
+        // A bare `<custom-ident>` first matches the edge of a named area: the first
+        // line named `<ident>-start` (or `-end`). Otherwise it is treated as `1 <ident>`.
+        if (idx == 0) {
+            if (self.area_line(name, end)) |first_line| {
+                return OriginZeroLine.clamped(oz_line(first_line)).into_grid_line(self.explicit_track_count);
+            }
+        }
+        const lines = self.lines_named(name);
+        const line = if (idx >= 0)
+            self.nth_line_forwards(lines, .{ .value = 0 }, @max(@as(i32, idx), 1))
+        else
+            self.nth_line_backwards(lines, self.last_explicit_line(), -@as(i32, idx));
+        return line.into_grid_line(self.explicit_track_count);
+    }
+
+    /// The sorted lines named `name`. An area-generated line is only a member of
+    /// its name's list if some line was explicitly given that name; otherwise it
+    /// is found from the area's edges.
+    fn lines_named(self: AxisResolver, name: []const u8) []const u32 {
+        if (self.lines.getPtr(name)) |lines| return lines.items;
+        if (split_area_edge_name(name)) |split| {
+            if (self.areas.getPtr(split.area)) |area| {
+                const ptr = area.line_ptr_const(self.axis, split.end);
+                if (ptr.* != 0) return @as([*]const u32, @ptrCast(ptr))[0..1];
+            }
+        }
+        return &.{};
+    }
+
+    fn last_explicit_line(self: AxisResolver) OriginZeroLine {
+        return .{ .value = @intCast(self.explicit_track_count) };
+    }
+
+    /// The `n`th line in `lines` not before `first_line`. Missing lines count all
+    /// implicit lines after the explicit grid as members.
+    /// https://drafts.csswg.org/css-grid-2/#grid-placement-int
+    fn nth_line_forwards(self: AxisResolver, lines_in: []const u32, first_line_in: OriginZeroLine, n: i32) OriginZeroLine {
+        const first_line: i32 = @max(first_line_in.value, 0);
+        var skip: usize = 0;
+        while (skip < lines_in.len and oz_line(lines_in[skip]) < first_line) : (skip += 1) {}
+        const lines = lines_in[skip..];
+        const index: usize = @intCast(n - 1);
+        const line: i32 = if (index < lines.len)
+            oz_line(lines[index])
+        else
+            @max(first_line, @as(i32, self.last_explicit_line().value) + 1) + (n - @as(i32, @intCast(lines.len))) - 1;
+        return OriginZeroLine.clamped(line);
+    }
+
+    /// The `n`th line in `lines` (searching backwards) not after `last_line`.
+    /// Missing lines count all implicit lines before the explicit grid as members.
+    fn nth_line_backwards(self: AxisResolver, lines_in: []const u32, last_line_in: OriginZeroLine, n: i32) OriginZeroLine {
+        const last_line: i32 = @min(last_line_in.value, self.last_explicit_line().value);
+        var count: usize = 0;
+        while (count < lines_in.len and oz_line(lines_in[count]) <= last_line) : (count += 1) {}
+        const lines = lines_in[0..count];
+        const line: i32 = if (@as(i64, @intCast(lines.len)) - n >= 0)
+            oz_line(lines[@intCast(@as(i64, @intCast(lines.len)) - n)])
+        else
+            @min(last_line, -1) - (n - @as(i32, @intCast(lines.len))) + 1;
+        return OriginZeroLine.clamped(line);
+    }
+};
+
+/// Stored lines are 1-based CSS grid line numbers within the explicit grid.
+inline fn oz_line(line: u32) i32 {
+    return @as(i32, @intCast(line)) - 1;
+}
+
+fn resolve_non_named(value: grid.GridPlacement) grid.GridPlacement {
+    return switch (value) {
+        .auto => .auto,
+        .line => |line| .{ .line = line },
+        .span => |span| .{ .span = span },
+        .named_span => .{ .span = 1 },
+        // Already resolved by the caller
+        .named_line => unreachable,
+    };
+}
+
 pub const NamedLineResolver = struct {
     arena: std.heap.ArenaAllocator,
-    row_lines: std.StringHashMapUnmanaged(LinePositions) = .{},
-    column_lines: std.StringHashMapUnmanaged(LinePositions) = .{},
-    areas: std.StringHashMapUnmanaged(grid.GridTemplateArea) = .{},
+    row_lines: LineNameMap = .{},
+    column_lines: LineNameMap = .{},
+    areas: GridAreasMap = .{},
     area_column_count_value: u16 = 0,
     area_row_count_value: u16 = 0,
     explicit_column_count: u16 = 0,
     explicit_row_count: u16 = 0,
-    /// The (1-indexed line number, name) pairs of every column line named in the
-    /// track template, in source order (excludes the implicit names generated by
-    /// `grid-template-areas`).
     column_line_name_pairs: std.ArrayListUnmanaged(LineNamePair) = .empty,
-    /// The (1-indexed line number, name) pairs of every row line named in the
-    /// track template, in source order (excludes the implicit names generated by
-    /// `grid-template-areas`).
     row_line_name_pairs: std.ArrayListUnmanaged(LineNamePair) = .empty,
 
-    /// Create and initialise a new `NamedLineResolver` from a style.
+    /// Create and initialise a `NamedLineResolver` from a style.
     pub fn init(backing_allocator: std.mem.Allocator, item_style: *const style.Style, column_auto_repetitions: u16, row_auto_repetitions: u16) !NamedLineResolver {
         var result = NamedLineResolver{ .arena = std.heap.ArenaAllocator.init(backing_allocator) };
-        // `arena` is moved by value; keep using result.arena from here on.
         // Any failure below must release the arena: the caller never receives a
         // partially-initialised resolver to `deinit`.
         errdefer result.arena.deinit();
         const allocator = result.arena.allocator();
 
-        try init_axis(&result, allocator, .horizontal, item_style.grid_template_columns, item_style.grid_template_column_names, column_auto_repetitions);
-        try init_axis(&result, allocator, .vertical, item_style.grid_template_rows, item_style.grid_template_row_names, row_auto_repetitions);
-
-        // The size of the area template may be larger than the extents of the named areas
-        // due to unnamed cells, so it is taken from the style.
+        // The area template may be larger than the named areas' extents due to
+        // unnamed cells, so its size comes from the style.
         result.area_column_count_value = item_style.grid_template_area_column_count();
         result.area_row_count_value = item_style.grid_template_area_row_count();
+        // Areas first: line names ending in -start/-end may extend them.
         if (item_style.grid_template_areas) |areas| {
             for (areas.areas) |area| {
-                try result.areas.put(allocator, area.name, area);
-
-                const col_start = try std.fmt.allocPrint(allocator, "{s}-start", .{area.name});
-                try upsert_line_name_map(&result.column_lines, allocator, col_start, area.column_start);
-
-                const col_end = try std.fmt.allocPrint(allocator, "{s}-end", .{area.name});
-                try upsert_line_name_map(&result.column_lines, allocator, col_end, area.column_end);
-
-                const row_start = try std.fmt.allocPrint(allocator, "{s}-start", .{area.name});
-                try upsert_line_name_map(&result.row_lines, allocator, row_start, area.row_start);
-
-                const row_end = try std.fmt.allocPrint(allocator, "{s}-end", .{area.name});
-                try upsert_line_name_map(&result.row_lines, allocator, row_end, area.row_end);
+                try result.areas.put(allocator, area.name, .{
+                    .row_start = area.row_start,
+                    .row_end = area.row_end,
+                    .column_start = area.column_start,
+                    .column_end = area.column_end,
+                });
             }
         }
 
-        // Sort and dedup lines for each column name
-        try sort_and_dedup_map(&result.column_lines, allocator);
-        try sort_and_dedup_map(&result.row_lines, allocator);
+        try init_axis(&result, allocator, .horizontal, item_style.grid_template_columns, item_style.grid_template_column_names, column_auto_repetitions);
+        try init_axis(&result, allocator, .vertical, item_style.grid_template_rows, item_style.grid_template_row_names, row_auto_repetitions);
 
+        sort_and_dedup_map(&result.column_lines);
+        sort_and_dedup_map(&result.row_lines);
         return result;
     }
 
@@ -123,8 +255,13 @@ pub const NamedLineResolver = struct {
         self.arena.deinit();
     }
 
-    fn axis_maps(self: *NamedLineResolver, axis: geometry.AbsoluteAxis) *std.StringHashMapUnmanaged(LinePositions) {
-        return if (axis == .horizontal) &self.column_lines else &self.row_lines;
+    fn axis_resolver(self: *const NamedLineResolver, axis: geometry.AbsoluteAxis) AxisResolver {
+        return .{
+            .lines = if (axis == .horizontal) &self.column_lines else &self.row_lines,
+            .areas = &self.areas,
+            .axis = axis_of(axis),
+            .explicit_track_count = if (axis == .horizontal) self.explicit_column_count else self.explicit_row_count,
+        };
     }
 
     pub fn resolve_row_names(self: *const NamedLineResolver, value: geometry.Line(grid.GridPlacement)) geometry.Line(grid.GridPlacement) {
@@ -137,57 +274,7 @@ pub const NamedLineResolver = struct {
 
     /// Resolve named lines for both the `start` and `end` of a grid placement.
     pub fn resolve_line_names(self: *const NamedLineResolver, value: geometry.Line(grid.GridPlacement), axis: geometry.AbsoluteAxis) geometry.Line(grid.GridPlacement) {
-        const explicit_track_count = if (axis == .horizontal) self.explicit_column_count else self.explicit_row_count;
-        const lines = if (axis == .horizontal) &self.column_lines else &self.row_lines;
-        const resolver_axis = AxisResolver{
-            .lines = lines,
-            .areas = &self.areas,
-            .axis = axis,
-            .explicit_track_count = explicit_track_count,
-        };
-
-        const start_resolved: grid.GridPlacement = if (value.start == .named_line)
-            .{ .line = resolver_axis.find_line_index(value.start.named_line.name, value.start.named_line.index, .start, .all) }
-        else
-            value.start;
-
-        const end_resolved: grid.GridPlacement = if (value.end == .named_line)
-            .{ .line = resolver_axis.find_line_index(value.end.named_line.name, value.end.named_line.index, .end, .all) }
-        else
-            value.end;
-
-        // If both the *-start and *-end values specify a line, the span is implicit.
-        // If one side is a named span, it is resolved relative to the definite line.
-        if (start_resolved == .line and end_resolved == .named_span) {
-            const start_line = start_resolved.line;
-            const normalized_start_line: u32 = if (start_line > 0)
-                @intCast(@max(start_line, 0))
-            else
-                @intCast(@max(@as(i32, explicit_track_count) + 1 + start_line, 0));
-            const end_line = resolver_axis.find_line_index(
-                end_resolved.named_span.name,
-                @intCast(end_resolved.named_span.count),
-                .end,
-                .{ .after_inclusive = normalized_start_line },
-            );
-            return .{ .start = .{ .line = start_line }, .end = .{ .line = end_line } };
-        }
-        if (start_resolved == .named_span and end_resolved == .line) {
-            const end_line = end_resolved.line;
-            const normalized_end_line: u32 = if (end_line > 0)
-                @intCast(@max(end_line, 0))
-            else
-                @intCast(@max(@as(i32, explicit_track_count) + 1 + end_line, 0));
-            const start_line = resolver_axis.find_line_index(
-                start_resolved.named_span.name,
-                @intCast(start_resolved.named_span.count),
-                .start,
-                .{ .before_exclusive = normalized_end_line },
-            );
-            return .{ .start = .{ .line = start_line }, .end = .{ .line = end_line } };
-        }
-
-        return .{ .start = resolve_non_named(start_resolved), .end = resolve_non_named(end_resolved) };
+        return self.axis_resolver(axis).resolve(value);
     }
 
     pub fn area_column_count(self: *const NamedLineResolver) u16 {
@@ -197,37 +284,35 @@ pub const NamedLineResolver = struct {
         return self.area_row_count_value;
     }
 
-    /// Build the per-line name lists used by `DetailedGridTracksInfo`.
-    /// Returned index `i` is the (i+1)-th grid line, matching the 1-indexed
-    /// `line` recorded for every name pair. Empty when the axis has no names.
-    ///
-    /// Only names given explicitly in the track template are included; the
-    /// implicit `<name>-start`/`<name>-end` names generated by
-    /// `grid-template-areas` are omitted (matching the resolved value of
-    /// `grid-template-rows`/`grid-template-columns` in browsers) but remain
-    /// resolvable for placement via `resolve_line_names`.
-    ///
-    /// Every name is deep-copied into `allocator`, so the result never borrows
-    /// from this resolver's arena (which the caller destroys before reading the
-    /// detailed info) nor from the caller's style storage.
+    /// Per-line name lists for `DetailedGridTracksInfo`: index `i` is the
+    /// (i+1)-th explicit grid line. Only names given explicitly in the track
+    /// template are included (not the implicit area-generated names), each line
+    /// lists a name once, and names are deep-copied into `allocator`.
     pub fn detailed_line_names(self: *const NamedLineResolver, allocator: std.mem.Allocator, axis: geometry.AbsoluteAxis) ![]const []const []const u8 {
         const pairs = if (axis == .horizontal) self.column_line_name_pairs.items else self.row_line_name_pairs.items;
         if (pairs.len == 0) return &.{};
-        var max_line: usize = 0;
-        for (pairs) |pair| max_line = @max(max_line, pair.line);
-        const lines = try allocator.alloc(std.ArrayListUnmanaged([]const u8), max_line + 1);
+        const explicit_track_count = if (axis == .horizontal) self.explicit_column_count else self.explicit_row_count;
+        const line_count: usize = @as(usize, explicit_track_count) + 1;
+        const lines = try allocator.alloc(std.ArrayListUnmanaged([]const u8), line_count);
         errdefer {
             for (lines) |*line| line.deinit(allocator);
             allocator.free(lines);
         }
         for (lines) |*line| line.* = .empty;
-        // Any failure below unwinds the per-line lists; the outer `result` array
-        // is only allocated once every line list has been filled.
         for (pairs) |pair| {
-            const index: usize = if (pair.line > 0) @intCast(pair.line - 1) else 0;
+            if (pair.line == 0 or pair.line > line_count) continue;
+            const line = &lines[pair.line - 1];
+            var duplicate = false;
+            for (line.items) |existing| {
+                if (std.mem.eql(u8, existing, pair.name)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
             const owned = try allocator.dupe(u8, pair.name);
             errdefer allocator.free(owned);
-            try lines[index].append(allocator, owned);
+            try line.append(allocator, owned);
         }
         const result = try allocator.alloc([]const []const u8, lines.len);
         for (lines, 0..) |line, index| result[index] = line.items;
@@ -241,12 +326,9 @@ pub const NamedLineResolver = struct {
         self.explicit_row_count = count;
     }
 
-    /// Copy this resolver's line-name maps into `allocator` and return a
-    /// self-contained index.
-    ///
-    /// `DetailedGridInfo` outlives the layout pass that produced it, so it
-    /// cannot borrow the resolver's pass-scoped arena. The copy owns its
-    /// storage, and every key is deep-copied so the index borrows nothing.
+    /// Copy the line-name and area maps into `allocator` as a self-contained
+    /// index. `DetailedGridInfo` outlives the pass's arena, so it cannot borrow
+    /// it; every key is deep-copied.
     pub fn toOwnedIndex(self: *const NamedLineResolver, allocator: std.mem.Allocator) !OwnedLineIndex {
         var result = OwnedLineIndex{
             .allocator = allocator,
@@ -254,220 +336,106 @@ pub const NamedLineResolver = struct {
             .explicit_row_count = self.explicit_row_count,
         };
         errdefer result.deinit();
-        try cloneLineNameMap(&self.row_lines, allocator, &result.row_lines);
-        try cloneLineNameMap(&self.column_lines, allocator, &result.column_lines);
+        try cloneLineNameMap(&self.row_lines, allocator, &result.row_lines, &result.owned_keys);
+        try cloneLineNameMap(&self.column_lines, allocator, &result.column_lines, &result.owned_keys);
+        try result.areas.ensureTotalCapacity(allocator, self.areas.count());
+        var it = self.areas.iterator();
+        while (it.next()) |entry| {
+            const key = try allocator.dupe(u8, entry.key_ptr.*);
+            errdefer allocator.free(key);
+            try result.owned_keys.append(allocator, key);
+            result.areas.putAssumeCapacity(key, entry.value_ptr.*);
+        }
         return result;
     }
 };
 
-/// A self-contained copy of a `NamedLineResolver`'s line-name maps.
-///
-/// Used by `DetailedGridInfo` to resolve named grid placements for out-of-flow
-/// boxes after the layout pass (and its scratch arena) is gone. Owns all of its
-/// storage, including deep copies of the name keys.
+/// Deep-copy one axis's line-name map. Copied keys are recorded in `owned_keys`
+/// (freed by `OwnedLineIndex.deinit`).
+fn cloneLineNameMap(source: *const LineNameMap, allocator: std.mem.Allocator, target: *LineNameMap, owned_keys: *std.ArrayListUnmanaged([]const u8)) !void {
+    try target.ensureTotalCapacity(allocator, source.count());
+    var it = source.iterator();
+    while (it.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        {
+            errdefer allocator.free(key);
+            try owned_keys.append(allocator, key);
+        }
+        // From here `key` is owned by `owned_keys` (freed by OwnedLineIndex.deinit).
+        var positions: LinePositions = .empty;
+        errdefer positions.deinit(allocator);
+        try positions.appendSlice(allocator, entry.value_ptr.items);
+        target.putAssumeCapacity(key, positions);
+    }
+}
+
+/// A self-contained copy of a `NamedLineResolver`'s maps, used by
+/// `DetailedGridInfo` to resolve named placements of out-of-flow boxes after
+/// the layout pass (and its arena) is gone. Owns all of its storage.
 pub const OwnedLineIndex = struct {
     allocator: std.mem.Allocator,
     row_lines: LineNameMap = .{},
     column_lines: LineNameMap = .{},
+    areas: GridAreasMap = .{},
+    owned_keys: std.ArrayListUnmanaged([]const u8) = .empty,
     explicit_column_count: u16 = 0,
     explicit_row_count: u16 = 0,
-
-    const LineNameMap = std.StringHashMapUnmanaged(LinePositions);
 
     pub fn deinit(self: *OwnedLineIndex) void {
         freeLineNameMap(&self.row_lines, self.allocator);
         freeLineNameMap(&self.column_lines, self.allocator);
-    }
-
-    fn maps(self: *const OwnedLineIndex, axis: geometry.AbsoluteAxis) *const LineNameMap {
-        return if (axis == .horizontal) &self.column_lines else &self.row_lines;
-    }
-
-    fn explicitCount(self: *const OwnedLineIndex, axis: geometry.AbsoluteAxis) u16 {
-        return if (axis == .horizontal) self.explicit_column_count else self.explicit_row_count;
+        self.areas.deinit(self.allocator);
+        for (self.owned_keys.items) |key| self.allocator.free(key);
+        self.owned_keys.deinit(self.allocator);
     }
 
     /// Resolve both ends of a placement against this axis's line names.
     pub fn resolve_line_names(self: *const OwnedLineIndex, value: geometry.Line(grid.GridPlacement), axis: geometry.AbsoluteAxis) geometry.Line(grid.GridPlacement) {
-        const explicit_track_count = self.explicitCount(axis);
-        const resolver = OwnedAxisResolver{
-            .lines = self.maps(axis),
-            .explicit_track_count = explicit_track_count,
+        const resolver = AxisResolver{
+            .lines = if (axis == .horizontal) &self.column_lines else &self.row_lines,
+            .areas = &self.areas,
+            .axis = axis_of(axis),
+            .explicit_track_count = if (axis == .horizontal) self.explicit_column_count else self.explicit_row_count,
         };
-
-        const start_resolved: grid.GridPlacement = if (value.start == .named_line)
-            .{ .line = resolver.find_line_index(value.start.named_line.name, value.start.named_line.index, .start, .all) }
-        else
-            value.start;
-        const end_resolved: grid.GridPlacement = if (value.end == .named_line)
-            .{ .line = resolver.find_line_index(value.end.named_line.name, value.end.named_line.index, .end, .all) }
-        else
-            value.end;
-
-        if (start_resolved == .line and end_resolved == .named_span) {
-            const start_line = start_resolved.line;
-            const normalized_start_line: u32 = if (start_line > 0)
-                @intCast(@max(start_line, 0))
-            else
-                @intCast(@max(@as(i32, explicit_track_count) + 1 + start_line, 0));
-            const end_line = resolver.find_line_index(
-                end_resolved.named_span.name,
-                @intCast(end_resolved.named_span.count),
-                .end,
-                .{ .after_inclusive = normalized_start_line },
-            );
-            return .{ .start = .{ .line = start_line }, .end = .{ .line = end_line } };
-        }
-        if (start_resolved == .named_span and end_resolved == .line) {
-            const end_line = end_resolved.line;
-            const normalized_end_line: u32 = if (end_line > 0)
-                @intCast(@max(end_line, 0))
-            else
-                @intCast(@max(@as(i32, explicit_track_count) + 1 + end_line, 0));
-            const start_line = resolver.find_line_index(
-                start_resolved.named_span.name,
-                @intCast(start_resolved.named_span.count),
-                .start,
-                .{ .before_exclusive = normalized_end_line },
-            );
-            return .{ .start = .{ .line = start_line }, .end = .{ .line = end_line } };
-        }
-
-        return .{ .start = resolve_non_named(start_resolved), .end = resolve_non_named(end_resolved) };
+        return resolver.resolve(value);
     }
 };
 
-const OwnedAxisResolver = struct {
-    lines: *const OwnedLineIndex.LineNameMap,
-    explicit_track_count: u16,
-
-    fn find_line_index(self: OwnedAxisResolver, name: []const u8, idx_raw: i16, _: GridAreaEnd, filter: LineFilter) i16 {
-        var idx: i32 = idx_raw;
-        const explicit_track_count: i32 = self.explicit_track_count;
-
-        // An index of 0 is used to represent "no index specified".
-        if (idx == 0) idx = 1;
-
-        if (self.lines.get(name)) |lines| {
-            return get_line(apply_filter(filter, lines.items), explicit_track_count, idx);
-        }
-
-        // The CSS Grid specification matches non-existent line names to the first
-        // (positive) implicit line in the grid.
-        const line: i64 = if (idx > 0)
-            @as(i64, explicit_track_count) + 1 + idx
-        else
-            -(@as(i64, explicit_track_count) + 1 + idx);
-        return clamp_i16(line);
+/// Record a named line; a name of the form `<area>-start`/`<area>-end` is also an
+/// edge of the (implicitly) named area `<area>` and is recorded there if it is
+/// the first such line. If `<area>` came from `grid-template-areas`, the line it
+/// generated also carries this name.
+fn upsert_line_name_map(map: *LineNameMap, areas: *GridAreasMap, allocator: std.mem.Allocator, axis: GridAreaAxis, key: []const u8, value: u32) !void {
+    var area_line: u32 = 0;
+    if (split_area_edge_name(key)) |split| {
+        const area = try areas.getOrPut(allocator, split.area);
+        if (!area.found_existing) area.value_ptr.* = .{};
+        const edge = area.value_ptr.line_ptr(axis, split.end);
+        area_line = edge.*;
+        edge.* = if (edge.* == 0) value else @min(edge.*, value);
     }
-};
-
-fn resolve_non_named(value: grid.GridPlacement) grid.GridPlacement {
-    return switch (value) {
-        .auto => .auto,
-        .line => |line| .{ .line = line },
-        .span => |span| .{ .span = span },
-        .named_span => .{ .span = 1 },
-        .named_line => |named| .{ .line = named.index },
-    };
-}
-
-const AxisResolver = struct {
-    lines: *const std.StringHashMapUnmanaged(LinePositions),
-    areas: *const std.StringHashMapUnmanaged(grid.GridTemplateArea),
-    axis: geometry.AbsoluteAxis,
-    explicit_track_count: u16,
-
-    fn find_line_index(self: AxisResolver, name: []const u8, idx_raw: i16, end: GridAreaEnd, filter: LineFilter) i16 {
-        var idx: i32 = idx_raw;
-        const explicit_track_count: i32 = self.explicit_track_count;
-
-        // An index of 0 is used to represent "no index specified".
-        if (idx == 0) idx = 1;
-
-        if (self.lines.get(name)) |lines| {
-            return get_line(apply_filter(filter, lines.items), explicit_track_count, idx);
-        }
-
-        // Implicit names generated by `grid-template-areas`: resolve the bare area
-        // name directly to the area's own start/end line. Looking the area up
-        // avoids synthesising `<name>-start`/`<name>-end` strings, so arbitrarily
-        // long identifiers all take the same resolution path.
-        if (self.areas.get(name)) |area| {
-            const line: u32 = switch (self.axis) {
-                .horizontal => if (end == .start) area.column_start else area.column_end,
-                .vertical => if (end == .start) area.row_start else area.row_end,
-            };
-            return get_line(apply_filter(filter, &.{line}), explicit_track_count, idx);
-        }
-
-        // The CSS Grid specification matches non-existent line names to the first
-        // (positive) implicit line in the grid.
-        const line: i64 = if (idx > 0)
-            @as(i64, explicit_track_count) + 1 + idx
-        else
-            -(@as(i64, explicit_track_count) + 1 + idx);
-        return clamp_i16(line);
-    }
-};
-
-fn apply_filter(filter: LineFilter, lines: []const u32) []const u32 {
-    return switch (filter) {
-        .all => lines,
-        .after_inclusive => |point| lines[partition_point_le(lines, point)..],
-        .before_exclusive => |point| lines[0..partition_point_lt(lines, point)],
-    };
-}
-
-fn partition_point_le(lines: []const u32, point: u32) usize {
-    var index: usize = 0;
-    while (index < lines.len and lines[index] <= point) : (index += 1) {}
-    return index;
-}
-
-fn partition_point_lt(lines: []const u32, point: u32) usize {
-    var index: usize = 0;
-    while (index < lines.len and lines[index] < point) : (index += 1) {}
-    return index;
-}
-
-fn get_line(lines: []const u32, explicit_track_count: i32, idx: i32) i16 {
-    const abs_idx: usize = @intCast(@abs(idx));
-    const line: i64 = if (abs_idx <= lines.len)
-        (if (idx > 0) @as(i64, lines[abs_idx - 1]) else @as(i64, lines[lines.len - abs_idx]))
-    else blk: {
-        const remaining_lines: i64 = @as(i64, @intCast(abs_idx - lines.len)) * (if (idx > 0) @as(i64, 1) else @as(i64, -1));
-        break :blk if (idx > 0)
-            @as(i64, explicit_track_count) + 1 + remaining_lines
-        else
-            -(@as(i64, explicit_track_count) + 1 + remaining_lines);
-    };
-    return clamp_i16(line);
-}
-
-fn clamp_i16(value: i64) i16 {
-    return @intCast(@max(@as(i64, std.math.minInt(i16)), @min(@as(i64, std.math.maxInt(i16)), value)));
-}
-
-fn upsert_line_name_map(map: *std.StringHashMapUnmanaged(LinePositions), allocator: std.mem.Allocator, key: []const u8, value: u32) !void {
     const entry = try map.getOrPut(allocator, key);
-    if (!entry.found_existing) entry.value_ptr.* = .empty;
-    try entry.value_ptr.append(allocator, value);
+    if (entry.found_existing) {
+        try entry.value_ptr.append(allocator, value);
+    } else {
+        // Until this entry exists, the only line recorded for this edge is the area's own
+        entry.value_ptr.* = .empty;
+        if (area_line != 0) try entry.value_ptr.append(allocator, area_line);
+        try entry.value_ptr.append(allocator, value);
+    }
 }
 
-fn sort_and_dedup_map(map: *std.StringHashMapUnmanaged(LinePositions), allocator: std.mem.Allocator) !void {
-    _ = allocator;
+fn sort_and_dedup_map(map: *LineNameMap) void {
     var iter = map.iterator();
     while (iter.next()) |entry| {
         const items = entry.value_ptr.items;
         std.mem.sort(u32, items, {}, std.sort.asc(u32));
         var write: usize = 0;
-        for (items, 0..) |value, read| {
+        for (items) |value| {
             if (write == 0 or items[write - 1] != value) {
                 items[write] = value;
                 write += 1;
             }
-            _ = read;
         }
         entry.value_ptr.shrinkRetainingCapacity(write);
     }
@@ -481,26 +449,29 @@ fn init_axis(
     line_names: []const grid.GridTemplateLineNames,
     auto_repetitions: u16,
 ) !void {
-    const lines = result.axis_maps(axis);
+    const lines = if (axis == .horizontal) &result.column_lines else &result.row_lines;
     const pairs = if (axis == .horizontal) &result.column_line_name_pairs else &result.row_line_name_pairs;
+    const area_axis = axis_of(axis);
 
     var current_line: u32 = 0;
     for (line_names, 0..) |names, line_index| {
         current_line += 1;
         for (names) |name| {
             try pairs.append(allocator, .{ .line = current_line, .name = name });
-            try upsert_line_name_map(lines, allocator, name, current_line);
+            try upsert_line_name_map(lines, &result.areas, allocator, area_axis, name, current_line);
         }
 
         if (line_index < components.len) {
-            const component = components[line_index];
-            switch (component) {
+            switch (components[line_index]) {
                 .single => {},
                 .repeat => |repeat| {
                     const repeat_count: u32 = switch (repeat.count) {
                         .count => |count| count,
                         .auto_fit, .auto_fill => auto_repetitions,
                     };
+                    // Line name sets are positional: set `i` names the `i`th line of
+                    // each repetition, and the last set collapses with the first of
+                    // the next. Either no sets or exactly track_count + 1.
                     const lines_per_repetition: u32 = repeat.track_count();
                     const line_name_set_count: u32 = @intCast(repeat.line_names.len);
                     std.debug.assert(line_name_set_count == 0 or line_name_set_count == lines_per_repetition + 1);
@@ -510,7 +481,7 @@ fn init_axis(
                             const line = current_line + @as(u32, @intCast(set_index));
                             for (line_name_set) |name| {
                                 try pairs.append(allocator, .{ .line = line, .name = name });
-                                try upsert_line_name_map(lines, allocator, name, line);
+                                try upsert_line_name_map(lines, &result.areas, allocator, area_axis, name, line);
                             }
                         }
                         current_line += lines_per_repetition;
@@ -553,7 +524,30 @@ test "missing named lines fall back to implicit grid lines" {
     var resolver = try NamedLineResolver.init(testing.allocator, &.{}, 0, 0);
     defer resolver.deinit();
     resolver.set_explicit_column_count(10_000);
-    const resolved = resolver.resolve_column_names(.{ .start = .{ .named_line = .{ .name = "missing", .index = std.math.maxInt(i16) } }, .end = .auto });
-    try testing.expect(resolved.start == .line);
-    try testing.expectEqual(@as(i16, std.math.maxInt(i16)), resolved.start.line);
+    // Lines are clamped to the grid limits, as GridLine.into_origin_zero_line does (Taffy 6ba5515)
+    const high = resolver.resolve_column_names(.{ .start = .{ .named_line = .{ .name = "missing", .index = std.math.maxInt(i16) } }, .end = .auto });
+    try testing.expectEqual((OriginZeroLine{ .value = coordinates.MAX_OZ_LINE }).into_grid_line(10_000).value, high.start.line);
+    const low = resolver.resolve_column_names(.{ .start = .{ .named_line = .{ .name = "missing", .index = std.math.minInt(i16) } }, .end = .auto });
+    try testing.expectEqual((OriginZeroLine{ .value = coordinates.MIN_OZ_LINE }).into_grid_line(10_000).value, low.start.line);
+}
+
+test "toOwnedIndex frees correctly when any allocation fails" {
+    const testing = std.testing;
+    const cols = [_]grid.GridTemplateComponent{
+        .{ .single = grid.TrackSizingFunction.from_length(10) },
+        .{ .single = grid.TrackSizingFunction.from_length(10) },
+    };
+    const names = [_]grid.GridTemplateLineNames{ &[_][]const u8{ "a", "x-start" }, &.{}, &[_][]const u8{"b"} };
+    var item_style = style.Style{ .display = .grid, .grid_template_columns = &cols, .grid_template_column_names = &names };
+    var resolver = try NamedLineResolver.init(testing.allocator, &item_style, 0, 0);
+    defer resolver.deinit();
+    var fail_index: usize = 0;
+    while (fail_index < 64) : (fail_index += 1) {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        if (resolver.toOwnedIndex(failing.allocator())) |index_value| {
+            var index = index_value;
+            index.deinit();
+            break;
+        } else |err| try testing.expectEqual(error.OutOfMemory, err);
+    }
 }

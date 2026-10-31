@@ -152,12 +152,12 @@ pub fn compute_alignment_gutter_adjustment(comptime Tree: type, alignment: Align
     // calculations by treating Start and End the same.
     const outer_gutter_weight: u32 = switch (alignment.keyword) {
         .start, .flex_start, .end, .flex_end, .center => 1,
-        .stretch, .space_between => 0,
+        .normal, .stretch, .space_between => 0,
         .space_around, .space_evenly => 1,
     };
 
     const inner_gutter_weight: u32 = switch (alignment.keyword) {
-        .flex_start, .start, .flex_end, .end, .center, .stretch => 0,
+        .flex_start, .start, .flex_end, .end, .center, .normal, .stretch => 0,
         .space_between => 1,
         .space_around => 2,
         .space_evenly => 1,
@@ -232,15 +232,11 @@ pub fn track_sizing_algorithm(comptime Tree: type, tree_ref: *Tree,
     items: []GridItem,
     get_track_size_estimate: TrackSizeEstimateFn(Tree),
     has_baseline_aligned_item: bool,
+    sort_scratch: *SortScratch,
 ) void {
-    const TreeApi = LayoutTree(Tree);
-
     // 11.4 Initialise Track sizes
     const percentage_basis = inner_node_size.get(axis) orelse axis_min_size;
     initialize_track_sizes(axis_tracks, percentage_basis);
-
-    // One scratch allocation pair for the item sorts in this pass.
-    const sort_scratch = SortScratch.init(TreeApi.scratch_allocator(tree_ref), items.len);
 
     // 11.5.1 Shim item baselines
     if (has_baseline_aligned_item) {
@@ -296,7 +292,8 @@ pub fn track_sizing_algorithm(comptime Tree: type, tree_ref: *Tree,
     const axis_available_space_for_expansion: AvailableSpace = if (inner_node_size.get(axis)) |available_space|
         .{ .definite = available_space }
     else switch (available_grid_space.get(axis)) {
-        .min_content => .min_content,
+        // Flexible rows still expand under a block-axis min-content constraint (Taffy e2fbe56)
+        .min_content => if (axis == .inline_axis) .min_content else .max_content,
         .max_content, .definite => .max_content,
     };
 
@@ -370,9 +367,7 @@ fn itemKey(comptime kind: SortKind, axis: AbstractAxis, item: GridItem) u64 {
             // Items that do not cross a flexible track sort first, so the flag
             // occupies the high bit.
             const flex: u64 = if (item.crosses_flexible_track(axis)) 1 else 0;
-            break :blk (flex << 48) |
-                (@as(u64, span) << 16) |
-                @as(u64, @as(u16, @bitCast(placement.start.value)));
+            break :blk (flex << 48) | @as(u64, span);
         },
     };
 }
@@ -403,29 +398,46 @@ fn lessThanEntry(_: void, a: ItemSortEntry, b: ItemSortEntry) bool {
     return a.index < b.index;
 }
 
-/// Reusable scratch for the item sorts, sized once per `track_sizing_algorithm`
-/// call and shared by both sorts in that call. The layout arena does not
-/// reclaim on free, so allocating per sort call would grow the arena once per
-/// call rather than once per pass.
-const SortScratch = struct {
-    entries: []ItemSortEntry,
-    reordered: []GridItem,
+/// Reusable scratch for the item sorts. One instance serves every
+/// `track_sizing_algorithm` run of a grid layout, and it is only allocated the
+/// first time a sort actually reorders items: since items are partitioned
+/// rather than sorted (Taffy 2c81b8e) most grids never need it. (Allocating it
+/// per run cost two n-item buffers per run, which the layout arena could not
+/// reclaim until the end of the pass.)
+pub const SortScratch = struct {
+    allocator: std.mem.Allocator,
+    entries: []ItemSortEntry = &.{},
+    reordered: []GridItem = &.{},
 
-    fn init(allocator: std.mem.Allocator, n: usize) SortScratch {
-        return .{
-            .entries = allocator.alloc(ItemSortEntry, n) catch &.{},
-            .reordered = allocator.alloc(GridItem, n) catch &.{},
-        };
+    pub fn init(allocator: std.mem.Allocator) SortScratch {
+        return .{ .allocator = allocator };
     }
 
-    fn fits(self: SortScratch, n: usize) bool {
-        return self.entries.len >= n and self.reordered.len >= n;
+    pub fn deinit(self: *SortScratch) void {
+        // Reverse allocation order lets the layout arena reclaim both buffers.
+        self.allocator.free(self.reordered);
+        self.allocator.free(self.entries);
+        self.* = .{ .allocator = self.allocator };
+    }
+
+    /// Make room for `n` items; false if allocation failed (callers fall back
+    /// to an allocation-free sort).
+    fn ensure(self: *SortScratch, n: usize) bool {
+        if (self.entries.len >= n and self.reordered.len >= n) return true;
+        self.deinit();
+        self.entries = self.allocator.alloc(ItemSortEntry, n) catch return false;
+        self.reordered = self.allocator.alloc(GridItem, n) catch {
+            self.allocator.free(self.entries);
+            self.entries = &.{};
+            return false;
+        };
+        return true;
     }
 };
 
-fn sortItemsByKey(items: []GridItem, scratch: SortScratch, axis: AbstractAxis, comptime kind: SortKind) void {
+fn sortItemsByKey(items: []GridItem, scratch: *SortScratch, axis: AbstractAxis, comptime kind: SortKind) void {
     if (items.len < 2) return;
-    if (!scratch.fits(items.len)) {
+    if (!scratch.ensure(items.len)) {
         // No scratch available: the direct sort needs none, so use it.
         std.mem.sort(GridItem, items, axis, switch (kind) {
             .other_axis_start => lessThanByOtherAxisStart,
@@ -442,11 +454,27 @@ fn sortItemsByKey(items: []GridItem, scratch: SortScratch, axis: AbstractAxis, c
     @memcpy(items, reordered);
 }
 
-fn sortItemsByOtherAxisStart(items: []GridItem, axis: AbstractAxis, scratch: SortScratch) void {
+fn sortItemsByOtherAxisStart(items: []GridItem, axis: AbstractAxis, scratch: *SortScratch) void {
     sortItemsByKey(items, scratch, axis, .other_axis_start);
 }
 
-fn sortItemsByCrossFlexSpanStart(items: []GridItem, axis: AbstractAxis, scratch: SortScratch) void {
+/// Order items for intrinsic track sizing: items that cross a flexible track
+/// form one batch at the end; the rest only need ordering by span if any of
+/// them spans more than one track (Taffy 2c81b8e: order within a batch does not
+/// affect the result). The common all-span-1, no-flex grid is left untouched.
+fn sortItemsByCrossFlexSpanStart(items: []GridItem, axis: AbstractAxis, scratch: *SortScratch) void {
+    var needs_sort = false;
+    var seen_flex = false;
+    var flex_out_of_place = false;
+    for (items) |item| {
+        if (item.crosses_flexible_track(axis)) {
+            seen_flex = true;
+        } else {
+            if (seen_flex) flex_out_of_place = true;
+            if (coordinates.line_origin_zero_span(item.placement(axis)) > 1) needs_sort = true;
+        }
+    }
+    if (!needs_sort and !flex_out_of_place) return;
     sortItemsByKey(items, scratch, axis, .cross_flex_span_start);
 }
 
@@ -468,7 +496,7 @@ inline fn initialize_track_sizes(axis_tracks: []GridTrack, axis_inner_node_size:
 
 /// 11.5.1 Shim baseline-aligned items so their intrinsic size contributions
 /// reflect their baseline alignment.
-fn resolve_item_baselines(comptime Tree: type, tree_ref: *Tree, axis: AbstractAxis, items: []GridItem, inner_node_size: geometry.Size(?f32), sort_scratch: SortScratch) void {
+fn resolve_item_baselines(comptime Tree: type, tree_ref: *Tree, axis: AbstractAxis, items: []GridItem, inner_node_size: geometry.Size(?f32), sort_scratch: *SortScratch) void {
     const TreeApi = LayoutTree(Tree);
     // Sort items by track in the other axis start position so that we can iterate
     // items in groups which are in the same track in the other axis.
@@ -515,21 +543,30 @@ fn resolve_item_baselines(comptime Tree: type, tree_ref: *Tree, axis: AbstractAx
             else
                 baseline orelse height;
 
-            const top_margin = if (inner_node_size.width) |basis| (item.margin.top.resolve(basis) orelse 0) else 0;
-            item.baseline = adjusted_baseline + top_margin;
+            // The baseline is measured from the border box (Taffy e77a7a8)
+            item.baseline = adjusted_baseline;
         }
+
+        // Items are aligned by the distance from the top of their margin box to their baseline
+        const margin_box_baseline = struct {
+            fn call(baseline_item: GridItem, width_basis: ?f32) f32 {
+                const top_margin = if (width_basis) |basis| (baseline_item.margin.top.resolve(basis) orelse 0) else 0;
+                return (baseline_item.baseline orelse 0) + top_margin;
+            }
+        }.call;
 
         // Compute the max baseline of all items in the row participating in baseline alignment
         var row_max_baseline: f32 = 0;
         for (row_items) |item| {
             if (!item.participates_in_baseline_alignment()) continue;
-            row_max_baseline = @max(row_max_baseline, item.baseline orelse 0);
+            row_max_baseline = @max(row_max_baseline, margin_box_baseline(item, inner_node_size.width));
         }
 
         // Compute the baseline shim for each item in the row participating in baseline alignment
         for (row_items) |*item| {
             if (item.participates_in_baseline_alignment()) {
-                item.baseline_shim = row_max_baseline - (item.baseline orelse 0);
+                item.baseline_shim = row_max_baseline - margin_box_baseline(item.*, inner_node_size.width);
+                item.known_dimensions_cache = null;
             }
         }
 
@@ -550,7 +587,7 @@ fn resolve_intrinsic_track_sizes(comptime Tree: type, tree_ref: *Tree,
     axis_available_grid_space: AvailableSpace,
     inner_node_size: geometry.Size(?f32),
     get_track_size_estimate: TrackSizeEstimateFn(Tree),
-    sort_scratch: SortScratch,
+    sort_scratch: *SortScratch,
 ) void {
 
     // Step 1 shim baseline-aligned items already done in `resolve_item_baselines`.
@@ -581,67 +618,65 @@ fn resolve_intrinsic_track_sizes(comptime Tree: type, tree_ref: *Tree,
                 const track = &axis_tracks[track_index];
 
                 // Handle base sizes
-                const new_base_size: f32 = switch (track.min_track_sizing_function.value.tag()) {
-                    .min_content => math.f32_max(track.base_size, item_sizer.minContentContribution(item, axis_tracks)),
-                    // If the container size is indefinite then percentage sized tracks
-                    // should be treated as min-content.
-                    .percent => if (axis_inner_node_size == null)
-                        math.f32_max(track.base_size, item_sizer.minContentContribution(item, axis_tracks))
-                    else
-                        track.base_size,
-                    .max_content => math.f32_max(track.base_size, item_sizer.maxContentContribution(item, axis_tracks)),
-                    .auto => blk: {
-                        const space = switch (axis_available_grid_space) {
-                            // QUIRK: only apply the limited min-content contribution rule
-                            // if the item is not a scroll container.
-                            .min_content, .max_content => if (!item.overflow.get(axis).is_scroll_container()) blk2: {
-                                const axis_minimum_size = item_sizer.minimumContribution(item, axis_tracks);
-                                const axis_min_content_size = item_sizer.minContentContribution(item, axis_tracks);
-                                const limit = track.max_track_sizing_function.definite_limit(axis_inner_node_size);
-                                break :blk2 math.f32_max(math.f32_maybe_min(axis_min_content_size, limit), axis_minimum_size);
-                            } else item_sizer.minimumContribution(item, axis_tracks),
-                            .definite => item_sizer.minimumContribution(item, axis_tracks),
-                        };
-                        break :blk math.f32_max(track.base_size, space);
-                    },
-                    .length => track.base_size,
-                    // Handle calc() like percentage
-                    .calc => if (axis_inner_node_size == null)
-                        math.f32_max(track.base_size, item_sizer.minContentContribution(item, axis_tracks))
-                    else
-                        track.base_size,
-                    else => track.base_size,
-                };
-                const growth_limit_min_content_contribution: ?f32 = if (!item.overflow.get(axis).is_scroll_container())
+                const new_base_size: f32 = if (track.min_track_sizing_function.value.is_min_content())
+                    math.f32_max(track.base_size, item_sizer.minContentContribution(item, axis_tracks))
+                else if (track.min_track_sizing_function.value.is_max_content())
+                    math.f32_max(track.base_size, item_sizer.maxContentContribution(item, axis_tracks))
+                // If the container size is indefinite and has not yet been resolved then
+                // percentage sized tracks are treated as auto (Taffy 8409f3f).
+                else if (track.min_track_sizing_function.behaves_as_auto(axis_inner_node_size)) blk: {
+                    const space = switch (axis_available_grid_space) {
+                        // QUIRK: only apply the limited min-content contribution rule
+                        // if the item is not a scroll container.
+                        .min_content, .max_content => if (!item.overflow.get(axis).is_scroll_container()) blk2: {
+                            const axis_minimum_size = item_sizer.minimumContribution(item, axis_tracks);
+                            const axis_min_content_size = item_sizer.minContentContribution(item, axis_tracks);
+                            const limit = track.max_track_sizing_function.definite_limit(axis_inner_node_size);
+                            break :blk2 math.f32_max(math.f32_maybe_min(axis_min_content_size, limit), axis_minimum_size);
+                        } else item_sizer.minimumContribution(item, axis_tracks),
+                        .definite => item_sizer.minimumContribution(item, axis_tracks),
+                    };
+                    break :blk math.f32_max(track.base_size, space);
+                }
+                // Not an intrinsic track sizing function
+                else track.base_size;
+                axis_tracks[track_index].base_size = new_base_size;
+
+                // Handle growth limits
+                //
+                // Contributions call into the child, so they are only computed when
+                // used. The min-content contribution is computed for every item in an
+                // intrinsic track (even where only the max-content contribution sets
+                // the growth limit): the re-run check compares each such item's
+                // min-content contribution against the one cached here.
+                const track_now = &axis_tracks[track_index];
+                const max_track_sizing_function = track_now.max_track_sizing_function;
+                const fit_content_limit = track_now.fit_content_limit(axis_inner_node_size);
+                const min_content_contribution: ?f32 = if (track_now.has_intrinsic_sizing_function())
                     item_sizer.minContentContribution(item, axis_tracks)
                 else
                     null;
-                const growth_limit_max_content_contribution = item_sizer.maxContentContribution(item, axis_tracks);
-                const growth_limit_intrinsic_min_content_contribution = item_sizer.minContentContribution(item, axis_tracks);
-                const track_mut = &axis_tracks[track_index];
-                track_mut.base_size = new_base_size;
-
-                // Handle growth limits
-                if (track_mut.max_track_sizing_function.is_fit_content()) {
-                    // If item is not a scroll container, then increase the growth limit to
-                    // at least the size of the min-content contribution
-                    if (growth_limit_min_content_contribution) |min_content_contribution| {
-                        track_mut.growth_limit_planned_increase = math.f32_max(track_mut.growth_limit_planned_increase, min_content_contribution);
+                const planned_increase: ?f32 = if (max_track_sizing_function.is_fit_content()) pi: {
+                    // Always grow to at least the *fit-content limited* max-content contribution
+                    const max_content_contribution = math.f32_min(item_sizer.maxContentContribution(item, axis_tracks), fit_content_limit);
+                    // ...and, if the item is not a scroll container, its min-content contribution
+                    if (min_content_contribution) |min_c| {
+                        if (!item.overflow.get(axis).is_scroll_container())
+                            break :pi math.f32_max(min_c, max_content_contribution);
                     }
-
-                    // Always increase the growth limit to at least the size of the
-                    // *fit-content limited* max-content contribution
-                    const fit_content_limit = track_mut.fit_content_limit(axis_inner_node_size);
-                    const max_content_contribution = math.f32_min(growth_limit_max_content_contribution, fit_content_limit);
-                    track_mut.growth_limit_planned_increase = math.f32_max(track_mut.growth_limit_planned_increase, max_content_contribution);
-                } else if (track_mut.max_track_sizing_function.is_max_content_alike() or
-                    (track_mut.max_track_sizing_function.uses_percentage() and axis_inner_node_size == null))
-                {
+                    break :pi max_content_contribution;
+                } else if (max_track_sizing_function.is_max_content_alike() or
+                    (max_track_sizing_function.uses_percentage() and axis_inner_node_size == null))
                     // If the container size is indefinite then percentage sized tracks
                     // should be treated as auto.
-                    track_mut.growth_limit_planned_increase = math.f32_max(track_mut.growth_limit_planned_increase, growth_limit_max_content_contribution);
-                } else if (track_mut.max_track_sizing_function.is_intrinsic()) {
-                    track_mut.growth_limit_planned_increase = math.f32_max(track_mut.growth_limit_planned_increase, growth_limit_intrinsic_min_content_contribution);
+                    item_sizer.maxContentContribution(item, axis_tracks)
+                else if (max_track_sizing_function.is_intrinsic())
+                    min_content_contribution
+                else
+                    null;
+                if (planned_increase) |increase| {
+                    const track_mut = &axis_tracks[track_index];
+                    track_mut.growth_limit_planned_increase = math.f32_max(track_mut.growth_limit_planned_increase, increase);
                 }
             }
 
@@ -895,6 +930,10 @@ fn prop_base(track: GridTrack, inner: ?f32) f32 {
     _ = inner;
     return track.base_size;
 }
+fn pred_growth_limit_growable(track: GridTrack, _: ?f32) bool {
+    return track.infinitely_growable or track.growth_limit == std.math.inf(f32);
+}
+
 fn prop_base_or_growth(track: GridTrack, inner: ?f32) f32 {
     _ = inner;
     return if (track.growth_limit == std.math.inf(f32)) track.base_size else track.growth_limit;
@@ -1020,28 +1059,17 @@ fn distribute_item_space_to_growth_limit(
     }
     const extra_space = math.f32_max(0, space - track_sizes);
 
-    // 2. Distribute space up to limits. For growth limits the limit is either Infinity
-    // or the growth limit itself.
-    var number_of_growable_tracks: usize = 0;
-    for (tracks) |track| {
-        if (track_is_affected(track, axis_inner_node_size) and
-            (track.infinitely_growable or track.fit_content_limited_growth_limit(axis_inner_node_size) == std.math.inf(f32)))
-        {
-            number_of_growable_tracks += 1;
-        }
-    }
-    if (number_of_growable_tracks > 0) {
-        const item_incurred_increase = extra_space / @as(f32, @floatFromInt(number_of_growable_tracks));
-        for (tracks) |*track| {
-            if (track_is_affected(track.*, axis_inner_node_size) and
-                (track.infinitely_growable or track.fit_content_limited_growth_limit(axis_inner_node_size) == std.math.inf(f32)))
-            {
-                track.item_incurred_increase = item_incurred_increase;
-            }
-        }
-    } else {
-        // 3. Distribute space beyond limits
-        _ = distribute_space_up_to_limits(extra_space, tracks, false, track_is_affected, null, prop_one, prop_base_or_growth, limit_fit_content, axis_inner_node_size);
+    // 2. Distribute space up to limits. For growth limits the limit is the growth
+    // limit itself unless the track is infinitely growable (or its growth limit is
+    // still infinite), in which case it is the track's fit-content() argument if it
+    // has one, or infinity. Tracks that aren't growable have an affected size equal
+    // to their limit, so they receive nothing in this step.
+    const remaining = distribute_space_up_to_limits(extra_space, tracks, false, track_is_affected, pred_growth_limit_growable, prop_one, prop_base_or_growth, limit_fit_content, axis_inner_node_size);
+
+    // 3. Distribute space beyond limits: if space remains after all tracks are
+    // frozen, continue distributing to all affected tracks.
+    if (remaining > 0) {
+        _ = distribute_space_up_to_limits(remaining, tracks, false, track_is_affected, null, prop_one, prop_base_or_growth, limit_fit_content, axis_inner_node_size);
     }
 
     // 4. Apply item-incurred increases to the planned growth limit increases

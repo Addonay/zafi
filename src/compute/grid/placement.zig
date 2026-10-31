@@ -43,7 +43,8 @@ inline fn resolve_indefinite_grid_span(position: OriginZeroLine, span: u16) geom
     return .{ .start = line(position_i32), .end = line(position_i32 + span_i32) };
 }
 
-const AxisPlacement = geometry.InBothAbsAxis(geometry.Line(GridPlacement));
+/// An item's placement in both axes, named lines resolved, in origin-zero coordinates.
+pub const AxisPlacement = geometry.InBothAbsAxis(geometry.Line(GridPlacement));
 
 fn placement_get(placement: AxisPlacement, axis: geometry.AbsoluteAxis) geometry.Line(GridPlacement) {
     return if (axis == .horizontal) placement.horizontal else placement.vertical;
@@ -68,13 +69,14 @@ pub fn place_grid_items(
     grid_auto_flow: grid.GridAutoFlow,
     align_items: style.alignment.AlignItems,
     justify_items: style.alignment.AlignItems,
-    named_line_resolver: *const NamedLineResolver,
+    /// Each child's resolved placement (from `resolve_child_placement`), computed
+    /// once before the grid size estimate (Taffy 4f18a82).
+    placements: []const AxisPlacement,
 ) !void {
     const TreeApi = LayoutTree(Tree);
     const primary_axis = grid.primary_axis(grid_auto_flow);
     const secondary_axis = primary_axis.other_axis();
-    const explicit_col_count = cell_occupancy_matrix.track_counts(.horizontal).explicit;
-    const explicit_row_count = cell_occupancy_matrix.track_counts(.vertical).explicit;
+    std.debug.assert(placements.len == in_flow_children.len);
 
     // Resolve every child's placement and style pointer once. The three
     // placement passes below are pure with respect to occupancy, and the
@@ -84,15 +86,12 @@ pub fn place_grid_items(
     // Every child produces exactly one grid item; reserving once avoids the
     // ArrayList doubling copies of the 424-byte GridItem struct.
     try items.ensureTotalCapacity(allocator, child_count);
-    const placements = try allocator.alloc(AxisPlacement, child_count);
-    defer allocator.free(placements);
     const styles = try allocator.alloc(*const style.Style, child_count);
     defer allocator.free(styles);
     for (in_flow_children, 0..) |entry, child_index| {
         const child_id = entry.node;
         const node_style = TreeApi.get_style(tree_ref, child_id);
         styles[child_index] = node_style;
-        placements[child_index] = resolve_child_placement(named_line_resolver, node_style, explicit_col_count, explicit_row_count);
     }
 
     // 1. Place children with definite positions
@@ -177,7 +176,7 @@ pub fn place_grid_items(
     }
 }
 
-fn resolve_child_placement(
+pub fn resolve_child_placement(
     named_line_resolver: *const NamedLineResolver,
     child_style: *const style.Style,
     explicit_col_count: u16,
@@ -226,7 +225,7 @@ fn place_definite_secondary_axis_item(matrix: *const CellOccupancyMatrix, placem
     const starting_position = if (grid.is_dense(auto_flow))
         primary_axis_grid_start_line
     else
-        matrix.last_of_type(primary_axis, secondary_axis_placement.start, .auto_placed) orelse primary_axis_grid_start_line;
+        matrix.auto_placement_cursor(primary_axis, secondary_axis_placement.start) orelse primary_axis_grid_start_line;
     const primary_axis_span = grid.origin_zero_line_indefinite_span(placement_get(placement, primary_axis));
 
     var position = starting_position;
@@ -375,7 +374,9 @@ fn record_grid_placement(
     // Create grid item
     const col_span = if (primary_axis == .horizontal) primary_span else secondary_span;
     const row_span = if (primary_axis == .horizontal) secondary_span else primary_span;
-    try items.append(allocator, GridItem.new_with_placement_style_and_order(
+    // Construct the (large) item directly in its slot rather than on the stack.
+    const slot = try items.addOne(allocator);
+    slot.* = GridItem.new_with_placement_style_and_order(
         node,
         col_span,
         row_span,
@@ -383,7 +384,7 @@ fn record_grid_placement(
         parent_align_items,
         parent_justify_items,
         source_order,
-    ));
+    );
 }
 
 test "placement algorithm handles definite and auto placement" {
@@ -404,22 +405,23 @@ test "placement algorithm handles definite and auto placement" {
     const b = try grid_tree.new_leaf(.{ .size = .{ .width = .length(10), .height = .length(10) }, .grid_column = .{ .start = .{ .line = 2 }, .end = .auto } });
     const c = try grid_tree.new_leaf(.{ .size = .{ .width = .length(10), .height = .length(10) } });
     _ = root;
-    const child_ids = [_]NodeId{ a, b, c };
     const in_flow = [_]InFlowChild{ .{ .node = a, .source_order = 0 }, .{ .node = b, .source_order = 1 }, .{ .node = c, .source_order = 2 } };
-
-    const estimate = @import("implicit_grid.zig").compute_grid_size_estimate(tree.Tree, 2, 2, &child_ids, &grid_tree);
-    var matrix = CellOccupancyMatrix.with_track_counts_using_allocator(testing.allocator, estimate.columns, estimate.rows);
-    defer matrix.deinit();
-    var items = std.ArrayList(GridItem).empty;
-    defer items.deinit(testing.allocator);
 
     const resolver_style = style.Style{ .display = .grid, .grid_template_columns = &columns, .grid_template_rows = &rows };
     var resolver = try NamedLineResolver.init(testing.allocator, &resolver_style, 0, 0);
     defer resolver.deinit();
     resolver.set_explicit_column_count(2);
     resolver.set_explicit_row_count(2);
+    var placements: [3]AxisPlacement = undefined;
+    for (in_flow, &placements) |entry, *item_placement| item_placement.* = resolve_child_placement(&resolver, grid_tree.get_style(entry.node), 2, 2);
 
-    try place_grid_items(tree.Tree, testing.allocator, &matrix, &items, &in_flow, &grid_tree, .row, .stretch, .stretch, &resolver);
+    const estimate = @import("implicit_grid.zig").compute_grid_size_estimate(2, 2, &placements);
+    var matrix = CellOccupancyMatrix.with_track_counts_using_allocator(testing.allocator, estimate.columns, estimate.rows);
+    defer matrix.deinit();
+    var items = std.ArrayList(GridItem).empty;
+    defer items.deinit(testing.allocator);
+
+    try place_grid_items(tree.Tree, testing.allocator, &matrix, &items, &in_flow, &grid_tree, .row, .stretch, .stretch, &placements);
     try testing.expectEqual(@as(usize, 3), items.items.len);
     // Item 1 is definite in column 2, so items are placed: a (0,0), b (1,0), c (0,1)
     try testing.expectEqual(@as(i16, 0), items.items[0].column.start.value);

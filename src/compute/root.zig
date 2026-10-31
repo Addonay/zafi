@@ -16,6 +16,7 @@ pub const leaf = @import("leaf.zig");
 pub const oof = @import("oof.zig");
 
 const geometry = @import("../geometry.zig");
+const math = @import("../util/math.zig");
 const style = @import("../style/root.zig");
 const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
 const tree = @import("../tree/tree.zig");
@@ -51,15 +52,33 @@ fn cachedDispatch(comptime Tree: type, tree_ref: *Tree,
     node_id: NodeId,
     input: layout.LayoutInput,
     block_ctx: ?*block.BlockContext) ComputeError!layout.LayoutOutput {
-    if (LayoutTree(Tree).cache_get(tree_ref, node_id, &input)) |cached| return cached;
+    const Api = LayoutTree(Tree);
+    // A block child sharing its parent's float context reads and places floats
+    // the cache key does not capture: serve it from the cache only when neither
+    // the cached result nor the current context involve floats. (Taffy serves
+    // such results unconditionally, so a parent's height can lose a float that
+    // a cached child placed.)
+    const floats_before = if (block_ctx) |ctx| ctx.has_floats() else false;
+    const may_use_cache = if (block_ctx == null) true else !floats_before and !Api.cache_float_coupled(tree_ref, node_id);
+    if (may_use_cache) {
+        if (Api.cache_get(tree_ref, node_id, &input)) |cached| return cached;
+    }
+    const float_mark = if (block_ctx) |ctx| ctx.float_mark() else undefined;
+    // A child layout's scratch temporaries are dead once it returns, unless it
+    // hands out-of-flow candidates (scratch lists) to its parent: reclaim them
+    // like a stack so peak scratch memory is the deepest live set.
+    const scratch_mark = LayoutTree(Tree).scratch_mark(tree_ref);
     const output = try compute_child_layout_with_block_ctx(Tree, tree_ref, node_id, input, block_ctx);
-    // Candidate lists are allocated from the layout-pass scratch arena, which is
-    // reset before the next pass. A persistent cache entry must therefore not
-    // retain one: the stored copy is emptied while the returned value keeps the
-    // list for the caller (the parent algorithm) to consume.
-    var stored = output;
-    stored.oof_candidates = .empty;
-    try LayoutTree(Tree).cache_store(tree_ref, node_id, &input, stored);
+    if (output.oof_candidates.items.len == 0) LayoutTree(Tree).scratch_release(tree_ref, scratch_mark);
+    // The output's candidate list lives in pass scratch memory; the host's
+    // cache_store must copy it if it caches the result, so a later cache hit
+    // can surface the same candidates (Tree does; see Tree.cache_store).
+    if (block_ctx) |ctx| {
+        const after = ctx.float_mark();
+        const placed_floats = after.left != float_mark.left or after.right != float_mark.right;
+        Api.set_cache_float_coupled(tree_ref, node_id, floats_before or placed_floats);
+    }
+    try Api.cache_store(tree_ref, node_id, &input, output);
     return output;
 }
 
@@ -91,9 +110,15 @@ pub fn compute_child_layout_with_block_ctx(comptime Tree: type, tree_ref: *Tree,
     node_id: NodeId,
     input: layout.LayoutInput,
     block_ctx: ?*block.BlockContext) ComputeError!layout.LayoutOutput {
-    if (input.run_mode == .perform_hidden_layout) return compute_hidden_layout(Tree, tree_ref, node_id);
-
     const TreeApi = LayoutTree(Tree);
+    if (input.run_mode == .perform_hidden_layout) {
+        // Rounding reaches out-of-flow boxes only through their containing block's
+        // hoisted list, and a box in a hidden subtree is in no such list: reset its
+        // final layout so it does not keep one from an earlier visible pass (Taffy dd94ef7).
+        try TreeApi.set_final_layout(tree_ref, node_id, layout.Layout.with_order(0));
+        return compute_hidden_layout(Tree, tree_ref, node_id);
+    }
+
     const node_style = TreeApi.get_style(tree_ref, node_id);
     if (node_style.display == .none) return compute_hidden_layout(Tree, tree_ref, node_id);
 
@@ -190,7 +215,10 @@ pub fn compute_root_layout(comptime Tree: type, tree_ref: *Tree, root: NodeId, a
                 .y = layout.AxisStaticPosition.from_edge(0, .start),
             },
         };
-        const box_layout = try oof.layout_oof_box(Tree, tree_ref, candidate, area_size, .{ .x = 0, .y = 0 }, direction, null, &root_is_cached);
+        const box_layout = try oof.layout_oof_box(Tree, tree_ref, candidate, area_size, .{ .x = 0, .y = 0 }, direction,
+            // The initial containing block is not a scroll container
+            .{ .x = .visible, .y = .visible },
+            null, &root_is_cached);
         root_layout = box_layout.layout;
         candidates = box_layout.surfaced;
     } else {
@@ -205,7 +233,6 @@ pub fn compute_root_layout(comptime Tree: type, tree_ref: *Tree, root: NodeId, a
     // positioned ancestor.
     if (candidates.items.len != 0) {
         const overflow = TreeApi.get_style(tree_ref, root).overflow;
-        const is_scroll_container = overflow.x.is_scroll_container() or overflow.y.is_scroll_container();
 
         // The initial containing block has the dimensions of the viewport (the
         // available_space space) and is anchored at the canvas origin. In an axis where
@@ -242,7 +269,8 @@ pub fn compute_root_layout(comptime Tree: type, tree_ref: *Tree, root: NodeId, a
             .{ .x = area_x, .y = area_y },
             direction,
             .all,
-            is_scroll_container,
+            overflow,
+            .{ .x = direction.is_rtl(), .y = false },
             &hoisted,
             &unclaimed);
         std.debug.assert(unclaimed.items.len == 0);
@@ -273,12 +301,20 @@ fn compute_in_flow_root_layout(comptime Tree: type, tree_ref: *Tree,
 
     const root_style = TreeApi.get_style(tree_ref, root);
 
+    // The available space passed to the root excludes the root's margins
+    const root_available_space = blk: {
+        const m = common.resolve_rect_or_zero(root_style.margin, available_space.width.into_option());
+        break :blk geometry.Size(AvailableSpace){
+            .width = math.available_maybe_max(math.available_maybe_sub(available_space.width, m.left + m.right), 0),
+            .height = math.available_maybe_max(math.available_maybe_sub(available_space.height, m.top + m.bottom), 0),
+        };
+    };
+
     // Block roots pre-resolve styled sizes and available_space-space width into known
     // dimensions before dispatching, exactly like Taffy.
     if (root_style.is_block()) {
         const parent_size = geometry.Size(?f32){ .width = available_space.width.into_option(), .height = available_space.height.into_option() };
         const aspect_ratio = root_style.aspect_ratio;
-        const margin = common.resolve_rect_or_zero(root_style.margin, parent_size.width);
         const padding = common.resolve_length_rect(root_style.padding, parent_size.width);
         const border = common.resolve_length_rect(root_style.border, parent_size.width);
         const padding_border_size = geometry.Size(f32){ .width = padding.left + padding.right + border.left + border.right, .height = padding.top + padding.bottom + border.top + border.bottom };
@@ -293,7 +329,7 @@ fn compute_in_flow_root_layout(comptime Tree: type, tree_ref: *Tree,
         };
         // Block-level boxes stretch to fill definite available_space space.
         const available_space_based_size = geometry.Size(?f32){
-            .width = if (available_space.width.into_option()) |width| width - (margin.left + margin.right) else null,
+            .width = root_available_space.width.into_option(),
             .height = null,
         };
         known_dimensions = orSize(orSize(orSize(known_dimensions, min_max_definite_size), clamped_style_size), available_space_based_size);
@@ -307,7 +343,7 @@ fn compute_in_flow_root_layout(comptime Tree: type, tree_ref: *Tree,
         .known_dimensions = known_dimensions,
         .known_dimensions_are_definite = .{ .width = true, .height = true },
         .parent_size = icbFor(available_space),
-        .available_space = available_space,
+        .available_space = root_available_space,
         .vertical_margins_are_collapsible = .{ .start = false, .end = false },
     };
     root_is_cached.* = LayoutTree(Tree).cache_get(tree_ref, root, &input) != null;
@@ -410,10 +446,23 @@ pub fn round_layout_inner(comptime Tree: type, tree_ref: *Tree, node_id: NodeId,
     rounded.padding.right = taffyRound(absolute_x + unrounded.size.width) - taffyRound(absolute_x + unrounded.size.width - unrounded.padding.right);
     rounded.padding.top = taffyRound(absolute_y + unrounded.padding.top) - taffyRound(absolute_y);
     rounded.padding.bottom = taffyRound(absolute_y + unrounded.size.height) - taffyRound(absolute_y + unrounded.size.height - unrounded.padding.bottom);
-    rounded.scrollable_overflow_rect.left = taffyRound(absolute_x + unrounded.scrollable_overflow_rect.left) - taffyRound(absolute_x);
-    rounded.scrollable_overflow_rect.right = taffyRound(absolute_x + unrounded.scrollable_overflow_rect.right) - taffyRound(absolute_x);
-    rounded.scrollable_overflow_rect.top = taffyRound(absolute_y + unrounded.scrollable_overflow_rect.top) - taffyRound(absolute_y);
-    rounded.scrollable_overflow_rect.bottom = taffyRound(absolute_y + unrounded.scrollable_overflow_rect.bottom) - taffyRound(absolute_y);
+    {
+        // Round each edge in absolute coordinates; a zero result keeps its edge's
+        // sign so left/top stay -0.0 (re-packing restores right/bottom reversal).
+        const r = unrounded.scrollable_overflow_rect.rect();
+        const roundEdge = struct {
+            fn call(offset: f32, edge: f32) f32 {
+                const value = taffyRound(offset + edge) - taffyRound(offset);
+                return if (value == 0) std.math.copysign(value, edge) else value;
+            }
+        }.call;
+        rounded.scrollable_overflow_rect = layout.ScrollableOverflow.new(.{
+            .left = roundEdge(absolute_x, r.left),
+            .right = roundEdge(absolute_x, r.right),
+            .top = roundEdge(absolute_y, r.top),
+            .bottom = roundEdge(absolute_y, r.bottom),
+        }, unrounded.scrollable_overflow_rect.is_reversed());
+    }
     rounded.scrollbar_size.width = taffyRound(unrounded.scrollbar_size.width);
     rounded.scrollbar_size.height = taffyRound(unrounded.scrollbar_size.height);
     try TreeApi.set_final_layout(tree_ref, node_id, rounded);
@@ -537,4 +586,93 @@ test {
     _ = @import("float.zig");
     _ = @import("grid/root.zig");
     _ = @import("leaf.zig");
+}
+
+test "cached child layouts still surface their out-of-flow candidates" {
+    const testing = std.testing;
+    var t = tree.Tree.init(testing.allocator);
+    defer t.deinit();
+    // root (containing block) -> [sibling S, A (static block) -> B (absolute, bottom: 0)]
+    const b = try t.new_leaf(.{
+        .position = .absolute,
+        .size = .{ .width = style.dimension.Dimension.length(10), .height = style.dimension.Dimension.length(10) },
+        .inset = .{ .left = .length(0), .right = .auto(), .top = .auto(), .bottom = .length(0) },
+    });
+    const a = try t.new_with_children(.{ .display = .block }, &.{b});
+    const s = try t.new_leaf(.{ .size = .{ .width = style.dimension.Dimension.length(10), .height = style.dimension.Dimension.length(10) } });
+    const root = try t.new_with_children(.{ .display = .block, .position = .relative }, &.{ s, a });
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .max_content });
+    try testing.expectEqual(@as(f32, 0), (try t.layout_of(b)).location.y); // root is 10 tall
+
+    // Grow the sibling: root re-lays out, A is a cache hit, B must follow the new bottom edge.
+    try t.set_style(s, .{ .size = .{ .width = style.dimension.Dimension.length(10), .height = style.dimension.Dimension.length(50) } });
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .max_content });
+    try testing.expectEqual(@as(f32, 50), (try t.layout_of(root)).size.height);
+    try testing.expectEqual(@as(f32, 40), (try t.layout_of(b)).location.y);
+}
+
+test "allocation failures never leave a stale layout behind (cache invalidation invariant)" {
+    const testing = std.testing;
+    var fail_index: usize = 0;
+    var completed = false;
+    while (fail_index < 200 and !completed) : (fail_index += 1) {
+        var failing = FailOnce{ .backing = testing.allocator, .fail_at = fail_index };
+        var t = tree.Tree.init(failing.allocator());
+        defer t.deinit();
+        // relative root -> static block A (height 10) -> absolute descendant
+        const abs = t.new_leaf(.{ .position = .absolute, .size = .{ .width = style.dimension.Dimension.length(5), .height = style.dimension.Dimension.length(5) } }) catch continue;
+        const a = t.new_with_children(.{ .display = .block, .size = .{ .width = style.dimension.Dimension.auto, .height = style.dimension.Dimension.length(10) } }, &.{abs}) catch continue;
+        const root = t.new_with_children(.{ .display = .block, .position = .relative }, &.{a}) catch continue;
+        t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .max_content }) catch continue;
+        t.set_style(a, .{ .display = .block, .size = .{ .width = style.dimension.Dimension.auto, .height = style.dimension.Dimension.length(50) } }) catch continue;
+        t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .max_content }) catch continue;
+        // Whatever failed earlier, a layout that reports success must be correct.
+        try testing.expectEqual(@as(f32, 50), (try t.layout_of(root)).size.height);
+        if (!failing.failed) completed = true;
+    }
+    try testing.expect(completed);
+}
+
+/// Fails exactly one allocation (the `fail_at`-th), so code paths that swallow
+/// an allocation failure keep running and expose any inconsistent state.
+const FailOnce = struct {
+    backing: std.mem.Allocator,
+    fail_at: usize,
+    count: usize = 0,
+    failed: bool = false,
+
+    fn allocator(self: *FailOnce) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const self: *FailOnce = @ptrCast(@alignCast(ctx));
+        defer self.count += 1;
+        if (self.count == self.fail_at) {
+            self.failed = true;
+            return null;
+        }
+        return self.backing.rawAlloc(len, alignment, ret);
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const self: *FailOnce = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, ret);
+    }
+};
+
+test "a cached block child does not lose the floats it placed (Taffy has this bug too)" {
+    const testing = std.testing;
+    var t = tree.Tree.init(testing.allocator);
+    defer t.deinit();
+    const D = style.dimension.Dimension;
+    const float_box = try t.new_leaf(.{ .display = .block, .float = .left, .size = .{ .width = D.length(20), .height = D.length(40) } });
+    const wrapper = try t.new_with_children(.{ .display = .block }, &.{float_box});
+    const sibling = try t.new_leaf(.{ .display = .block, .size = .{ .width = D.length(10), .height = D.length(20) } });
+    const root = try t.new_with_children(.{ .display = .block, .size = .{ .width = D.length(100), .height = .auto } }, &.{ wrapper, sibling });
+    const space = geometry.Size(AvailableSpace){ .width = .max_content, .height = .max_content };
+    try t.compute_layout(root, space);
+    try testing.expectEqual(@as(f32, 40), (try t.layout_of(root)).size.height);
+    // Edit only the sibling: the wrapper must not be served stale from the cache.
+    try t.set_style(sibling, .{ .display = .block, .size = .{ .width = D.length(11), .height = D.length(20) } });
+    try t.compute_layout(root, space);
+    try testing.expectEqual(@as(f32, 40), (try t.layout_of(root)).size.height);
 }

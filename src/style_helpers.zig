@@ -68,13 +68,12 @@ pub fn from_fr(value: f32) grid.TrackSizingFunction {
     return fr(value);
 }
 
-pub fn evenly_sized_tracks(count: u16) []const grid.GridTemplateComponent {
-    const tracks = std.heap.page_allocator.alloc(grid.TrackSizingFunction, 1) catch @panic("Taffy style helper allocation failed");
-    tracks[0] = fr(1);
-    const components = std.heap.page_allocator.alloc(grid.GridTemplateComponent, 1) catch @panic("Taffy style helper allocation failed");
-    components[0] = .{ .repeat = .{ .count = .{ .count = count }, .tracks = tracks } };
-    return components;
+/// `repeat(count, 1fr)`, returned by value so nothing is allocated:
+/// `const t = evenly_sized_tracks(3); style.grid_template_columns = &t;`
+pub fn evenly_sized_tracks(count: u16) [1]grid.GridTemplateComponent {
+    return .{.{ .repeat = .{ .count = .{ .count = count }, .tracks = &one_fr_track } }};
 }
+const one_fr_track = [_]grid.TrackSizingFunction{fr(1)};
 
 pub fn minmax(minimum: grid.MinTrackSizingFunction, maximum: grid.MaxTrackSizingFunction) grid.TrackSizingFunction {
     return .{ .min = minimum, .max = maximum };

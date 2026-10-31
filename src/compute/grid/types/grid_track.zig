@@ -49,11 +49,7 @@ pub const GridTrack = struct {
         return self.has_intrinsic_sizing_function();
     }
     pub fn fit_content_limit(self: GridTrack, available_space: ?f32) f32 {
-        return switch (self.max_track_sizing_function.value.tag()) {
-            .fit_content_px => self.max_track_sizing_function.value.value(),
-            .fit_content_percent => if (available_space) |space| space * self.max_track_sizing_function.value.value() else std.math.inf(f32),
-            else => std.math.inf(f32),
-        };
+        return self.max_track_sizing_function.fit_content_limit(available_space) orelse std.math.inf(f32);
     }
 
     pub fn fit_content_limited_growth_limit(self: GridTrack, available_space: ?f32) f32 {
