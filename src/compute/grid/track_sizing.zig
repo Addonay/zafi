@@ -917,6 +917,10 @@ fn prop_base(track: GridTrack, inner: ?f32) f32 {
     _ = inner;
     return track.base_size;
 }
+fn pred_growth_limit_growable(track: GridTrack, _: ?f32) bool {
+    return track.infinitely_growable or track.growth_limit == std.math.inf(f32);
+}
+
 fn prop_base_or_growth(track: GridTrack, inner: ?f32) f32 {
     _ = inner;
     return if (track.growth_limit == std.math.inf(f32)) track.base_size else track.growth_limit;
@@ -1042,28 +1046,17 @@ fn distribute_item_space_to_growth_limit(
     }
     const extra_space = math.f32_max(0, space - track_sizes);
 
-    // 2. Distribute space up to limits. For growth limits the limit is either Infinity
-    // or the growth limit itself.
-    var number_of_growable_tracks: usize = 0;
-    for (tracks) |track| {
-        if (track_is_affected(track, axis_inner_node_size) and
-            (track.infinitely_growable or track.fit_content_limited_growth_limit(axis_inner_node_size) == std.math.inf(f32)))
-        {
-            number_of_growable_tracks += 1;
-        }
-    }
-    if (number_of_growable_tracks > 0) {
-        const item_incurred_increase = extra_space / @as(f32, @floatFromInt(number_of_growable_tracks));
-        for (tracks) |*track| {
-            if (track_is_affected(track.*, axis_inner_node_size) and
-                (track.infinitely_growable or track.fit_content_limited_growth_limit(axis_inner_node_size) == std.math.inf(f32)))
-            {
-                track.item_incurred_increase = item_incurred_increase;
-            }
-        }
-    } else {
-        // 3. Distribute space beyond limits
-        _ = distribute_space_up_to_limits(extra_space, tracks, false, track_is_affected, null, prop_one, prop_base_or_growth, limit_fit_content, axis_inner_node_size);
+    // 2. Distribute space up to limits. For growth limits the limit is the growth
+    // limit itself unless the track is infinitely growable (or its growth limit is
+    // still infinite), in which case it is the track's fit-content() argument if it
+    // has one, or infinity. Tracks that aren't growable have an affected size equal
+    // to their limit, so they receive nothing in this step.
+    const remaining = distribute_space_up_to_limits(extra_space, tracks, false, track_is_affected, pred_growth_limit_growable, prop_one, prop_base_or_growth, limit_fit_content, axis_inner_node_size);
+
+    // 3. Distribute space beyond limits: if space remains after all tracks are
+    // frozen, continue distributing to all affected tracks.
+    if (remaining > 0) {
+        _ = distribute_space_up_to_limits(remaining, tracks, false, track_is_affected, null, prop_one, prop_base_or_growth, limit_fit_content, axis_inner_node_size);
     }
 
     // 4. Apply item-incurred increases to the planned growth limit increases

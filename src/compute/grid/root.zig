@@ -543,7 +543,6 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
     );
     var initial_row_sum: f32 = 0;
     for (rows.items) |track| initial_row_sum += track.base_size;
-    if (inner_node_size.height == null) inner_node_size.height = initial_row_sum;
 
     // 6. Compute container size
     const resolved_style_size = geometry.Size(?f32){
@@ -572,27 +571,14 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         return layout.LayoutOutput.from_outer_size(container_border_box);
     }
 
-    // 7. Resolve percentage track base sizes
-    // In the case of an indefinitely sized container these resolve to zero during the
-    // "Initialise Tracks" step and therefore need to be re-resolved here.
-    if (!available_grid_space.width.is_definite()) {
-        for (columns.items) |*column| {
-            const minimum = column.min_track_sizing_function.resolved_percentage_size(container_content_box.width);
-            const maximum = column.max_track_sizing_function.resolved_percentage_size(container_content_box.width);
-            column.base_size = math.option_maybe_clamp(column.base_size, minimum, maximum) orelse column.base_size;
-        }
-    }
-    if (!available_grid_space.height.is_definite()) {
-        for (rows.items) |*row| {
-            const minimum = row.min_track_sizing_function.resolved_percentage_size(container_content_box.height);
-            const maximum = row.max_track_sizing_function.resolved_percentage_size(container_content_box.height);
-            row.base_size = math.option_maybe_clamp(row.base_size, minimum, maximum) orelse row.base_size;
-        }
-    }
+    // The container's size is now determined, so percentages resolve against its
+    // content box when re-running track sizing. This may be a no-op if the size was
+    // known upfront (it then already equals `inner_node_size`).
+    inner_node_size = .{ .width = container_content_box.width, .height = container_content_box.height };
 
     // Column sizing must be re-run (once) if:
-    //   - The grid container's width was initially indefinite and there are any columns
-    //     with percentage track sizing functions
+    //   - The grid container's width is indefinite and there are any columns with
+    //     percentage track sizing functions
     //   - Any grid item crossing an intrinsically sized track's min content contribution
     //     width has changed
     var rerun_column_sizing = false;
@@ -612,7 +598,7 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
             break;
         }
     }
-    const parent_width_indefinite = !inputs.available_space.width.is_definite();
+    const parent_width_indefinite = outer_node_size.width == null;
     rerun_column_sizing = parent_width_indefinite and has_percentage_column;
 
     if (!rerun_column_sizing) {
@@ -643,13 +629,30 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         }
     }
 
+    // Row sizing must be re-run (once) if:
+    //   - The grid container's height is indefinite and there are any rows with
+    //     percentage track sizing functions
+    //   - Column sizing was re-run and any grid item crossing an intrinsically sized
+    //     track's min content contribution height has changed
+    const parent_height_indefinite = outer_node_size.height == null;
+    var rerun_row_sizing = parent_height_indefinite and has_percentage_row;
     var intrinsic_row_contribution_changed = false;
+
+    if (rerun_row_sizing) {
+        // Clear intrinsic height caches
+        for (items.items) |*item| {
+            item.grid_area_size_cache = null;
+            item.min_content_contribution_cache.height = null;
+            item.max_content_contribution_cache.height = null;
+            item.minimum_contribution_cache.height = null;
+        }
+    }
 
     if (rerun_column_sizing) {
         // Re-run track sizing algorithm for Inline axis
         track_sizing.track_sizing_algorithm(
             Tree,
-tree_ref,
+            tree_ref,
             .inline_axis,
             inner_min_size.get(.inline_axis),
             inner_max_size.get(.inline_axis),
@@ -663,14 +666,9 @@ tree_ref,
             estimate_track_base_size(Tree),
             has_baseline_aligned_item);
 
-        // Row sizing must be re-run (once) if:
-        //   - The grid container's height was initially indefinite and there are any
-        //     rows with percentage track sizing functions
-        //   - Any grid item crossing an intrinsically sized track's min content
-        //     contribution height has changed
-        const parent_height_indefinite = !inputs.available_space.height.is_definite();
-        var rerun_row_sizing = parent_height_indefinite and has_percentage_row;
-
+        // The column widths may have changed, so the items' intrinsic height
+        // contributions need recomputing (unless row sizing is re-run anyway, in
+        // which case the caches have already been cleared).
         if (!rerun_row_sizing) {
             for (items.items) |*item| {
                 if (!item.crosses_intrinsic_row) continue;
@@ -689,35 +687,27 @@ tree_ref,
                 if (has_changed) intrinsic_row_contribution_changed = true;
             }
             rerun_row_sizing = intrinsic_row_contribution_changed;
-        } else {
-            for (items.items) |*item| {
-                // Clear intrinsic height caches
-                item.grid_area_size_cache = null;
-                item.min_content_contribution_cache.height = null;
-                item.max_content_contribution_cache.height = null;
-                item.minimum_contribution_cache.height = null;
-            }
         }
+    }
 
-        if (rerun_row_sizing) {
-            // Re-run track sizing algorithm for Block axis
-            track_sizing.track_sizing_algorithm(
-                Tree,
-tree_ref,
-                .block,
-                inner_min_size.get(.block),
-                inner_max_size.get(.block),
-                align_content,
-                justify_content,
-                available_grid_space,
-                inner_node_size,
-                rows.items,
-                columns.items,
-                items.items,
-                estimate_track_base_size(Tree),
-                false, // TODO: Support baseline alignment in the vertical axis
-            );
-        }
+    if (rerun_row_sizing) {
+        // Re-run track sizing algorithm for Block axis
+        track_sizing.track_sizing_algorithm(
+            Tree,
+            tree_ref,
+            .block,
+            inner_min_size.get(.block),
+            inner_max_size.get(.block),
+            align_content,
+            justify_content,
+            available_grid_space,
+            inner_node_size,
+            rows.items,
+            columns.items,
+            items.items,
+            estimate_track_base_size(Tree),
+            false, // TODO: Support baseline alignment in the vertical axis
+        );
     }
 
     if ((intrinsic_column_contribution_changed and !has_percentage_column) or
