@@ -1288,8 +1288,10 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
         const resolved_margin = geometry.Rect(f32){
             .left = item_margin.left orelse x_axis_auto_margin_size,
             .right = item_margin.right orelse x_axis_auto_margin_size,
-            .top = top_margin_set.resolve(),
-            .bottom = bottom_margin_set.resolve(),
+            // The item's own vertical margins (its collapsed margin sets are only used for
+            // placing it in the flow). `Layout::margin` reports the item's own margins.
+            .top = item_margin.top orelse 0.0,
+            .bottom = item_margin.bottom orelse 0.0,
         };
 
         // Resolve item inset (the overwhelmingly common case is `inset: auto` on every
