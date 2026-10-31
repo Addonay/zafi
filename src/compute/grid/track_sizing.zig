@@ -152,12 +152,12 @@ pub fn compute_alignment_gutter_adjustment(comptime Tree: type, alignment: Align
     // calculations by treating Start and End the same.
     const outer_gutter_weight: u32 = switch (alignment.keyword) {
         .start, .flex_start, .end, .flex_end, .center => 1,
-        .stretch, .space_between => 0,
+        .normal, .stretch, .space_between => 0,
         .space_around, .space_evenly => 1,
     };
 
     const inner_gutter_weight: u32 = switch (alignment.keyword) {
-        .flex_start, .start, .flex_end, .end, .center, .stretch => 0,
+        .flex_start, .start, .flex_end, .end, .center, .normal, .stretch => 0,
         .space_between => 1,
         .space_around => 2,
         .space_evenly => 1,

@@ -279,6 +279,9 @@ pub const CoreStyle = struct {
     pub fn is_compressible_replaced(self: CoreStyle) bool {
         return self.value.is_compressible_replaced();
     }
+    pub fn is_replaced(self: CoreStyle) bool {
+        return self.value.is_replaced();
+    }
     pub fn box_sizing(self: CoreStyle) BoxSizing {
         return self.value.box_sizing_value();
     }
@@ -340,13 +343,13 @@ pub const FlexboxContainerStyle = struct {
     pub fn gap(self: FlexboxContainerStyle) geometry.Size(dimension.LengthPercentage) {
         return self.value.gap;
     }
-    pub fn align_content(self: FlexboxContainerStyle) ?alignment.AlignContent {
+    pub fn align_content(self: FlexboxContainerStyle) alignment.AlignContent {
         return self.value.align_content;
     }
-    pub fn align_items(self: FlexboxContainerStyle) ?alignment.AlignItems {
+    pub fn align_items(self: FlexboxContainerStyle) alignment.AlignItems {
         return self.value.align_items;
     }
-    pub fn justify_content(self: FlexboxContainerStyle) ?alignment.JustifyContent {
+    pub fn justify_content(self: FlexboxContainerStyle) alignment.JustifyContent {
         return self.value.justify_content;
     }
 };
@@ -408,20 +411,21 @@ pub const GridContainerStyle = struct {
     pub fn gap(self: GridContainerStyle) geometry.Size(dimension.LengthPercentage) {
         return self.value.gap;
     }
-    pub fn align_content(self: GridContainerStyle) ?alignment.AlignContent {
+    pub fn align_content(self: GridContainerStyle) alignment.AlignContent {
         return self.value.align_content;
     }
-    pub fn justify_content(self: GridContainerStyle) ?alignment.JustifyContent {
+    pub fn justify_content(self: GridContainerStyle) alignment.JustifyContent {
         return self.value.justify_content;
     }
-    pub fn align_items(self: GridContainerStyle) ?alignment.AlignItems {
+    pub fn align_items(self: GridContainerStyle) alignment.AlignItems {
         return self.value.align_items;
     }
-    pub fn justify_items(self: GridContainerStyle) ?alignment.JustifyItems {
+    pub fn justify_items(self: GridContainerStyle) alignment.JustifyItems {
         return self.value.justify_items;
     }
     pub fn grid_align_content(self: GridContainerStyle, axis: geometry.AbstractAxis) alignment.AlignContent {
-        return if (axis == .inline_axis) self.value.justify_content orelse .stretch else self.value.align_content orelse .stretch;
+        const value = if (axis == .inline_axis) self.value.justify_content else self.value.align_content;
+        return if (value.keyword == .normal) .STRETCH else value;
     }
 };
 
@@ -455,7 +459,7 @@ pub const BlockContainerStyle = struct {
     pub fn text_align(self: BlockContainerStyle) block.TextAlign {
         return self.value.text_align;
     }
-    pub fn align_content(self: BlockContainerStyle) ?alignment.AlignContent {
+    pub fn align_content(self: BlockContainerStyle) alignment.AlignContent {
         return self.value.align_content;
     }
 };
@@ -482,7 +486,12 @@ pub const Style = struct {
     dummy: void = {},
     display: Display = .flex,
     item_is_table: bool = false,
+    /// A replaced element (image, video, canvas, ...).
     item_is_replaced: bool = false,
+    /// A compressible non-replaced element with an intrinsic size (form controls:
+    /// `input`, `select`, `textarea`, ...). Resolves `auto` width to its intrinsic
+    /// size like a replaced element, but still stretches between abspos insets.
+    item_is_compressible_replaced: bool = false,
     box_sizing: BoxSizing = .border_box,
     direction: Direction = .ltr,
     overflow: geometry.Point(Overflow) = .{ .x = .visible, .y = .visible },
@@ -502,12 +511,14 @@ pub const Style = struct {
     margin: geometry.Rect(dimension.LengthPercentageAuto) = .{ .left = dimension.LengthPercentageAuto.zero(), .right = dimension.LengthPercentageAuto.zero(), .top = dimension.LengthPercentageAuto.zero(), .bottom = dimension.LengthPercentageAuto.zero() },
     padding: geometry.Rect(dimension.LengthPercentage) = .{ .left = dimension.LengthPercentage.zero(), .right = dimension.LengthPercentage.zero(), .top = dimension.LengthPercentage.zero(), .bottom = dimension.LengthPercentage.zero() },
     border: geometry.Rect(dimension.LengthPercentage) = .{ .left = dimension.LengthPercentage.zero(), .right = dimension.LengthPercentage.zero(), .top = dimension.LengthPercentage.zero(), .bottom = dimension.LengthPercentage.zero() },
-    align_items: ?alignment.AlignItems = null,
+    align_items: alignment.AlignItems = .NORMAL,
+    /// `null` is `auto`: use the container's `align-items`.
     align_self: ?alignment.AlignSelf = null,
-    justify_items: ?alignment.JustifyItems = null,
+    justify_items: alignment.JustifyItems = .NORMAL,
+    /// `null` is `auto`: use the container's `justify-items`.
     justify_self: ?alignment.JustifySelf = null,
-    align_content: ?alignment.AlignContent = null,
-    justify_content: ?alignment.JustifyContent = null,
+    align_content: alignment.AlignContent = .NORMAL,
+    justify_content: alignment.JustifyContent = .NORMAL,
     gap: geometry.Size(dimension.LengthPercentage) = .{ .width = dimension.LengthPercentage.zero(), .height = dimension.LengthPercentage.zero() },
     text_align: block.TextAlign = .auto,
     flex_direction: flex.FlexDirection = .row,
@@ -584,7 +595,13 @@ pub const Style = struct {
         return self.justify_self;
     }
 
+    /// A replaced element or form control (https://drafts.csswg.org/css-sizing-3/#compressible).
     pub fn is_compressible_replaced(self: Style) bool {
+        return self.item_is_replaced or self.item_is_compressible_replaced;
+    }
+    /// A replaced element proper: unlike form controls, an `auto`-sized replaced
+    /// element is not stretched between its insets under `normal` alignment.
+    pub fn is_replaced(self: Style) bool {
         return self.item_is_replaced;
     }
 
@@ -706,7 +723,7 @@ pub fn is_containing_block(value: Style) ContainingBlockClaims {
     return value.is_containing_block();
 }
 pub fn is_compressible_replaced(value: Style) bool {
-    return value.item_is_replaced;
+    return value.is_compressible_replaced();
 }
 pub fn box_sizing(value: Style) BoxSizing {
     return value.box_sizing;

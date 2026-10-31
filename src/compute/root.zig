@@ -191,7 +191,10 @@ pub fn compute_root_layout(comptime Tree: type, tree_ref: *Tree, root: NodeId, a
                 .y = layout.AxisStaticPosition.from_edge(0, .start),
             },
         };
-        const box_layout = try oof.layout_oof_box(Tree, tree_ref, candidate, area_size, .{ .x = 0, .y = 0 }, direction, null, &root_is_cached);
+        const box_layout = try oof.layout_oof_box(Tree, tree_ref, candidate, area_size, .{ .x = 0, .y = 0 }, direction,
+            // The initial containing block is not a scroll container
+            .{ .x = .visible, .y = .visible },
+            null, &root_is_cached);
         root_layout = box_layout.layout;
         candidates = box_layout.surfaced;
     } else {
@@ -206,7 +209,6 @@ pub fn compute_root_layout(comptime Tree: type, tree_ref: *Tree, root: NodeId, a
     // positioned ancestor.
     if (candidates.items.len != 0) {
         const overflow = TreeApi.get_style(tree_ref, root).overflow;
-        const is_scroll_container = overflow.x.is_scroll_container() or overflow.y.is_scroll_container();
 
         // The initial containing block has the dimensions of the viewport (the
         // available_space space) and is anchored at the canvas origin. In an axis where
@@ -243,7 +245,7 @@ pub fn compute_root_layout(comptime Tree: type, tree_ref: *Tree, root: NodeId, a
             .{ .x = area_x, .y = area_y },
             direction,
             .all,
-            is_scroll_container,
+            overflow,
             &hoisted,
             &unclaimed);
         std.debug.assert(unclaimed.items.len == 0);

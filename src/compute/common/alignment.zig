@@ -46,14 +46,14 @@ pub fn compute_alignment_offset(
         .end => free_space,
         .flex_end => if (layout_is_reversed) 0 else free_space,
         .center => free_space / 2,
-        .stretch, .space_between => 0,
+        .normal, .stretch, .space_between => 0,
         .space_around => if (free_space >= 0) (free_space / @as(f32, @floatFromInt(item_count))) / 2 else free_space / 2,
         .space_evenly => if (free_space >= 0) free_space / @as(f32, @floatFromInt(item_count + 1)) else free_space / 2,
     };
 
     const positive_free = @max(0, free_space);
     return gap + switch (keyword) {
-        .start, .flex_start, .end, .flex_end, .center, .stretch => 0,
+        .start, .flex_start, .end, .flex_end, .center, .normal, .stretch => 0,
         .space_between => positive_free / @as(f32, @floatFromInt(item_count - 1)),
         .space_around => positive_free / @as(f32, @floatFromInt(item_count)),
         .space_evenly => positive_free / @as(f32, @floatFromInt(item_count + 1)),

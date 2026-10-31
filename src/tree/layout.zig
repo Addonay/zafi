@@ -118,7 +118,7 @@ pub const AxisStaticAlign = struct {
 
     /// Create an `AxisStaticAlign` from a keyword with no safe fallback.
     pub fn from_keyword(keyword: AxisStaticEdge) AxisStaticAlign {
-        return .{ .keyword = keyword, .safety = .unsafe, .fallback = keyword };
+        return .{ .keyword = keyword, .safety = .default, .fallback = keyword };
     }
 };
 
@@ -141,6 +141,26 @@ pub const AxisStaticPosition = struct {
     /// safe fallback.
     pub fn from_edge(anchor: f32, edge: AxisStaticEdge) AxisStaticPosition {
         return .{ .area = .{ .start = anchor, .end = anchor }, .alignment = AxisStaticAlign.from_keyword(edge) };
+    }
+
+    /// A static position aligned within `area` by an already-resolved
+    /// self-alignment (`auto` replaced by the container's `*-items` value,
+    /// `self-start`/`self-end` resolved). `axis_is_rtl` flips `start`/`end` for
+    /// the inline axis of an RTL static-position containing block.
+    pub fn from_alignment(value: alignment.AlignItems, area: geometry.Line(f32), axis_is_rtl: bool) AxisStaticPosition {
+        std.debug.assert(value.keyword != .self_start and value.keyword != .self_end);
+        const edge_for = struct {
+            // Normal and Stretch (and anything not end/center) fall back to start
+            fn call(keyword: alignment.AlignItemsKeyword, is_rtl: bool) AxisStaticEdge {
+                const start_position = !(keyword == .end or keyword == .flex_end) != is_rtl;
+                return if (keyword == .center) .center else if (start_position) .start else .end;
+            }
+        }.call;
+        const fallback: alignment.AlignItemsKeyword = if (value.safety == .safe) .start else value.keyword;
+        return .{
+            .area = area,
+            .alignment = .{ .keyword = edge_for(value.keyword, axis_is_rtl), .safety = value.safety, .fallback = edge_for(fallback, axis_is_rtl) },
+        };
     }
 };
 

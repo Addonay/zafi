@@ -325,8 +325,8 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         content_box_inset.left += scrollbar_gutter.x;
     }
 
-    const align_content = node_style.align_content orelse style.alignment.AlignContent.STRETCH;
-    const justify_content = node_style.justify_content orelse style.alignment.AlignContent.STRETCH;
+    const align_content = if (node_style.align_content.keyword == .normal) style.alignment.AlignContent.STRETCH else node_style.align_content;
+    const justify_content = if (node_style.justify_content.keyword == .normal) style.alignment.AlignContent.STRETCH else node_style.justify_content;
     const align_items = node_style.align_items;
     const justify_items = node_style.justify_items;
 
@@ -456,8 +456,8 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         in_flow_children.items,
         tree_ref,
         node_style.grid_auto_flow,
-        align_items orelse style.alignment.AlignItems.STRETCH,
-        justify_items orelse style.alignment.AlignItems.STRETCH,
+        align_items,
+        justify_items,
         &name_resolver);
 
     // Extract track counts from previous step (auto-placement can expand the number of tracks)
@@ -770,7 +770,7 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
 
     var item_overflow_rect = geometry.Rect(f32){ .left = 0, .right = 0, .top = 0, .bottom = 0 };
 
-    const container_alignment_styles = geometry.InBothAbsAxis(?style.alignment.AlignItems){
+    const container_alignment_styles = geometry.InBothAbsAxis(style.alignment.AlignItems){
         .horizontal = justify_items,
         .vertical = align_items,
     };
@@ -892,18 +892,8 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         // to the container's, so they must be resolved before the static position is
         // derived from them.
         const item_direction = child_style.direction;
-        const x_alignment = (if (child_style.justify_self) |value|
-            common.alignment.resolve_self_relative(value, item_direction, direction, true)
-        else if (container_alignment_styles.horizontal) |value|
-            common.alignment.resolve_self_relative(value, item_direction, direction, true)
-        else
-            style.alignment.AlignItems.START);
-        const y_alignment = (if (child_style.align_self) |value|
-            common.alignment.resolve_self_relative(value, item_direction, direction, false)
-        else if (container_alignment_styles.vertical) |value|
-            common.alignment.resolve_self_relative(value, item_direction, direction, false)
-        else
-            style.alignment.AlignItems.START);
+        const x_alignment = common.alignment.resolve_self_relative(child_style.justify_self orelse container_alignment_styles.horizontal, item_direction, direction, true);
+        const y_alignment = common.alignment.resolve_self_relative(child_style.align_self orelse container_alignment_styles.vertical, item_direction, direction, false);
 
         // The static-position rectangle: the grid area determined by the grid-placement
         // properties when this grid is the child's containing block, and otherwise the

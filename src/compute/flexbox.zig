@@ -190,7 +190,7 @@ pub const AlgoConstants = struct {
     /// The align_content property of this node
     align_content: style.alignment.AlignContent,
     /// The justify_content property of this node
-    justify_content: ?style.alignment.JustifyContent,
+    justify_content: style.alignment.JustifyContent,
 
     /// The border-box size of the node being laid out (if known)
     node_outer_size: Size(?f32),
@@ -324,6 +324,11 @@ pub fn compute_flexbox_layout(comptime Tree: type, tree_ref: *Tree, node_id: Nod
     }
 
     return output;
+}
+
+/// `normal` self-alignment of flex items behaves as `stretch`.
+inline fn resolve_normal_alignment(value: style.alignment.AlignItems) style.alignment.AlignItems {
+    return if (value.keyword == .normal) style.alignment.AlignItems.STRETCH else value;
 }
 
 /// Compute a preliminary size for an item
@@ -615,7 +620,7 @@ fn collect_oof_candidates(comptime Tree: type, tree_ref: *Tree,
         }
 
         const align_self = resolve_self_relative(
-            child_style.align_self orelse constants.align_items,
+            resolve_normal_alignment(child_style.align_self orelse constants.align_items),
             child_style.direction,
             constants.layout_direction,
             constants.is_column);
@@ -634,14 +639,14 @@ fn collect_oof_candidates(comptime Tree: type, tree_ref: *Tree,
         // `start`/`end` are writing-mode relative (they flip for RTL but not for
         // reversed flex-directions), whereas `flex-start`/`flex-end` and the
         // distributed keywords' fallbacks are flex-relative.
-        const main_keyword = (constants.justify_content orelse style.alignment.JustifyContent.FLEX_START).keyword_value();
+        const main_keyword = constants.justify_content.keyword_value();
         const main_start_position = switch (main_keyword) {
             .start => !main_is_rtl,
             .end => main_is_rtl,
             else => true,
         };
         const main_edge: layout.AxisStaticEdge = switch (main_keyword) {
-            .space_between, .stretch, .flex_start => if (!main_axis_flex_start_reversed) .start else .end,
+            .space_between, .normal, .stretch, .flex_start => if (!main_axis_flex_start_reversed) .start else .end,
             .flex_end => if (main_axis_flex_start_reversed) .start else .end,
             .start, .end => if (main_start_position) .start else .end,
             .space_evenly, .space_around, .center => .center,
@@ -694,9 +699,9 @@ fn crossEdgeFor(keyword: style.alignment.AlignItemsKeyword, cross_axis_flex_star
         .stretch, .flex_start => if (!cross_axis_flex_start_reversed) .start else .end,
         .flex_end => if (cross_axis_flex_start_reversed) .start else .end,
         .center => .center,
-        // SelfStart/SelfEnd are resolved to Start/End against the item's own
-        // direction where `align_self` is read.
-        .self_start, .self_end => unreachable,
+        // Normal is resolved to Stretch, and SelfStart/SelfEnd to Start/End against
+        // the item's own direction, where `align_self` is read.
+        .normal, .self_start, .self_end => unreachable,
     };
 }
 
@@ -723,9 +728,9 @@ inline fn compute_constants(comptime Tree: type, tree_ref: *Tree,
     const padding_border_sum = padding.sum_axes().add(border.sum_axes());
     const box_sizing_adjustment = if (node_style.box_sizing == .content_box) padding_border_sum else geometry.SIZE_F32_ZERO;
 
-    const align_items = node_style.align_items orelse style.alignment.AlignItems.STRETCH;
-    const align_content = node_style.align_content orelse style.alignment.AlignContent.STRETCH;
-    const justify_content = node_style.justify_content;
+    const align_items = resolve_normal_alignment(node_style.align_items);
+    const align_content = if (node_style.align_content.keyword == .normal) style.alignment.AlignContent.STRETCH else node_style.align_content;
+    const justify_content = if (node_style.justify_content.keyword == .normal) style.alignment.JustifyContent.FLEX_START else node_style.justify_content;
     const layout_direction = node_style.direction;
 
     // Scrollbar gutters are reserved when the `overflow` property is set to `Overflow::Scroll`.
@@ -881,7 +886,7 @@ inline fn generate_anonymous_flex_items(comptime Tree: type, tree_ref: *Tree, no
             .padding = padding,
             .border = border,
             .align_self = resolve_self_relative(
-                child_style.align_self orelse constants.align_items,
+                resolve_normal_alignment(child_style.align_self orelse constants.align_items),
                 child_style.direction,
                 constants.layout_direction,
                 constants.is_column),
@@ -2288,7 +2293,7 @@ inline fn distribute_remaining_free_space(flex_lines: []FlexLine, constants: *co
         const num_items = line.items.len;
         const layout_reverse = constants.dir.is_reverse();
         const gap = constants.gap.main(constants.dir);
-        const raw_justify_content_mode = constants.justify_content orelse style.alignment.JustifyContent.FLEX_START;
+        const raw_justify_content_mode = constants.justify_content;
         const justify_content_mode = alignment.apply_alignment_fallback(free_space, num_items, raw_justify_content_mode);
 
         if (layout_reverse) {
@@ -2417,9 +2422,9 @@ inline fn align_flex_items_along_cross_axis(
             break :blk if (constants.is_wrap_reverse != baseline_column_should_reverse) free_space else 0.0;
         },
         .stretch => if (wrap_xor_cross_reverse) free_space else 0.0,
-        // SelfStart/SelfEnd are resolved to Start/End against the item's own direction when
-        // flex items are generated.
-        .self_start, .self_end => unreachable,
+        // Normal is resolved to Stretch, and SelfStart/SelfEnd to Start/End against the
+        // item's own direction, when flex items are generated.
+        .normal, .self_start, .self_end => unreachable,
     };
 }
 
@@ -3192,17 +3197,17 @@ inline fn resolve_dimension_value(value: Dimension, basis: ?f32) ?f32 {
 
 /// `AlignItems` value equality for the `BASELINE` constant (keyword + safety).
 inline fn is_baseline_alignment(value: style.alignment.AlignItems) bool {
-    return value.keyword == .baseline and value.safety == .unsafe;
+    return value.keyword == .baseline and value.safety == .default;
 }
 
 /// `AlignItems` value equality for the `STRETCH` constant (keyword + safety).
 inline fn is_stretch_alignment(value: style.alignment.AlignItems) bool {
-    return value.keyword == .stretch and value.safety == .unsafe;
+    return value.keyword == .stretch and value.safety == .default;
 }
 
 /// `AlignContent` value equality for the `STRETCH` constant (keyword + safety).
 inline fn is_stretch_content(value: style.alignment.AlignContent) bool {
-    return value.keyword == .stretch and value.safety == .unsafe;
+    return value.keyword == .stretch and value.safety == .default;
 }
 
 /// `AlignSelf.resolve_self_relative` implemented locally with an explicit result
