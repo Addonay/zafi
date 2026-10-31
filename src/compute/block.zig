@@ -1508,7 +1508,8 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                 const value = item_layout.baselines.first orelse item_layout.size.height;
                 break :blk @max(@min(value, item_layout.size.height), 0.0);
             } else item_layout.baselines.first;
-            first_baseline = if (child_baseline) |baseline| location.y + baseline else null;
+            // A relative offset does not move the container's baseline (Taffy 8bb96a2)
+            first_baseline = if (child_baseline) |baseline| location.y - inset_offset.y + baseline else null;
         }
 
         // Used auto margins include float-avoidance offsets, unlike the alignment
