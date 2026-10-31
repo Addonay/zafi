@@ -63,6 +63,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("bench/main.zig"),
             .target = target,
             .optimize = bench_optimize,
+            // Same allocator as the Rust mirror (system malloc) unless -Dbench-libc=false
+            .link_libc = b.option(bool, "bench-libc", "Benchmark with libc malloc, like the Rust mirror (default true)") orelse true,
             .imports = &.{.{ .name = "zafi", .module = bench_zafi_mod }},
         }),
     });

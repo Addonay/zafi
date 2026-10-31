@@ -5,13 +5,13 @@ Both harnesses run the same scenarios with the same iteration counts:
 
     Rust (tools/bench/rust, Cargo profile: opt-level 3 + LTO):
         bench|<scenario>|<iters>|<ns_per_iter>|<peak_live_bytes>
-    Zig (tools/bench/main.zig, ReleaseFast):
-        bench|<scenario>|<iters>|<ns_per_iter>|<arena_capacity_bytes>
+    Zig (tools/bench/main.zig, ReleaseFast, libc malloc):
+        bench|<scenario>|<iters>|<ns_per_iter>|<peak_live_bytes>|<allocs_per_iter>
 
-The fifth field is a memory proxy, not an identical metric: Rust reports peak
-live bytes from a counting global allocator; Zig reports the layout arena's
-capacity (high-water, retained across iterations). Treat it as an order-of-
-magnitude comparison, not a parity check.
+The memory field is the same metric on both sides: peak live bytes through a
+counting allocator wrapping system malloc, with each tree built and torn down
+inside the iteration. (Earlier Zig harnesses timed a reused arena and reported
+its capacity, which flattered Zig's time and overstated its memory.)
 
 ## Why this script is defensive
 
@@ -61,7 +61,7 @@ def parse(output: str, side: str) -> dict[str, Row]:
     rows: dict[str, Row] = {}
     for line in output.splitlines():
         parts = line.strip().split("|")
-        if len(parts) != 5 or parts[0] != "bench":
+        if len(parts) not in (5, 6) or parts[0] != "bench":
             continue
         name = parts[1]
         try:

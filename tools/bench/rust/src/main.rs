@@ -129,7 +129,7 @@ fn flex_wrap() {
             Style {
                 display: Display::Flex,
                 flex_wrap: FlexWrap::Wrap,
-                align_content: Some(AlignContent::CENTER),
+                align_content: AlignContent::CENTER,
                 size: Size { width: Dimension::length(400.0), height: Dimension::auto() },
                 gap: Size { width: LengthPercentage::length(5.0), height: LengthPercentage::length(5.0) },
                 ..Default::default()
