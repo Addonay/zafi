@@ -135,7 +135,19 @@ pub fn test_measure_function(context_pointer: ?*anyopaque, known_dimensions: geo
 /// and the sizing-mode rules are applied exactly like production leaves.
 pub fn fixture_measure_function(context_pointer: ?*anyopaque, inputs: LayoutInput, node_id: NodeId, node_style: *const Style) LayoutOutput {
     _ = node_id;
-    return compute_leaf_layout(inputs, node_style, context_pointer, test_measure_function);
+    var output = compute_leaf_layout(inputs, node_style, context_pointer, test_measure_function);
+    // Ahem text (10px, line-height 1): ascent 8px and descent 2px per line (Taffy 936c11f)
+    if (context_pointer) |pointer| {
+        const context: *const TestNodeContext = @ptrCast(@alignCast(pointer));
+        if (context.measure_data == .ahem_text and context.measure_data.ahem_text.writing_mode == .horizontal) {
+            const basis = inputs.parent_size.width;
+            const resolve = @import("util/resolve.zig").resolve_or_zero;
+            const first = resolve(node_style.padding.top, basis) + resolve(node_style.border.top, basis) + 8.0;
+            const last = output.size.height - resolve(node_style.padding.bottom, basis) - resolve(node_style.border.bottom, basis) - 2.0;
+            output.baselines = .{ .first = first, .last = @max(last, first) };
+        }
+    }
+    return output;
 }
 
 test "shared test measurement contexts preserve intrinsic and known dimensions" {

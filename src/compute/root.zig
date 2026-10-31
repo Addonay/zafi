@@ -92,9 +92,15 @@ pub fn compute_child_layout_with_block_ctx(comptime Tree: type, tree_ref: *Tree,
     node_id: NodeId,
     input: layout.LayoutInput,
     block_ctx: ?*block.BlockContext) ComputeError!layout.LayoutOutput {
-    if (input.run_mode == .perform_hidden_layout) return compute_hidden_layout(Tree, tree_ref, node_id);
-
     const TreeApi = LayoutTree(Tree);
+    if (input.run_mode == .perform_hidden_layout) {
+        // Rounding reaches out-of-flow boxes only through their containing block's
+        // hoisted list, and a box in a hidden subtree is in no such list: reset its
+        // final layout so it does not keep one from an earlier visible pass (Taffy dd94ef7).
+        try TreeApi.set_final_layout(tree_ref, node_id, layout.Layout.with_order(0));
+        return compute_hidden_layout(Tree, tree_ref, node_id);
+    }
+
     const node_style = TreeApi.get_style(tree_ref, node_id);
     if (node_style.display == .none) return compute_hidden_layout(Tree, tree_ref, node_id);
 
