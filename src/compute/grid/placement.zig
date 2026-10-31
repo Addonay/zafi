@@ -374,7 +374,9 @@ fn record_grid_placement(
     // Create grid item
     const col_span = if (primary_axis == .horizontal) primary_span else secondary_span;
     const row_span = if (primary_axis == .horizontal) secondary_span else primary_span;
-    try items.append(allocator, GridItem.new_with_placement_style_and_order(
+    // Construct the (large) item directly in its slot rather than on the stack.
+    const slot = try items.addOne(allocator);
+    slot.* = GridItem.new_with_placement_style_and_order(
         node,
         col_span,
         row_span,
@@ -382,7 +384,7 @@ fn record_grid_placement(
         parent_align_items,
         parent_justify_items,
         source_order,
-    ));
+    );
 }
 
 test "placement algorithm handles definite and auto placement" {
