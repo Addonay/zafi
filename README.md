@@ -18,6 +18,35 @@ tree type.
 | Zig | 0.17.0 or newer |
 | Dependencies | none (optional `serde.zig` for Taffy-compatible JSON) |
 
+## Performance
+
+Measured against Taffy `c6421c1` (Rust, `opt-level=3`, LTO) with the same
+allocator (glibc `malloc`) and the same memory metric (peak live bytes) on
+both sides, interleaved, best of 5, one core. Ratios are zafi / Taffy; lower
+is better.
+
+| scenario | time | memory |
+| --- | --- | --- |
+| rebuild a 1000-item flex row every frame (`clear` + rebuild + layout) | **0.91x** | 1.00x |
+| relayout a 50x50 auto grid after restyling one cell | 1.09x | **0.76x** |
+| flex row, 1000 items | 1.08x | 1.00x |
+| wrapping flex, 500 items | **0.86x** | 1.00x |
+| 50-deep nested blocks | **0.87x** | **0.47x** |
+| nested flex > grid > block | **0.97x** | 1.06x |
+| 50x50 fixed grid, fresh tree | 2.22x | **0.76x** |
+| create a 10,000-node tree | 2.87x | **0.54x** |
+| **geometric mean** | 1.22x | **0.79x** |
+
+The last two scenarios build and destroy a whole tree per iteration, and their
+time is dominated by glibc returning the freed memory to the OS and faulting it
+back in. With that trimming disabled on both sides
+(`MALLOC_TRIM_THRESHOLD_`/`MALLOC_MMAP_THRESHOLD_`), zafi is faster in every
+scenario but relayout: tree creation 0.39x, grid 0.94x, geometric mean 0.84x.
+Applications that rebuild a tree every frame should reuse it with
+`Tree.clear()`, as the first row does.
+
+Reproduce with the `dev` branch's `tools/` package (`zig build bench-compare`).
+
 ## Install
 
 ```sh
@@ -82,6 +111,13 @@ const zafi = b.dependency("zafi", .{ .target = target, .optimize = optimize, .se
 ```
 
 The wire format matches Taffy's Rust `serde` output.
+
+## Known limitations
+
+- `calc()` values resolve to 0, as with Taffy's default tree: the
+  `LayoutTree.calc` hook is not consulted by the layout algorithms yet.
+- Text, images and other content are measured by the host (see above); there is
+  no built-in text shaping, inline formatting or table layout.
 
 ## Testing
 
