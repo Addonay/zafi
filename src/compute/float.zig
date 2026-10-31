@@ -434,7 +434,13 @@ pub const FloatContext = struct {
 
         // Handle case where floated box is placed after all existing segments
         if (placement.start == null) {
-            const last_y_end = if (self.segments.items.len > 0) self.segments.items[self.segments.items.len - 1].y_end else 0.0;
+            // Before the first float, the context is float-free all the way up: the first float
+            // gets an empty segment above it like any other float placed below all segments, so
+            // that content positioned above it (e.g. by a negative margin) is not moved down to
+            // it. The first float itself may be above the top of the block formatting context
+            // (`y < 0`): its containing block (CSS2 float rule 4) may be pulled up by a negative
+            // margin.
+            const last_y_end = if (self.segments.items.len > 0) self.segments.items[self.segments.items.len - 1].y_end else -std.math.inf(f32);
             if (start_y > last_y_end) {
                 self.segments.append(self.allocator, .{ .y_start = last_y_end, .y_end = start_y, .insets = .{ 0.0, 0.0 }, .has_float = .{ false, false } }) catch @panic("Taffy float segment allocation failed");
             }
@@ -474,9 +480,12 @@ pub const FloatContext = struct {
         }
 
         const end_idx_final: usize = if (placement.end == null) blk: {
-            const last_y_end = if (self.segments.items.len > 0) self.segments.items[self.segments.items.len - 1].y_end else 0.0;
-            if (effective_min_y > last_y_end) {
-                self.segments.append(self.allocator, .{ .y_start = last_y_end, .y_end = effective_min_y, .insets = .{ 0.0, 0.0 }, .has_float = .{ false, false } }) catch @panic("Taffy float segment allocation failed");
+            // The float extends below all existing segments: add a segment for the part of it
+            // below the last segment (its insets are set along with the other segments below)
+            const last_y_end = self.segments.items[self.segments.items.len - 1].y_end;
+            const end_y = start_y + floated_box.height;
+            if (end_y > last_y_end) {
+                self.segments.append(self.allocator, .{ .y_start = last_y_end, .y_end = end_y, .insets = containing_block_insets, .has_float = .{ false, false } }) catch @panic("Taffy float segment allocation failed");
             }
             break :blk self.segments.items.len - 1;
         } else blk: {
