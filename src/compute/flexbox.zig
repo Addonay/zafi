@@ -1043,14 +1043,11 @@ inline fn determine_flex_base_size(comptime Tree: type, tree_ref: *Tree,
             }
         }
 
-        // Percentage padding and border resolve against the container's inline size (its
-        // width), whichever axis is the main axis.
-        const container_width = constants.node_inner_size.width;
-        const box_sizing_adjustment = if (child_style.box_sizing == .content_box) blk: {
-            const padding = resolve_length_rect(child_style.padding, container_width);
-            const border = resolve_length_rect(child_style.border, container_width);
-            break :blk padding.sum_axes().add(border.sum_axes()).main(dir);
-        } else 0.0;
+        // The item's padding and border were resolved once when the flex items were generated
+        const box_sizing_adjustment = if (child_style.box_sizing == .content_box)
+            child.padding.sum_axes().add(child.border.sum_axes()).main(dir)
+        else
+            0.0;
         // Percentage flex basis values resolve against the container's inner main size, but only
         // if that size is definite. A known main size which is derived from the container's own
         // content is treated as indefinite here.
@@ -2233,12 +2230,7 @@ inline fn determine_used_cross_size(comptime Tree: type, tree_ref: *Tree,
                     // For some reason this particular usage of max_width is an exception to the rule that max_width's transfer
                     // using the aspect_ratio (if set). Both Chrome and Firefox agree on this. And reading the spec, it seems like
                     // a reasonable interpretation. Although it seems to me that the spec *should* apply aspect_ratio here.
-                    // Percentage padding and border resolve against the container's inline
-                    // size (its width) on all four sides, not against its height for the
-                    // top/bottom sides.
-                    const padding = resolve_length_rect(child_style.padding, constants.node_inner_size.width);
-                    const border = resolve_length_rect(child_style.border, constants.node_inner_size.width);
-                    const pb_sum = padding.sum_axes().add(border.sum_axes());
+                    const pb_sum = child.padding.sum_axes().add(child.border.sum_axes());
                     const box_sizing_adjustment = if (child_style.box_sizing == .content_box) pb_sum else geometry.SIZE_F32_ZERO;
 
                     const max_size_ignoring_aspect_ratio = size_maybe_add(
