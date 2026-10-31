@@ -179,12 +179,27 @@ fn alignmentWireName(comptime T: type, keyword: anytype, safety: alignment.Align
         alignContentKeywordName(keyword)
     else
         @compileError("alignmentWireName: unsupported type " ++ @typeName(T));
-    if (safety == .safe) return std.fmt.bufPrint(buffer, "Safe{s}", .{base}) catch unreachable;
-    return base;
+    // Only the positional keywords carry an overflow-position modifier on the
+    // wire (Taffy: `Safe*`/`Unsafe*`); `normal`, `baseline`, `stretch` and the
+    // distribution keywords ignore it.
+    if (!isPositionalKeyword(keyword)) return base;
+    return switch (safety) {
+        .default => base,
+        .safe => std.fmt.bufPrint(buffer, "Safe{s}", .{base}) catch unreachable,
+        .unsafe => std.fmt.bufPrint(buffer, "Unsafe{s}", .{base}) catch unreachable,
+    };
+}
+
+fn isPositionalKeyword(keyword: anytype) bool {
+    return switch (keyword) {
+        .start, .end, .flex_start, .flex_end, .center => true,
+        else => if (@TypeOf(keyword) == alignment.AlignItemsKeyword) (keyword == .self_start or keyword == .self_end) else false,
+    };
 }
 
 fn alignItemsKeywordName(keyword: alignment.AlignItemsKeyword) []const u8 {
     return switch (keyword) {
+        .normal => "Normal",
         .start => "Start",
         .end => "End",
         .flex_start => "FlexStart",
@@ -199,6 +214,7 @@ fn alignItemsKeywordName(keyword: alignment.AlignItemsKeyword) []const u8 {
 
 fn alignContentKeywordName(keyword: alignment.AlignContentKeyword) []const u8 {
     return switch (keyword) {
+        .normal => "Normal",
         .start => "Start",
         .end => "End",
         .flex_start => "FlexStart",
@@ -215,12 +231,14 @@ fn deserializeAlignment(comptime T: type, allocator: std.mem.Allocator, deserial
     const text = try deserializer.deserializeString(allocator);
     defer serde.core.releaseString(deserializer, allocator, text);
 
-    var safety: alignment.AlignmentSafety = .unsafe;
+    var safety: alignment.AlignmentSafety = .default;
     var body = text;
-    if (std.mem.startsWith(u8, body, "Safe")) {
-        safety = .safe;
-        body = body["Safe".len..];
-        if (body.len == 0) return deserializer.raiseError(error.InvalidAlignment);
+    inline for (.{ .{ "Safe", alignment.AlignmentSafety.safe }, .{ "Unsafe", alignment.AlignmentSafety.unsafe } }) |prefix| {
+        if (safety == .default and std.mem.startsWith(u8, body, prefix[0])) {
+            safety = prefix[1];
+            body = body[prefix[0].len..];
+            if (body.len == 0) return deserializer.raiseError(error.InvalidAlignment);
+        }
     }
     if (comptime T == alignment.AlignItems) {
         return .{ .keyword = parseAlignItemsKeyword(body) orelse return deserializer.raiseError(error.InvalidAlignment), .safety = safety };
@@ -232,6 +250,7 @@ fn deserializeAlignment(comptime T: type, allocator: std.mem.Allocator, deserial
 
 fn parseAlignItemsKeyword(name: []const u8) ?alignment.AlignItemsKeyword {
     inline for (.{
+        .{ "Normal", alignment.AlignItemsKeyword.normal },
         .{ "Start", alignment.AlignItemsKeyword.start },
         .{ "End", alignment.AlignItemsKeyword.end },
         .{ "FlexStart", alignment.AlignItemsKeyword.flex_start },
@@ -249,6 +268,7 @@ fn parseAlignItemsKeyword(name: []const u8) ?alignment.AlignItemsKeyword {
 
 fn parseAlignContentKeyword(name: []const u8) ?alignment.AlignContentKeyword {
     inline for (.{
+        .{ "Normal", alignment.AlignContentKeyword.normal },
         .{ "Start", alignment.AlignContentKeyword.start },
         .{ "End", alignment.AlignContentKeyword.end },
         .{ "FlexStart", alignment.AlignContentKeyword.flex_start },
