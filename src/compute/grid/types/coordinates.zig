@@ -5,6 +5,7 @@
 //! explicit-grid start. Keeping both representations is important because
 //! negative implicit tracks are created during placement.
 
+const std = @import("std");
 const geometry = @import("../../../geometry.zig");
 const grid_track_counts = @import("grid_track_counts.zig");
 
@@ -28,6 +29,16 @@ pub const OriginZeroLine = struct {
     }
     pub fn try_into_track_vec_index(self: OriginZeroLine, counts: grid_track_counts.TrackCounts) ?usize {
         return origin_zero_line_try_into_track_vec_index_with_counts(self, counts);
+    }
+    /// A line clamped to the grid limit (`MIN_OZ_LINE..=MAX_OZ_LINE`).
+    pub fn clamped(line: i32) OriginZeroLine {
+        return .{ .value = @intCast(std.math.clamp(line, @as(i32, MIN_OZ_LINE), @as(i32, MAX_OZ_LINE))) };
+    }
+    /// Convert into "CSS Grid Line" coordinates; the inverse of
+    /// `GridLine.into_origin_zero_line`.
+    pub fn into_grid_line(self: OriginZeroLine, explicit_track_count: u16) GridLine {
+        const explicit_line_count: i16 = @intCast(explicit_track_count + 1);
+        return .{ .value = if (self.value >= 0) self.value + 1 else self.value - explicit_line_count };
     }
     pub fn implied_negative_implicit_tracks(self: OriginZeroLine) u16 {
         return origin_zero_line_implied_negative_implicit_tracks(self);
