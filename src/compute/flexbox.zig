@@ -1087,7 +1087,9 @@ inline fn determine_flex_base_size(comptime Tree: type, tree_ref: *Tree,
                 };
                 break :blk null;
             } else blk: {
-                if (resolved_flex_basis orelse main_size) |basis| {
+                // A main size is only used in place of an auto flex basis: an unresolved
+                // percentage flex basis behaves as `content`.
+                if (resolved_flex_basis orelse (if (flex_basis_style.is_auto()) main_size else null)) |basis| {
                     child.flex_basis_is_definite = true;
                     break :flex_basis basis;
                 }
