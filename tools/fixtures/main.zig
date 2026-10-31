@@ -181,7 +181,7 @@ const Runner = struct {
         parent: ?zafi.NodeId,
         default_position: zafi.Position,
     ) !*ExpectedNode {
-        const style = try buildStyle(input, default_position);
+        const style = try buildStyle(alloc, input, default_position);
         var node_id: zafi.NodeId = undefined;
         if (input.children.len > 0) {
             node_id = try tree.new_leaf(style);
@@ -280,7 +280,7 @@ fn parsePlacement(node: *const xml.Element, name: []const u8) !grid.GridPlacemen
     return try grid.grid_placement_from_str(raw);
 }
 
-fn buildStyle(node: *const xml.Element, default_position: zafi.Position) !Style {
+fn buildStyle(alloc: std.mem.Allocator, node: *const xml.Element, default_position: zafi.Position) !Style {
     var style = Style{};
 
     style.display = try attrOr(zafi.Display, node, "display", .flex);
@@ -353,17 +353,17 @@ fn buildStyle(node: *const xml.Element, default_position: zafi.Position) !Style 
 
     style.grid_auto_flow = try attrOr(grid.GridAutoFlow, node, "grid-auto-flow", .row);
     if (node.attribute("grid-template-rows")) |raw| {
-        const parsed = try grid.GridTemplateComponents.from_str(raw);
+        const parsed = try grid.GridTemplateComponents.from_str(alloc, raw);
         style.grid_template_rows = parsed.tracks;
         style.grid_template_row_names = parsed.line_names;
     }
     if (node.attribute("grid-template-columns")) |raw| {
-        const parsed = try grid.GridTemplateComponents.from_str(raw);
+        const parsed = try grid.GridTemplateComponents.from_str(alloc, raw);
         style.grid_template_columns = parsed.tracks;
         style.grid_template_column_names = parsed.line_names;
     }
-    if (node.attribute("grid-auto-rows")) |raw| style.grid_auto_rows = try grid.grid_auto_tracks_from_str(raw);
-    if (node.attribute("grid-auto-columns")) |raw| style.grid_auto_columns = try grid.grid_auto_tracks_from_str(raw);
+    if (node.attribute("grid-auto-rows")) |raw| style.grid_auto_rows = try grid.grid_auto_tracks_from_str(alloc, raw);
+    if (node.attribute("grid-auto-columns")) |raw| style.grid_auto_columns = try grid.grid_auto_tracks_from_str(alloc, raw);
     style.grid_row = .{ .start = try parsePlacement(node, "grid-row-start"), .end = try parsePlacement(node, "grid-row-end") };
     style.grid_column = .{ .start = try parsePlacement(node, "grid-column-start"), .end = try parsePlacement(node, "grid-column-end") };
 

@@ -133,9 +133,6 @@ pub const CellOccupancyMatrix = struct {
     column_intervals: std.ArrayList(TrackIntervals),
     allocator: std.mem.Allocator,
 
-    pub fn with_track_counts(columns: grid_track_counts.TrackCounts, rows: grid_track_counts.TrackCounts) CellOccupancyMatrix {
-        return with_track_counts_using_allocator(std.heap.page_allocator, columns, rows);
-    }
 
     pub fn with_track_counts_using_allocator(allocator: std.mem.Allocator, columns: grid_track_counts.TrackCounts, rows: grid_track_counts.TrackCounts) CellOccupancyMatrix {
         var row_intervals = std.ArrayList(TrackIntervals).empty;
@@ -161,12 +158,6 @@ pub const CellOccupancyMatrix = struct {
     /// Compatibility constructor for the early first-pass callers. New code
     /// should pass TrackCounts so negative and positive implicit tracks remain
     /// visible to placement.
-    pub fn with_raw_track_counts(columns: usize, rows: usize) CellOccupancyMatrix {
-        return with_track_counts(
-            grid_track_counts.TrackCounts.from_raw(0, @intCast(columns), 0),
-            grid_track_counts.TrackCounts.from_raw(0, @intCast(rows), 0),
-        );
-    }
 
     fn track_lists(self: *const CellOccupancyMatrix, axis: geometry.AbsoluteAxis) []const TrackIntervals {
         return switch (axis) {
