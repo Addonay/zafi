@@ -370,9 +370,7 @@ fn itemKey(comptime kind: SortKind, axis: AbstractAxis, item: GridItem) u64 {
             // Items that do not cross a flexible track sort first, so the flag
             // occupies the high bit.
             const flex: u64 = if (item.crosses_flexible_track(axis)) 1 else 0;
-            break :blk (flex << 48) |
-                (@as(u64, span) << 16) |
-                @as(u64, @as(u16, @bitCast(placement.start.value)));
+            break :blk (flex << 48) | @as(u64, span);
         },
     };
 }
@@ -446,7 +444,23 @@ fn sortItemsByOtherAxisStart(items: []GridItem, axis: AbstractAxis, scratch: Sor
     sortItemsByKey(items, scratch, axis, .other_axis_start);
 }
 
+/// Order items for intrinsic track sizing: items that cross a flexible track
+/// form one batch at the end; the rest only need ordering by span if any of
+/// them spans more than one track (Taffy 2c81b8e: order within a batch does not
+/// affect the result). The common all-span-1, no-flex grid is left untouched.
 fn sortItemsByCrossFlexSpanStart(items: []GridItem, axis: AbstractAxis, scratch: SortScratch) void {
+    var needs_sort = false;
+    var seen_flex = false;
+    var flex_out_of_place = false;
+    for (items) |item| {
+        if (item.crosses_flexible_track(axis)) {
+            seen_flex = true;
+        } else {
+            if (seen_flex) flex_out_of_place = true;
+            if (coordinates.line_origin_zero_span(item.placement(axis)) > 1) needs_sort = true;
+        }
+    }
+    if (!needs_sort and !flex_out_of_place) return;
     sortItemsByKey(items, scratch, axis, .cross_flex_span_start);
 }
 
@@ -613,36 +627,43 @@ fn resolve_intrinsic_track_sizes(comptime Tree: type, tree_ref: *Tree,
                         track.base_size,
                     else => track.base_size,
                 };
-                const growth_limit_min_content_contribution: ?f32 = if (!item.overflow.get(axis).is_scroll_container())
+                axis_tracks[track_index].base_size = new_base_size;
+
+                // Handle growth limits
+                //
+                // Contributions call into the child, so they are only computed when
+                // used. The min-content contribution is computed for every item in an
+                // intrinsic track (even where only the max-content contribution sets
+                // the growth limit): the re-run check compares each such item's
+                // min-content contribution against the one cached here.
+                const track_now = &axis_tracks[track_index];
+                const max_track_sizing_function = track_now.max_track_sizing_function;
+                const fit_content_limit = track_now.fit_content_limit(axis_inner_node_size);
+                const min_content_contribution: ?f32 = if (track_now.has_intrinsic_sizing_function())
                     item_sizer.minContentContribution(item, axis_tracks)
                 else
                     null;
-                const growth_limit_max_content_contribution = item_sizer.maxContentContribution(item, axis_tracks);
-                const growth_limit_intrinsic_min_content_contribution = item_sizer.minContentContribution(item, axis_tracks);
-                const track_mut = &axis_tracks[track_index];
-                track_mut.base_size = new_base_size;
-
-                // Handle growth limits
-                if (track_mut.max_track_sizing_function.is_fit_content()) {
-                    // If item is not a scroll container, then increase the growth limit to
-                    // at least the size of the min-content contribution
-                    if (growth_limit_min_content_contribution) |min_content_contribution| {
-                        track_mut.growth_limit_planned_increase = math.f32_max(track_mut.growth_limit_planned_increase, min_content_contribution);
+                const planned_increase: ?f32 = if (max_track_sizing_function.is_fit_content()) pi: {
+                    // Always grow to at least the *fit-content limited* max-content contribution
+                    const max_content_contribution = math.f32_min(item_sizer.maxContentContribution(item, axis_tracks), fit_content_limit);
+                    // ...and, if the item is not a scroll container, its min-content contribution
+                    if (min_content_contribution) |min_c| {
+                        if (!item.overflow.get(axis).is_scroll_container())
+                            break :pi math.f32_max(min_c, max_content_contribution);
                     }
-
-                    // Always increase the growth limit to at least the size of the
-                    // *fit-content limited* max-content contribution
-                    const fit_content_limit = track_mut.fit_content_limit(axis_inner_node_size);
-                    const max_content_contribution = math.f32_min(growth_limit_max_content_contribution, fit_content_limit);
-                    track_mut.growth_limit_planned_increase = math.f32_max(track_mut.growth_limit_planned_increase, max_content_contribution);
-                } else if (track_mut.max_track_sizing_function.is_max_content_alike() or
-                    (track_mut.max_track_sizing_function.uses_percentage() and axis_inner_node_size == null))
-                {
+                    break :pi max_content_contribution;
+                } else if (max_track_sizing_function.is_max_content_alike() or
+                    (max_track_sizing_function.uses_percentage() and axis_inner_node_size == null))
                     // If the container size is indefinite then percentage sized tracks
                     // should be treated as auto.
-                    track_mut.growth_limit_planned_increase = math.f32_max(track_mut.growth_limit_planned_increase, growth_limit_max_content_contribution);
-                } else if (track_mut.max_track_sizing_function.is_intrinsic()) {
-                    track_mut.growth_limit_planned_increase = math.f32_max(track_mut.growth_limit_planned_increase, growth_limit_intrinsic_min_content_contribution);
+                    item_sizer.maxContentContribution(item, axis_tracks)
+                else if (max_track_sizing_function.is_intrinsic())
+                    min_content_contribution
+                else
+                    null;
+                if (planned_increase) |increase| {
+                    const track_mut = &axis_tracks[track_index];
+                    track_mut.growth_limit_planned_increase = math.f32_max(track_mut.growth_limit_planned_increase, increase);
                 }
             }
 

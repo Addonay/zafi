@@ -502,7 +502,7 @@ pub const GridItem = struct {
 
         // it spans at least one track in that axis whose min track sizing function is auto
         var spans_auto_min_track = false;
-        for (axis_tracks) |track| {
+        for (item_axis_tracks) |track| {
             if (track.min_track_sizing_function.is_auto()) {
                 spans_auto_min_track = true;
                 break;
@@ -512,7 +512,7 @@ pub const GridItem = struct {
         // if it spans more than one track in that axis, none of those tracks are flexible
         const only_span_one_track = item_axis_tracks.len == 1;
         var spans_a_flexible_track = false;
-        for (axis_tracks) |track| {
+        for (item_axis_tracks) |track| {
             if (track.max_track_sizing_function.is_fr()) {
                 spans_a_flexible_track = true;
                 break;

@@ -629,10 +629,8 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
             item.max_content_contribution_cache.width = null;
             item.minimum_contribution_cache.width = null;
 
-            if (has_changed) {
-                intrinsic_column_contribution_changed = true;
-                break;
-            }
+            // Every item must be visited (no early exit): this loop updates each item's caches.
+            if (has_changed) intrinsic_column_contribution_changed = true;
         }
         rerun_column_sizing = intrinsic_column_contribution_changed;
     } else {
@@ -675,7 +673,7 @@ tree_ref,
 
         if (!rerun_row_sizing) {
             for (items.items) |*item| {
-                if (!item.crosses_intrinsic_column) continue;
+                if (!item.crosses_intrinsic_row) continue;
                 const grid_area_size = item.grid_area_size(Tree, .block, rows.items, columns.items, inner_node_size, estimate_track_base_size(Tree), tree_ref);
                 const available_space = grid_area_size.with(.block, null);
                 const new_min_content_contribution = item.min_content_contribution(Tree, .block, tree_ref, grid_area_size, available_space);
@@ -687,10 +685,8 @@ tree_ref,
                 item.max_content_contribution_cache.height = null;
                 item.minimum_contribution_cache.height = null;
 
-                if (has_changed) {
-                    intrinsic_row_contribution_changed = true;
-                    break;
-                }
+                // Every item must be visited (no early exit): this loop updates each item's caches.
+                if (has_changed) intrinsic_row_contribution_changed = true;
             }
             rerun_row_sizing = intrinsic_row_contribution_changed;
         } else {
