@@ -1797,41 +1797,34 @@ inline fn resolve_flexible_lengths(line: *FlexLine, constants: *const AlgoConsta
         // a. Check for flexible items. If all the flex items on the line are frozen,
         //    free space has been distributed; exit this loop.
 
-        var all_frozen = true;
-        for (line.items) |*child| {
-            if (!child.frozen) {
-                all_frozen = false;
-                break;
-            }
-        }
-        if (all_frozen) break;
-
-        // b. Calculate the remaining free space as for initial free space, above.
+        // a. and b. are computed in a single pass over the items: the outer sizes used
+        //    for the free space calculation and the flex factor sums of the unfrozen items.
+        //    If all the flex items on the line are frozen, free space has been
+        //    distributed; exit this loop.
+        //
+        //    Calculate the remaining free space as for initial free space, above.
         //    If the sum of the unfrozen flex items' flex factors is less than one,
         //    multiply the initial free space by this sum. If the magnitude of this
         //    value is less than the magnitude of the remaining free space, use this
         //    as the remaining free space.
 
-        const used_space: f32 = total_main_axis_gap + blk: {
-            var sum: f32 = 0.0;
-            for (line.items) |*child| {
-                if (child.frozen) {
-                    sum += child.outer_target_size.main(constants.dir);
-                } else {
-                    sum += child.flex_basis + child.margin.main_axis_sum(constants.dir);
-                }
-            }
-            break :blk sum;
-        };
-
+        var all_frozen = true;
+        var items_space: f32 = 0.0;
         var sum_flex_grow: f32 = 0.0;
         var sum_flex_shrink: f32 = 0.0;
         for (line.items) |*child| {
-            if (!child.frozen) {
+            if (child.frozen) {
+                items_space += child.outer_target_size.main(constants.dir);
+            } else {
+                all_frozen = false;
+                items_space += child.flex_basis + child.margin.main_axis_sum(constants.dir);
                 sum_flex_grow += child.flex_grow;
                 sum_flex_shrink += child.flex_shrink;
             }
         }
+        if (all_frozen) break;
+
+        const used_space: f32 = total_main_axis_gap + items_space;
 
         const free_space: f32 = if (growing and sum_flex_grow < 1.0)
             math.f32_maybe_min(
