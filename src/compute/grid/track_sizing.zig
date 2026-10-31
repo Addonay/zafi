@@ -530,6 +530,7 @@ fn resolve_item_baselines(comptime Tree: type, tree_ref: *Tree, axis: AbstractAx
         for (row_items) |*item| {
             if (item.participates_in_baseline_alignment()) {
                 item.baseline_shim = row_max_baseline - (item.baseline orelse 0);
+                item.known_dimensions_cache = null;
             }
         }
 

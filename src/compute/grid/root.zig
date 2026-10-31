@@ -510,6 +510,18 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
     for (columns.items) |track| initial_column_sum += track.base_size;
     if (inner_node_size.width == null) inner_node_size.width = initial_column_sum;
 
+    // If only the container's width has been requested then row sizing can be
+    // skipped entirely (avoiding measuring every item's height): column sizing
+    // is not re-run when only computing the container's size.
+    if (inputs.run_mode == .compute_size and inputs.axis == .horizontal) {
+        const width = maybe_clamp_and_max(
+            initial_column_sum + content_box_inset.horizontal_axis_sum(),
+            min_size.width,
+            max_size.width,
+            padding_border_size.width);
+        return layout.LayoutOutput.from_outer_size(.{ .width = width, .height = 0 });
+    }
+
     for (items.items) |*item| item.grid_area_size_cache = null;
 
     // Run track sizing algorithm for Block axis

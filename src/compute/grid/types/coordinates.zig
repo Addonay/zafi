@@ -133,7 +133,7 @@ pub fn implied_negative_implicit_tracks(value: OriginZeroLine) u16 {
 pub fn implied_positive_implicit_tracks(value: OriginZeroLine, explicit_track_count: u16) u16 {
     return origin_zero_line_implied_positive_implicit_tracks(value, explicit_track_count);
 }
-pub fn span(value: geometry.Line(OriginZeroLine)) u16 {
+pub inline fn span(value: geometry.Line(OriginZeroLine)) u16 {
     return line_origin_zero_span(value);
 }
 

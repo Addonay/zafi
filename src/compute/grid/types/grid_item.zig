@@ -42,6 +42,12 @@ pub const InFlowChild = struct {
     source_order: u16,
 };
 
+/// The known_dimensions computed for a grid item for a given grid area size.
+pub const KnownDimensionsCacheEntry = struct {
+    grid_area_size: geometry.Size(?f32),
+    known_dimensions: geometry.Size(?f32),
+};
+
 pub const GridItem = struct {
     /// The id of the node that this item represents
     node: NodeId,
@@ -101,6 +107,10 @@ pub const GridItem = struct {
     // Caches for intrinsic size computation. These caches are only valid for
     // a single run of the track-sizing algorithm.
     grid_area_size_cache: ?geometry.Size(?f32) = null,
+    /// The known_dimensions passed to the child when computing its intrinsic
+    /// contributions, with the grid area size they were computed for. Must be
+    /// cleared whenever `baseline_shim` changes.
+    known_dimensions_cache: ?KnownDimensionsCacheEntry = null,
     min_content_contribution_cache: geometry.Size(?f32) = .{ .width = null, .height = null },
     minimum_contribution_cache: geometry.Size(?f32) = .{ .width = null, .height = null },
     max_content_contribution_cache: geometry.Size(?f32) = .{ .width = null, .height = null },
@@ -245,9 +255,14 @@ pub const GridItem = struct {
         const inherent_size = maybe_add_size(
             geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_dimension_size(self.size, area_size), aspect_ratio),
             box_sizing_adjustment);
-        const min_size = maybe_add_size(
+        const raw_min_size = maybe_add_size(
             geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(self.min_size, area_size), aspect_ratio),
             box_sizing_adjustment);
+        // The size of the item is floored by its padding and border
+        const min_size = geometry.Size(?f32){
+            .width = @max(raw_min_size.width orelse padding_border_size.width, padding_border_size.width),
+            .height = @max(raw_min_size.height orelse padding_border_size.height, padding_border_size.height),
+        };
         const max_size = maybe_add_size(
             geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(self.max_size, area_size), aspect_ratio),
             box_sizing_adjustment);
@@ -288,6 +303,18 @@ pub const GridItem = struct {
 
         // Clamp size by min and max width/height
         return optional_size_maybe_clamp(size, min_size, max_size);
+    }
+
+    /// `known_dimensions` for the given grid area size, from the cache when the
+    /// area size matches. Min- and max-content contributions share it.
+    inline fn known_dimensions_cached(self: *GridItem, comptime Tree: type, tree_ref: *Tree, area_size: geometry.Size(?f32)) geometry.Size(?f32) {
+        if (self.known_dimensions_cache) |entry| {
+            if (entry.grid_area_size.width == area_size.width and entry.grid_area_size.height == area_size.height)
+                return entry.known_dimensions;
+        }
+        const known = self.known_dimensions(Tree, tree_ref, area_size);
+        self.known_dimensions_cache = .{ .grid_area_size = area_size, .known_dimensions = known };
+        return known;
     }
 
     /// Returns the grid area's size in the specified axis when every spanned
@@ -363,12 +390,14 @@ pub const GridItem = struct {
     }
 
     /// Compute the item's min content contribution from the provided parameters
-    pub fn min_content_contribution(self: *const GridItem, comptime Tree: type,
+    pub fn min_content_contribution(self: *GridItem, comptime Tree: type,
         axis: geometry.AbstractAxis,
         tree_ref: *Tree,
         grid_area_size_value: geometry.Size(?f32),
         available_space: geometry.Size(?f32)) f32 {
-        const known = self.known_dimensions(Tree, tree_ref, grid_area_size_value);
+        const known = self.known_dimensions_cached(Tree, tree_ref, grid_area_size_value);
+        // A size already known in the measured axis is the contribution: no need to call into the child.
+        if (known.get(axis)) |size| return size;
         return LayoutTree(Tree).measure_child_size(
             tree_ref,
             self.node,
@@ -393,12 +422,14 @@ pub const GridItem = struct {
     }
 
     /// Compute the item's max content contribution from the provided parameters
-    pub fn max_content_contribution(self: *const GridItem, comptime Tree: type,
+    pub fn max_content_contribution(self: *GridItem, comptime Tree: type,
         axis: geometry.AbstractAxis,
         tree_ref: *Tree,
         grid_area_size_value: geometry.Size(?f32),
         available_space: geometry.Size(?f32)) f32 {
-        const known = self.known_dimensions(Tree, tree_ref, grid_area_size_value);
+        const known = self.known_dimensions_cached(Tree, tree_ref, grid_area_size_value);
+        // A size already known in the measured axis is the contribution: no need to call into the child.
+        if (known.get(axis)) |size| return size;
         return LayoutTree(Tree).measure_child_size(
             tree_ref,
             self.node,

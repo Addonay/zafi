@@ -393,6 +393,21 @@ tree_ref,
         constants.gap.set_main(constants.dir, new_gap);
     }
 
+    // If only the container's main size has been requested then we are done, as
+    // nothing below changes it. This avoids measuring the cross size of every item.
+    if (inputs.run_mode == .compute_size) {
+        const main_axis_is_requested_axis = switch (inputs.axis) {
+            .horizontal => constants.dir.is_row(),
+            .vertical => constants.dir.is_column(),
+            .both => false,
+        };
+        if (main_axis_is_requested_axis) {
+            var size = geometry.F32Size{ .width = 0, .height = 0 };
+            size.set_main(constants.dir, constants.container_size.main(constants.dir));
+            return layout.LayoutOutput.from_outer_size(size);
+        }
+    }
+
     // 6. Resolve the flexible lengths of all the flex items to find their used main size.
     for (flex_lines) |*line| {
         resolve_flexible_lengths(line, &constants);
