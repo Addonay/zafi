@@ -14,7 +14,7 @@ tree type.
 
 | | |
 | --- | --- |
-| Layout behavior | Passes all 6,192 Taffy fixtures at Taffy `22f941e` |
+| Layout behavior | Passes all 6,652 Taffy fixtures at Taffy `c6421c1` (upstream `main`, after v0.15.1) |
 | Zig | 0.17.0 or newer |
 | Dependencies | none (optional `serde.zig` for Taffy-compatible JSON) |
 
