@@ -36,7 +36,6 @@ pub fn compute_leaf_layout(
 
     // Both horizontal and vertical percentage padding/borders resolve against
     // the container's inline size (i.e. width), per CSS.
-    const margin = resolveOrZero(node_style.margin, parent_size.width);
     const padding = resolveLengthEdges(node_style.padding, parent_size.width);
     const border = resolveLengthEdges(node_style.border, parent_size.width);
     const padding_border = addRect(padding, border);
@@ -101,10 +100,9 @@ pub fn compute_leaf_layout(
     }
 
     const content_inset_sum = F32Size{ .width = content_box_inset.horizontal_axis_sum(), .height = content_box_inset.vertical_axis_sum() };
-    const margin_sum = F32Size{ .width = margin.horizontal_axis_sum(), .height = margin.vertical_axis_sum() };
     const available_space = geometry.Size(AvailableSpace){
-        .width = availableForAxis(known_dimensions.width, node_size.width, inputs.available_space.width, node_min_size.width, node_max_size.width, margin_sum.width, content_inset_sum.width),
-        .height = availableForAxis(known_dimensions.height, node_size.height, inputs.available_space.height, node_min_size.height, node_max_size.height, margin_sum.height, content_inset_sum.height),
+        .width = availableForAxis(known_dimensions.width, node_size.width, inputs.available_space.width, node_min_size.width, node_max_size.width, content_inset_sum.width),
+        .height = availableForAxis(known_dimensions.height, node_size.height, inputs.available_space.height, node_min_size.height, node_max_size.height, content_inset_sum.height),
     };
 
     const measure_known = if (inputs.run_mode == .compute_size) known_dimensions else OptionalSize{ .width = null, .height = null };
@@ -145,9 +143,10 @@ pub fn compute_leaf_layout(
     };
 }
 
-fn availableForAxis(known: ?f32, styled: ?f32, space: AvailableSpace, minimum: ?f32, maximum: ?f32, margin_sum: f32, inset_sum: f32) AvailableSpace {
+/// A definite `space` is the space available to the node's border box: the
+/// caller has already subtracted the node's margins from it.
+fn availableForAxis(known: ?f32, styled: ?f32, space: AvailableSpace, minimum: ?f32, maximum: ?f32, inset_sum: f32) AvailableSpace {
     var result: AvailableSpace = if (known) |value| .{ .definite = value } else space;
-    result = math.available_maybe_sub(result, margin_sum);
     if (known) |value| result = .{ .definite = value };
     if (styled) |value| result = .{ .definite = value };
     return mapDefinite(result, minimum, maximum, inset_sum);

@@ -276,16 +276,21 @@ tree_ref,
         known_dimensions = math.optional_size_maybe_clamp(known_dimensions.maybe_apply_aspect_ratio(aspect_ratio), min_size, max_size);
     }
 
+    // The space available to the box's border box: the containing block minus
+    // the box's insets and margins (`auto` ones count as zero), clamped by its
+    // min/max sizes.
+    const oof_available_space = Size(AvailableSpace){
+        .width = .{ .definite = math.f32_maybe_clamp(@max(area_width - (left orelse 0) - (right orelse 0) - (margin.left orelse 0) - (margin.right orelse 0), 0), min_size.width, max_size.width) },
+        .height = .{ .definite = math.f32_maybe_clamp(@max(area_height - (top orelse 0) - (bottom orelse 0) - (margin.top orelse 0) - (margin.bottom orelse 0), 0), min_size.height, max_size.height) },
+    };
+
     var measured_size: Size(f32) = .{ .width = 0, .height = 0 };
     if (known_dimensions.width == null or known_dimensions.height == null) {
         measured_size = try TreeApi.measure_child_size_both(tree_ref, 
             candidate.node,
             known_dimensions,
             to_optional_size(area_size),
-            .{
-                .width = .{ .definite = math.f32_maybe_clamp(area_width, min_size.width, max_size.width) },
-                .height = .{ .definite = math.f32_maybe_clamp(area_height, min_size.height, max_size.height) },
-            },
+            oof_available_space,
             .content_size,
             .{ .start = false, .end = false });
     }
@@ -302,10 +307,7 @@ tree_ref,
         .known_dimensions = to_optional_size(final_size),
         .known_dimensions_are_definite = .{ .width = true, .height = true },
         .parent_size = to_optional_size(area_size),
-        .available_space = .{
-            .width = .{ .definite = math.f32_maybe_clamp(area_width, min_size.width, max_size.width) },
-            .height = .{ .definite = math.f32_maybe_clamp(area_height, min_size.height, max_size.height) },
-        },
+        .available_space = oof_available_space,
         .sizing_mode = .content_size,
         .axis = .both,
         .run_mode = .perform_layout,

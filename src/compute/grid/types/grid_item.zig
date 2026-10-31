@@ -403,7 +403,7 @@ pub const GridItem = struct {
             self.node,
             known,
             grid_area_size_value,
-            self.keyword_adjusted_available_space(Tree, grid_area_size_value, map_available_space(available_space, .min_content), tree_ref),
+            self.keyword_adjusted_available_space(Tree, grid_area_size_value, map_available_space(self.available_space_minus_margins(grid_area_size_value, available_space), .min_content), tree_ref),
             .inherent_size,
             axis.as_abs_naive(),
             .{ .start = false, .end = false }) catch @panic("zafi: grid item min content measurement failed");
@@ -435,7 +435,7 @@ pub const GridItem = struct {
             self.node,
             known,
             grid_area_size_value,
-            self.keyword_adjusted_available_space(Tree, grid_area_size_value, map_available_space(available_space, .max_content), tree_ref),
+            self.keyword_adjusted_available_space(Tree, grid_area_size_value, map_available_space(self.available_space_minus_margins(grid_area_size_value, available_space), .max_content), tree_ref),
             .inherent_size,
             axis.as_abs_naive(),
             .{ .start = false, .end = false }) catch @panic("zafi: grid item max content measurement failed");
@@ -451,6 +451,22 @@ pub const GridItem = struct {
         const size = self.max_content_contribution(Tree, axis, tree_ref, grid_area_size_value, available_space);
         self.max_content_contribution_cache.set(axis, size);
         return size;
+    }
+
+    /// Subtract the item's margins (and baseline shim) from the definite axes of
+    /// the space available to its margin box. As in final layout, margins resolve
+    /// against the grid area's width and `auto` margins count as zero.
+    inline fn available_space_minus_margins(self: *const GridItem, area_size: geometry.Size(?f32), available_space: geometry.Size(?f32)) geometry.Size(?f32) {
+        if (available_space.width == null and available_space.height == null) return available_space;
+        const basis = area_size.width orelse 0;
+        const left = self.margin.left.resolve(basis) orelse 0;
+        const right = self.margin.right.resolve(basis) orelse 0;
+        const top = self.margin.top.resolve(basis) orelse 0;
+        const bottom = self.margin.bottom.resolve(basis) orelse 0;
+        return .{
+            .width = if (available_space.width) |w| @max(w - left - right, 0) else null,
+            .height = if (available_space.height) |h| @max(h - top - bottom - self.baseline_shim, 0) else null,
+        };
     }
 
     /// Override the available_space space in each axis whose size style is a sizing

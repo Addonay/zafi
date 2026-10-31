@@ -16,6 +16,7 @@ pub const leaf = @import("leaf.zig");
 pub const oof = @import("oof.zig");
 
 const geometry = @import("../geometry.zig");
+const math = @import("../util/math.zig");
 const style = @import("../style/root.zig");
 const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
 const tree = @import("../tree/tree.zig");
@@ -273,12 +274,20 @@ fn compute_in_flow_root_layout(comptime Tree: type, tree_ref: *Tree,
 
     const root_style = TreeApi.get_style(tree_ref, root);
 
+    // The available space passed to the root excludes the root's margins
+    const root_available_space = blk: {
+        const m = common.resolve_rect_or_zero(root_style.margin, available_space.width.into_option());
+        break :blk geometry.Size(AvailableSpace){
+            .width = math.available_maybe_max(math.available_maybe_sub(available_space.width, m.left + m.right), 0),
+            .height = math.available_maybe_max(math.available_maybe_sub(available_space.height, m.top + m.bottom), 0),
+        };
+    };
+
     // Block roots pre-resolve styled sizes and available_space-space width into known
     // dimensions before dispatching, exactly like Taffy.
     if (root_style.is_block()) {
         const parent_size = geometry.Size(?f32){ .width = available_space.width.into_option(), .height = available_space.height.into_option() };
         const aspect_ratio = root_style.aspect_ratio;
-        const margin = common.resolve_rect_or_zero(root_style.margin, parent_size.width);
         const padding = common.resolve_length_rect(root_style.padding, parent_size.width);
         const border = common.resolve_length_rect(root_style.border, parent_size.width);
         const padding_border_size = geometry.Size(f32){ .width = padding.left + padding.right + border.left + border.right, .height = padding.top + padding.bottom + border.top + border.bottom };
@@ -293,7 +302,7 @@ fn compute_in_flow_root_layout(comptime Tree: type, tree_ref: *Tree,
         };
         // Block-level boxes stretch to fill definite available_space space.
         const available_space_based_size = geometry.Size(?f32){
-            .width = if (available_space.width.into_option()) |width| width - (margin.left + margin.right) else null,
+            .width = root_available_space.width.into_option(),
             .height = null,
         };
         known_dimensions = orSize(orSize(orSize(known_dimensions, min_max_definite_size), clamped_style_size), available_space_based_size);
@@ -307,7 +316,7 @@ fn compute_in_flow_root_layout(comptime Tree: type, tree_ref: *Tree,
         .known_dimensions = known_dimensions,
         .known_dimensions_are_definite = .{ .width = true, .height = true },
         .parent_size = icbFor(available_space),
-        .available_space = available_space,
+        .available_space = root_available_space,
         .vertical_margins_are_collapsible = .{ .start = false, .end = false },
     };
     root_is_cached.* = LayoutTree(Tree).cache_get(tree_ref, root, &input) != null;
