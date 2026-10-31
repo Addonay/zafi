@@ -530,21 +530,29 @@ fn resolve_item_baselines(comptime Tree: type, tree_ref: *Tree, axis: AbstractAx
             else
                 baseline orelse height;
 
-            const top_margin = if (inner_node_size.width) |basis| (item.margin.top.resolve(basis) orelse 0) else 0;
-            item.baseline = adjusted_baseline + top_margin;
+            // The baseline is measured from the border box (Taffy e77a7a8)
+            item.baseline = adjusted_baseline;
         }
+
+        // Items are aligned by the distance from the top of their margin box to their baseline
+        const margin_box_baseline = struct {
+            fn call(baseline_item: GridItem, width_basis: ?f32) f32 {
+                const top_margin = if (width_basis) |basis| (baseline_item.margin.top.resolve(basis) orelse 0) else 0;
+                return (baseline_item.baseline orelse 0) + top_margin;
+            }
+        }.call;
 
         // Compute the max baseline of all items in the row participating in baseline alignment
         var row_max_baseline: f32 = 0;
         for (row_items) |item| {
             if (!item.participates_in_baseline_alignment()) continue;
-            row_max_baseline = @max(row_max_baseline, item.baseline orelse 0);
+            row_max_baseline = @max(row_max_baseline, margin_box_baseline(item, inner_node_size.width));
         }
 
         // Compute the baseline shim for each item in the row participating in baseline alignment
         for (row_items) |*item| {
             if (item.participates_in_baseline_alignment()) {
-                item.baseline_shim = row_max_baseline - (item.baseline orelse 0);
+                item.baseline_shim = row_max_baseline - margin_box_baseline(item.*, inner_node_size.width);
                 item.known_dimensions_cache = null;
             }
         }

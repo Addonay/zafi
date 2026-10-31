@@ -118,6 +118,9 @@ pub const AlignAndPositionResult = struct {
     contribution: geometry.Rect(f32),
     y: f32,
     height: f32,
+    /// The item's first baseline from its final layout (clamped to the border box
+    /// for scroll containers), for the container's own baseline (Taffy e77a7a8).
+    baseline: ?f32,
 };
 
 /// Align and size a grid item into its final position
@@ -404,7 +407,11 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
         contain,
         container_is_scroll_container);
 
-    return .{ .contribution = contribution, .y = vertical_result.offset, .height = height.? };
+    const item_baseline: ?f32 = if (layout_output.baselines.first) |b|
+        (if (overflow.y.is_scroll_container()) @max(@min(b, height.?), 0) else b)
+    else
+        null;
+    return .{ .contribution = contribution, .y = vertical_result.offset, .height = height.?, .baseline = item_baseline };
 }
 
 fn is_stretch(value: AlignItems) bool {

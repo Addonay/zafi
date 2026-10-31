@@ -858,6 +858,7 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
             &item.oof_candidates);
         item.y_position = result.y;
         item.height = result.height;
+        item.baseline = result.baseline;
         item_overflow_rect = item_overflow_rect.@"union"(result.contribution);
     }
 
