@@ -59,13 +59,10 @@ fn cachedDispatch(comptime Tree: type, tree_ref: *Tree,
     const scratch_mark = LayoutTree(Tree).scratch_mark(tree_ref);
     const output = try compute_child_layout_with_block_ctx(Tree, tree_ref, node_id, input, block_ctx);
     if (output.oof_candidates.items.len == 0) LayoutTree(Tree).scratch_release(tree_ref, scratch_mark);
-    // Candidate lists are allocated from the layout-pass scratch arena, which is
-    // reset before the next pass. A persistent cache entry must therefore not
-    // retain one: the stored copy is emptied while the returned value keeps the
-    // list for the caller (the parent algorithm) to consume.
-    var stored = output;
-    stored.oof_candidates = .empty;
-    try LayoutTree(Tree).cache_store(tree_ref, node_id, &input, stored);
+    // The output's candidate list lives in pass scratch memory; the host's
+    // cache_store must copy it if it caches the result, so a later cache hit
+    // can surface the same candidates (Tree does; see Tree.cache_store).
+    try LayoutTree(Tree).cache_store(tree_ref, node_id, &input, output);
     return output;
 }
 
@@ -573,4 +570,27 @@ test {
     _ = @import("float.zig");
     _ = @import("grid/root.zig");
     _ = @import("leaf.zig");
+}
+
+test "cached child layouts still surface their out-of-flow candidates" {
+    const testing = std.testing;
+    var t = tree.Tree.init(testing.allocator);
+    defer t.deinit();
+    // root (containing block) -> [sibling S, A (static block) -> B (absolute, bottom: 0)]
+    const b = try t.new_leaf(.{
+        .position = .absolute,
+        .size = .{ .width = style.dimension.Dimension.length(10), .height = style.dimension.Dimension.length(10) },
+        .inset = .{ .left = .length(0), .right = .auto(), .top = .auto(), .bottom = .length(0) },
+    });
+    const a = try t.new_with_children(.{ .display = .block }, &.{b});
+    const s = try t.new_leaf(.{ .size = .{ .width = style.dimension.Dimension.length(10), .height = style.dimension.Dimension.length(10) } });
+    const root = try t.new_with_children(.{ .display = .block, .position = .relative }, &.{ s, a });
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .max_content });
+    try testing.expectEqual(@as(f32, 0), (try t.layout_of(b)).location.y); // root is 10 tall
+
+    // Grow the sibling: root re-lays out, A is a cache hit, B must follow the new bottom edge.
+    try t.set_style(s, .{ .size = .{ .width = style.dimension.Dimension.length(10), .height = style.dimension.Dimension.length(50) } });
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .max_content });
+    try testing.expectEqual(@as(f32, 50), (try t.layout_of(root)).size.height);
+    try testing.expectEqual(@as(f32, 40), (try t.layout_of(b)).location.y);
 }
