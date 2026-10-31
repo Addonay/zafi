@@ -1,0 +1,13 @@
+[package]
+name = "zafi-serde-oracle"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Prints the Taffy serde wire format for the values zafi's serde tests check
+# (src/serde_tests.zig). Regenerate with:
+#   cargo run --quiet --manifest-path tools/serde_oracle/Cargo.toml > audit/serde_format_rust.txt
+[dependencies]
+taffy = { path = "../../.references/taffy", features = ["serde"] }
+serde_json = "1"
+serde = "1"
