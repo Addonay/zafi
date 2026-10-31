@@ -173,8 +173,7 @@ pub const CompactLength = struct {
     pub fn resolved_percentage_size(self: CompactLength, parent_size: f32) ?f32 {
         return switch (self.tag()) {
             .percent => self.value() * parent_size,
-            // Tree's default resolver returns 0 for calc values.
-            .calc => 0,
+            .calc => @import("calc.zig").resolve(self.calc_value(), parent_size),
             else => null,
         };
     }

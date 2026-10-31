@@ -297,6 +297,8 @@ pub const Tree = struct {
     /// uses Taffy's default (zero-size) measure; `compute_layout_with_measure`
     /// installs the caller's callback for the duration of the run.
     measure_function: ?interfaces.MeasureFunc = null,
+    /// Host `calc()` resolver; see `set_calc_resolver`.
+    calc_resolver: ?CalcResolver = null,
     /// Per-tree stack allocator for layout-pass temporaries (line lists,
     /// placement scratch, track arrays, occupancy intervals, ...). Allocations
     /// made from `scratch_allocator()` are owned by the tree and valid until the
@@ -809,6 +811,15 @@ pub const Tree = struct {
         self.mark_dirty(id);
     }
 
+    /// Invalidate every node's cached layout.
+    pub fn mark_all_dirty(self: *Tree) void {
+        var index: u32 = 0;
+        while (index < self.nodes.len) : (index += 1) {
+            const node_data = self.nodes.at(index);
+            if (node_data.alive) _ = node_data.cache.clear();
+        }
+    }
+
     /// Invalidate `id` and every ancestor up to the root.
     pub fn mark_dirty(self: *Tree, id: NodeId) void {
         var current: ?NodeId = id;
@@ -900,18 +911,30 @@ pub const Tree = struct {
         return self.style_of(id);
     }
 
-    /// Default `calc()` resolver. Taffy's high-level trees also resolve calc to
-    /// zero unless a measure/resolver hook is supplied; see
-    /// `compute_layout_with_measure` and `Style.calc`.
-    pub fn resolve_calc_value(self: *const Tree, _: ?*const anyopaque, _: f32) f32 {
-        _ = self;
-        return 0;
+    /// A host `calc()` resolver: `func(ctx, handle, basis)` returns the value of
+    /// the calc expression `handle` (the pointer given to `Dimension.calc` and
+    /// friends) against `basis`, the size percentages resolve against.
+    pub const CalcResolver = struct {
+        ctx: ?*anyopaque = null,
+        func: *const fn (ctx: ?*anyopaque, handle: *const anyopaque, basis: f32) f32,
+    };
+
+    /// Install (or with `null`, remove) the resolver for `calc()` values.
+    pub fn set_calc_resolver(self: *Tree, resolver: ?CalcResolver) void {
+        self.calc_resolver = resolver;
+        // Calc results feed every cache entry; recompute everything.
+        self.mark_all_dirty();
+    }
+
+    /// Resolve a `calc()` value: the host resolver when set, otherwise zero
+    /// (Taffy's default tree behaviour).
+    pub fn resolve_calc_value(self: *const Tree, value: ?*const anyopaque, basis: f32) f32 {
+        const handle = value orelse return 0;
+        const r = self.calc_resolver orelse return 0;
+        return r.func(r.ctx, handle, basis);
     }
 
     /// The `LayoutTree` hook: resolve a `calc()` length against `basis`.
-    ///
-    /// Zero, matching `resolve_calc_value` and Taffy's default tree. A host with
-    /// a real expression engine overrides this.
     pub fn calc(self: *const Tree, value: ?*const anyopaque, basis: f32) ?f32 {
         return self.resolve_calc_value(value, basis);
     }
@@ -1303,4 +1326,53 @@ test "child-list validation rejects duplicates and cycles without mutating" {
     // Repeated validations reuse the stamps correctly.
     for (0..3) |_| try t.set_children(root, &.{ b, a });
     try testing.expectEqual(b, (try t.children(root))[0]);
+}
+
+test "calc() values resolve through the tree's calc resolver in flex, grid and block" {
+    const testing = std.testing;
+    const Dimension = style.dimension.Dimension;
+    const LengthPercentage = style.dimension.LengthPercentage;
+    // An expression handle: `calc(<percent>% + <px>px)`.
+    const Expr = struct { percent: f32, px: f32 };
+    const Resolve = struct {
+        fn f(_: ?*anyopaque, handle: *const anyopaque, basis: f32) f32 {
+            const expr: *const Expr = @ptrCast(@alignCast(handle));
+            return basis * expr.percent / 100 + expr.px;
+        }
+    };
+    const half_plus_ten: Expr = .{ .percent = 50, .px = 10 };
+    const ten: Expr = .{ .percent = 0, .px = 10 };
+
+    inline for (.{ style.Display.flex, style.Display.grid, style.Display.block }) |display| {
+        var tree = Tree.init(testing.allocator);
+        defer tree.deinit();
+        const child = try tree.new_leaf(.{
+            .size = .{ .width = Dimension.calc(&half_plus_ten), .height = Dimension.length(20) },
+            .margin = .{ .left = style.dimension.LengthPercentageAuto.calc(&ten), .right = .zero(), .top = .zero(), .bottom = .zero() },
+        });
+        // The container's calc padding resolves against the outer root's width.
+        const container = try tree.new_with_children(.{
+            .display = display,
+            .size = .{ .width = Dimension.length(200), .height = Dimension.length(100) },
+            .padding = .{ .left = LengthPercentage.calc(&ten), .right = .zero(), .top = .zero(), .bottom = .zero() },
+        }, &[_]NodeId{child});
+        const root = try tree.new_with_children(.{
+            .display = .block,
+            .size = .{ .width = Dimension.length(400), .height = Dimension.length(400) },
+        }, &[_]NodeId{container});
+
+        // Without a resolver, calc resolves to zero (Taffy's default tree).
+        try tree.compute_layout(root, .{ .width = .max_content, .height = .max_content });
+        try testing.expectEqual(@as(f32, 0), (try tree.layout_of(child)).size.width);
+
+        tree.set_calc_resolver(.{ .func = Resolve.f });
+        try tree.compute_layout(root, .{ .width = .max_content, .height = .max_content });
+        const l = try tree.layout_of(child);
+        // Child width: 50% of the container's 190px content box + 10px.
+        try testing.expectEqual(@as(f32, 105), l.size.width);
+        // Padding 10 + margin 10.
+        try testing.expectEqual(@as(f32, 20), l.location.x);
+        // The resolver is scoped to the layout call.
+        try testing.expect(@import("../style/calc.zig").current == null);
+    }
 }

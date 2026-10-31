@@ -10,6 +10,8 @@
 //!   - Alignment & final item placement
 
 const std = @import("std");
+const calc_resolver = @import("../../style/calc.zig");
+const calc_scope = @import("../common/calc_scope.zig");
 const geometry = @import("../../geometry.zig");
 const style = @import("../../style/root.zig");
 const grid = @import("../../style/grid.zig");
@@ -328,6 +330,8 @@ fn row_has_items(context: ?*const anyopaque, index: usize) bool {
 /// Grid layout algorithm entry point.
 pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId, inputs: layout.LayoutInput) !layout.LayoutOutput {
     const TreeApi = LayoutTree(Tree);
+    const previous_calc = calc_scope.bind(Tree, tree_ref);
+    defer calc_scope.restore(previous_calc);
     const node_style = TreeApi.get_style(tree_ref, node_id);
     const direction = node_style.direction;
     const contain = node_style.contain;
@@ -1209,6 +1213,7 @@ fn resolve_lpa(value: style.dimension.LengthPercentageAuto, basis: ?f32) ?f32 {
         .auto => null,
         .length => value.value.value(),
         .percent => if (basis) |b| b * value.value.value() else null,
+        .calc => if (basis) |b| calc_resolver.resolve(value.value.calc_value(), b) else null,
         else => null,
     };
 }

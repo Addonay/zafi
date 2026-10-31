@@ -101,6 +101,28 @@ The algorithms (`compute_flexbox_layout`, `compute_grid_layout`,
 host with its own node storage — a retained UI tree, an ECS — can run layout
 directly on it instead of mirroring nodes into `zafi.Tree`.
 
+## `calc()`
+
+`calc()` values are opaque host handles: zafi stores the pointer and asks the
+host to evaluate it against the basis that percentages would use.
+
+```zig
+const Expr = struct { percent: f32, px: f32 }; // your expression type
+
+fn evalCalc(_: ?*anyopaque, handle: *const anyopaque, basis: f32) f32 {
+    const e: *const Expr = @ptrCast(@alignCast(handle));
+    return basis * e.percent / 100 + e.px;
+}
+
+tree.set_calc_resolver(.{ .func = evalCalc });
+const half_plus_ten: Expr = .{ .percent = 50, .px = 10 };
+_ = try tree.new_leaf(.{ .size = .{ .width = .calc(&half_plus_ten), .height = .auto } });
+```
+
+Custom `LayoutTree` hosts implement `calc(tree, handle, basis) ?f32` instead.
+Like Taffy, a calc value with no definite basis is treated as indefinite (e.g.
+`auto` for sizes), and with no resolver it evaluates to 0.
+
 ## JSON (optional)
 
 Taffy-compatible `serde` JSON for `Style` and friends is behind a build option;
@@ -114,8 +136,6 @@ The wire format matches Taffy's Rust `serde` output.
 
 ## Known limitations
 
-- `calc()` values resolve to 0, as with Taffy's default tree: the
-  `LayoutTree.calc` hook is not consulted by the layout algorithms yet.
 - Text, images and other content are measured by the host (see above); there is
   no built-in text shaping, inline formatting or table layout.
 

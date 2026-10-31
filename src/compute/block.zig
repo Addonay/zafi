@@ -5,6 +5,8 @@
 //! formulas so it can be compared against the Rust implementation section by section.
 
 const std = @import("std");
+const calc_resolver = @import("../style/calc.zig");
+const calc_scope = @import("common/calc_scope.zig");
 
 const geometry = @import("../geometry.zig");
 const style = @import("../style/root.zig");
@@ -400,6 +402,8 @@ pub fn compute_block_layout(comptime Tree: type, tree_ref: *Tree,
     inputs: layout.LayoutInput,
     block_ctx: ?*BlockContext) BlockError!layout.LayoutOutput {
     const TreeApi = LayoutTree(Tree);
+    const previous_calc = calc_scope.bind(Tree, tree_ref);
+    defer calc_scope.restore(previous_calc);
     const known_dimensions = inputs.known_dimensions;
     const parent_size = inputs.parent_size;
     const run_mode = inputs.run_mode;
@@ -1651,6 +1655,7 @@ fn resolveLengthPercentage(value: style.dimension.LengthPercentage, basis: ?f32)
     return switch (value.value.tag()) {
         .length => value.value.value(),
         .percent => if (basis) |b| value.value.value() * b else null,
+        .calc => if (basis) |b| calc_resolver.resolve(value.value.calc_value(), b) else null,
         else => null,
     };
 }
@@ -1685,6 +1690,7 @@ fn resolveLengthPercentageAuto(value: style.dimension.LengthPercentageAuto, basi
         .auto => null,
         .length => value.value.value(),
         .percent => if (basis) |b| value.value.value() * b else null,
+        .calc => if (basis) |b| calc_resolver.resolve(value.value.calc_value(), b) else null,
         else => null,
     };
 }
