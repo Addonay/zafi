@@ -664,12 +664,13 @@ fn box_lengths_have_calc(item_style: anytype) bool {
     const padding = item_style.get(.padding);
     const border = item_style.get(.border);
     const margin = item_style.get(.margin);
-    return size.width.value.has_calc() or size.height.value.has_calc() or
-        min_size.width.value.has_calc() or min_size.height.value.has_calc() or
-        max_size.width.value.has_calc() or max_size.height.value.has_calc() or
-        padding.left.value.has_calc() or padding.right.value.has_calc() or padding.top.value.has_calc() or padding.bottom.value.has_calc() or
-        border.left.value.has_calc() or border.right.value.has_calc() or border.top.value.has_calc() or border.bottom.value.has_calc() or
-        margin.left.value.has_calc() or margin.right.value.has_calc() or margin.top.value.has_calc() or margin.bottom.value.has_calc();
+    return style.compact_length.CompactLength.any_calc(.{
+        size.width.value,     size.height.value,     min_size.width.value, min_size.height.value,
+        max_size.width.value, max_size.height.value, padding.left.value,   padding.right.value,
+        padding.top.value,    padding.bottom.value,  border.left.value,    border.right.value,
+        border.top.value,     border.bottom.value,   margin.left.value,    margin.right.value,
+        margin.top.value,     margin.bottom.value,
+    });
 }
 
 fn maybe_add_size(value: geometry.Size(?f32), add: geometry.F32Size) geometry.Size(?f32) {

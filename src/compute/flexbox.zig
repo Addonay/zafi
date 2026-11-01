@@ -926,70 +926,80 @@ inline fn generate_anonymous_flex_items(comptime Tree: type, tree_ref: *Tree, no
         }
         if (child_style.get(.position).is_out_of_flow()) continue;
 
-        const aspect_ratio = child_style.get(.aspect_ratio);
-        const padding = resolve_length_rect(child_style.get(.padding), constants.node_inner_size.width);
-        const border = resolve_length_rect(child_style.get(.border), constants.node_inner_size.width);
-        const pb_sum = padding.sum_axes().add(border.sum_axes());
-        const box_sizing_adjustment = if (child_style.get(.box_sizing) == .content_box) pb_sum else geometry.SIZE_F32_ZERO;
-
-        try items.append(allocator, FlexItem{
-            .node = child,
-            .order = @intCast(index),
-            .size = size_maybe_add(
-                resolve_dimension_size(child_style.get(.size), percent_resolution_size).maybe_apply_aspect_ratio(aspect_ratio),
-                box_sizing_adjustment),
-            .size_style = child_style.get(.size),
-            .min_size = size_maybe_add(
-                resolve_auto_size(child_style.get(.min_size), percent_resolution_size),
-                box_sizing_adjustment),
-            .max_size = size_maybe_add(
-                resolve_auto_size(child_style.get(.max_size), percent_resolution_size),
-                box_sizing_adjustment),
-            .aspect_ratio = aspect_ratio,
-
-            .relative_inset = if (child_style.get(.position) == .relative)
-                resolve_relative_inset(
-                    resolve_auto_rect_size_to_option(child_style.get(.inset), constants.node_inner_size),
-                    constants)
-            else
-                geometry.SIZE_F32_ZERO,
-            .margin = resolve_auto_rect(child_style.get(.margin), constants.node_inner_size.width),
-            .margin_is_auto = auto_rect(child_style.get(.margin)),
-            .padding = padding,
-            .border = border,
-            .align_self = resolve_self_relative(
-                resolve_normal_alignment(child_style.get(.align_self) orelse constants.align_items),
-                child_style.get(.direction),
-                constants.layout_direction,
-                constants.is_column),
-            .overflow = child_style.get(.overflow),
-            .contain = child_style.get(.contain),
-            .scrollbar_width = child_style.get(.scrollbar_width),
-            .flex_grow = child_style.get(.flex_grow),
-            .flex_shrink = child_style.get(.flex_shrink),
-            .flex_basis_is_definite = false,
-            .flex_basis = 0.0,
-            .inner_flex_basis = 0.0,
-            .violation = 0.0,
-            .frozen = false,
-
-            .resolved_minimum_main_size = 0.0,
-            .hypothetical_inner_size = geometry.SIZE_F32_ZERO,
-            .hypothetical_outer_size = geometry.SIZE_F32_ZERO,
-            .target_size = geometry.SIZE_F32_ZERO,
-            .outer_target_size = geometry.SIZE_F32_ZERO,
-            .content_flex_fraction = 0.0,
-
-            .baseline = 0.0,
-
-            .offset_main = 0.0,
-            .offset_cross = 0.0,
-
-            .oof_candidates = .empty,
-        });
+        const item = if (box_lengths_have_calc(child_style))
+            new_flex_item(child_style, child, index, constants, percent_resolution_size, true)
+        else
+            new_flex_item(child_style, child, index, constants, percent_resolution_size, false);
+        try items.append(allocator, item);
     }
     return items;
 }
+
+/// One flex item for `child`, resolving its box lengths with the calc-capable
+/// or calc-free resolvers.
+inline fn new_flex_item(child_style: anytype, child: NodeId, index: usize, constants: *const AlgoConstants, percent_resolution_size: Size(?f32), comptime with_calc: bool) FlexItem {
+    const R = Resolvers(with_calc);
+    const aspect_ratio = child_style.get(.aspect_ratio);
+    const padding = R.resolve_length_rect(child_style.get(.padding), constants.node_inner_size.width);
+    const border = R.resolve_length_rect(child_style.get(.border), constants.node_inner_size.width);
+    const pb_sum = padding.sum_axes().add(border.sum_axes());
+    const box_sizing_adjustment = if (child_style.get(.box_sizing) == .content_box) pb_sum else geometry.SIZE_F32_ZERO;
+
+    return FlexItem{
+        .node = child,
+        .order = @intCast(index),
+        .size = size_maybe_add(
+            R.resolve_dimension_size(child_style.get(.size), percent_resolution_size).maybe_apply_aspect_ratio(aspect_ratio),
+            box_sizing_adjustment),
+        .size_style = child_style.get(.size),
+        .min_size = size_maybe_add(
+            R.resolve_auto_size(child_style.get(.min_size), percent_resolution_size),
+            box_sizing_adjustment),
+        .max_size = size_maybe_add(
+            R.resolve_auto_size(child_style.get(.max_size), percent_resolution_size),
+            box_sizing_adjustment),
+        .aspect_ratio = aspect_ratio,
+
+        .relative_inset = if (child_style.get(.position) == .relative)
+            resolve_relative_inset(
+                R.resolve_auto_rect_size_to_option(child_style.get(.inset), constants.node_inner_size),
+                constants)
+        else
+            geometry.SIZE_F32_ZERO,
+        .margin = R.resolve_auto_rect(child_style.get(.margin), constants.node_inner_size.width),
+        .margin_is_auto = auto_rect(child_style.get(.margin)),
+        .padding = padding,
+        .border = border,
+        .align_self = resolve_self_relative(
+            resolve_normal_alignment(child_style.get(.align_self) orelse constants.align_items),
+            child_style.get(.direction),
+            constants.layout_direction,
+            constants.is_column),
+        .overflow = child_style.get(.overflow),
+        .contain = child_style.get(.contain),
+        .scrollbar_width = child_style.get(.scrollbar_width),
+        .flex_grow = child_style.get(.flex_grow),
+        .flex_shrink = child_style.get(.flex_shrink),
+        .flex_basis_is_definite = false,
+        .flex_basis = 0.0,
+        .inner_flex_basis = 0.0,
+        .violation = 0.0,
+        .frozen = false,
+
+        .resolved_minimum_main_size = 0.0,
+        .hypothetical_inner_size = geometry.SIZE_F32_ZERO,
+        .hypothetical_outer_size = geometry.SIZE_F32_ZERO,
+        .target_size = geometry.SIZE_F32_ZERO,
+        .outer_target_size = geometry.SIZE_F32_ZERO,
+        .content_flex_fraction = 0.0,
+
+        .baseline = 0.0,
+
+        .offset_main = 0.0,
+        .offset_cross = 0.0,
+
+        .oof_candidates = .empty,
+    };}
 
 /// Determine the available main and cross space for the flex items.
 ///
@@ -3294,24 +3304,8 @@ const balance = struct {
 // Resolution helpers
 // ---------------------------------------------------------------------------
 
-/// `LengthPercentage::maybe_resolve`: lengths resolve without a basis, only
-/// percentages require one. (The shared `dimension.zig` helpers treat a null
-/// basis as unresolvable for every variant; Taffy only does that for
-/// percentages. Keeping the Taffy semantics local avoids depending on the
-/// shared-file fix.)
-inline fn resolve_length_value(value: LengthPercentage, basis: ?f32) ?f32 {
-    return value.value.maybe_resolve(basis);
-}
 
-/// `LengthPercentageAuto::maybe_resolve` (see above).
-inline fn resolve_auto_value(value: LengthPercentageAuto, basis: ?f32) ?f32 {
-    return value.value.maybe_resolve(basis);
-}
 
-/// `Dimension::maybe_resolve` (see above). Sizing keywords stay `None`.
-inline fn resolve_dimension_value(value: Dimension, basis: ?f32) ?f32 {
-    return value.value.maybe_resolve(basis);
-}
 
 /// `AlignItems` value equality for the `BASELINE` constant (keyword + safety).
 inline fn is_baseline_alignment(value: style.alignment.AlignItems) bool {
@@ -3358,66 +3352,11 @@ inline fn optional_size_maybe_or(a: Size(?f32), b: Size(?f32)) Size(?f32) {
     return optional_size_or(a, b);
 }
 
-/// `Rect<LengthPercentage>` resolved against a scalar basis (all four edges use it).
-inline fn resolve_length_rect(value: Rect(LengthPercentage), basis: ?f32) Rect(f32) {
-    return .{
-        .left = resolve_length_value(value.left, basis) orelse 0,
-        .right = resolve_length_value(value.right, basis) orelse 0,
-        .top = resolve_length_value(value.top, basis) orelse 0,
-        .bottom = resolve_length_value(value.bottom, basis) orelse 0,
-    };
-}
 
-/// `Rect<LengthPercentage>` resolved against a `Size` context (horizontal edges use width,
-/// vertical edges use height).
-inline fn resolve_length_rect_size(value: Rect(LengthPercentage), size: Size(?f32)) Rect(f32) {
-    return .{
-        .left = resolve_length_value(value.left, size.width) orelse 0,
-        .right = resolve_length_value(value.right, size.width) orelse 0,
-        .top = resolve_length_value(value.top, size.height) orelse 0,
-        .bottom = resolve_length_value(value.bottom, size.height) orelse 0,
-    };
-}
 
-/// `Rect<LengthPercentageAuto>::resolve_or_zero` against a scalar basis.
-inline fn resolve_auto_rect(value: Rect(LengthPercentageAuto), basis: ?f32) Rect(f32) {
-    return .{
-        .left = resolve_auto_value(value.left, basis) orelse 0,
-        .right = resolve_auto_value(value.right, basis) orelse 0,
-        .top = resolve_auto_value(value.top, basis) orelse 0,
-        .bottom = resolve_auto_value(value.bottom, basis) orelse 0,
-    };
-}
 
-/// `Rect<LengthPercentageAuto>::resolve_or_zero` against a `Size` context.
-inline fn resolve_auto_size_size(value: Rect(LengthPercentageAuto), size: Size(?f32)) Rect(f32) {
-    return .{
-        .left = resolve_auto_value(value.left, size.width) orelse 0,
-        .right = resolve_auto_value(value.right, size.width) orelse 0,
-        .top = resolve_auto_value(value.top, size.height) orelse 0,
-        .bottom = resolve_auto_value(value.bottom, size.height) orelse 0,
-    };
-}
 
-/// `Rect<LengthPercentageAuto>::maybe_resolve` against a scalar basis, keeping `auto` as `None`.
-inline fn resolve_auto_rect_to_option(value: Rect(LengthPercentageAuto), basis: ?f32) Rect(?f32) {
-    return .{
-        .left = resolve_auto_value(value.left, basis),
-        .right = resolve_auto_value(value.right, basis),
-        .top = resolve_auto_value(value.top, basis),
-        .bottom = resolve_auto_value(value.bottom, basis),
-    };
-}
 
-/// `Rect<LengthPercentageAuto>::maybe_resolve` against a `Size` context, keeping `auto` as `None`.
-inline fn resolve_auto_rect_size_to_option(value: Rect(LengthPercentageAuto), size: Size(?f32)) Rect(?f32) {
-    return .{
-        .left = resolve_auto_value(value.left, size.width),
-        .right = resolve_auto_value(value.right, size.width),
-        .top = resolve_auto_value(value.top, size.height),
-        .bottom = resolve_auto_value(value.bottom, size.height),
-    };
-}
 
 /// `Rect<LengthPercentageAuto>.map(LengthPercentageAuto::is_auto)`.
 inline fn auto_rect(value: Rect(LengthPercentageAuto)) Rect(bool) {
@@ -3429,20 +3368,135 @@ inline fn auto_rect(value: Rect(LengthPercentageAuto)) Rect(bool) {
     };
 }
 
-/// `Size<Dimension>.maybe_resolve(Size<Option<f32>>)`.
-inline fn resolve_dimension_size(value: Size(Dimension), parent: Size(?f32)) Size(?f32) {
-    return .{
-        .width = resolve_dimension_value(value.width, parent.width),
-        .height = resolve_dimension_value(value.height, parent.height),
+
+
+/// The length-resolution helpers, specialised on whether the values can be
+/// `calc()`. Flex item construction uses the calc-free variant for children
+/// without calc lengths (see `box_lengths_have_calc`): even a cold calc arm
+/// costs a little in the per-child resolution. Everything else uses the
+/// calc-capable aliases below.
+fn Resolvers(comptime with_calc: bool) type {
+    return struct {
+        const Self = @This();
+
+        /// `LengthPercentage::maybe_resolve`: lengths resolve without a basis, only
+        /// percentages require one. (The shared `dimension.zig` helpers treat a null
+        /// basis as unresolvable for every variant; Taffy only does that for
+        /// percentages. Keeping the Taffy semantics local avoids depending on the
+        /// shared-file fix.)
+        pub inline fn resolve_length_value(value: LengthPercentage, basis: ?f32) ?f32 {
+            return value.value.maybe_resolve_with(basis, with_calc);
+        }
+        /// `LengthPercentageAuto::maybe_resolve` (see above).
+        pub inline fn resolve_auto_value(value: LengthPercentageAuto, basis: ?f32) ?f32 {
+            return value.value.maybe_resolve_with(basis, with_calc);
+        }
+        /// `Dimension::maybe_resolve` (see above). Sizing keywords stay `None`.
+        pub inline fn resolve_dimension_value(value: Dimension, basis: ?f32) ?f32 {
+            return value.value.maybe_resolve_with(basis, with_calc);
+        }
+        /// `Rect<LengthPercentage>` resolved against a scalar basis (all four edges use it).
+        pub inline fn resolve_length_rect(value: Rect(LengthPercentage), basis: ?f32) Rect(f32) {
+            return .{
+                .left = Self.resolve_length_value(value.left, basis) orelse 0,
+                .right = Self.resolve_length_value(value.right, basis) orelse 0,
+                .top = Self.resolve_length_value(value.top, basis) orelse 0,
+                .bottom = Self.resolve_length_value(value.bottom, basis) orelse 0,
+            };
+        }
+        /// `Rect<LengthPercentage>` resolved against a `Size` context (horizontal edges use width,
+        /// vertical edges use height).
+        pub inline fn resolve_length_rect_size(value: Rect(LengthPercentage), size: Size(?f32)) Rect(f32) {
+            return .{
+                .left = Self.resolve_length_value(value.left, size.width) orelse 0,
+                .right = Self.resolve_length_value(value.right, size.width) orelse 0,
+                .top = Self.resolve_length_value(value.top, size.height) orelse 0,
+                .bottom = Self.resolve_length_value(value.bottom, size.height) orelse 0,
+            };
+        }
+        /// `Rect<LengthPercentageAuto>::resolve_or_zero` against a scalar basis.
+        pub inline fn resolve_auto_rect(value: Rect(LengthPercentageAuto), basis: ?f32) Rect(f32) {
+            return .{
+                .left = Self.resolve_auto_value(value.left, basis) orelse 0,
+                .right = Self.resolve_auto_value(value.right, basis) orelse 0,
+                .top = Self.resolve_auto_value(value.top, basis) orelse 0,
+                .bottom = Self.resolve_auto_value(value.bottom, basis) orelse 0,
+            };
+        }
+        /// `Rect<LengthPercentageAuto>::resolve_or_zero` against a `Size` context.
+        pub inline fn resolve_auto_size_size(value: Rect(LengthPercentageAuto), size: Size(?f32)) Rect(f32) {
+            return .{
+                .left = Self.resolve_auto_value(value.left, size.width) orelse 0,
+                .right = Self.resolve_auto_value(value.right, size.width) orelse 0,
+                .top = Self.resolve_auto_value(value.top, size.height) orelse 0,
+                .bottom = Self.resolve_auto_value(value.bottom, size.height) orelse 0,
+            };
+        }
+        /// `Rect<LengthPercentageAuto>::maybe_resolve` against a scalar basis, keeping `auto` as `None`.
+        pub inline fn resolve_auto_rect_to_option(value: Rect(LengthPercentageAuto), basis: ?f32) Rect(?f32) {
+            return .{
+                .left = Self.resolve_auto_value(value.left, basis),
+                .right = Self.resolve_auto_value(value.right, basis),
+                .top = Self.resolve_auto_value(value.top, basis),
+                .bottom = Self.resolve_auto_value(value.bottom, basis),
+            };
+        }
+        /// `Rect<LengthPercentageAuto>::maybe_resolve` against a `Size` context, keeping `auto` as `None`.
+        pub inline fn resolve_auto_rect_size_to_option(value: Rect(LengthPercentageAuto), size: Size(?f32)) Rect(?f32) {
+            return .{
+                .left = Self.resolve_auto_value(value.left, size.width),
+                .right = Self.resolve_auto_value(value.right, size.width),
+                .top = Self.resolve_auto_value(value.top, size.height),
+                .bottom = Self.resolve_auto_value(value.bottom, size.height),
+            };
+        }
+        /// `Size<Dimension>.maybe_resolve(Size<Option<f32>>)`.
+        pub inline fn resolve_dimension_size(value: Size(Dimension), parent: Size(?f32)) Size(?f32) {
+            return .{
+                .width = Self.resolve_dimension_value(value.width, parent.width),
+                .height = Self.resolve_dimension_value(value.height, parent.height),
+            };
+        }
+        /// `Size<LengthPercentageAuto>.maybe_resolve(Size<Option<f32>>)`.
+        pub inline fn resolve_auto_size(value: Size(LengthPercentageAuto), parent: Size(?f32)) Size(?f32) {
+            return .{
+                .width = Self.resolve_auto_value(value.width, parent.width),
+                .height = Self.resolve_auto_value(value.height, parent.height),
+            };
+        }
     };
 }
 
-/// `Size<LengthPercentageAuto>.maybe_resolve(Size<Option<f32>>)`.
-inline fn resolve_auto_size(value: Size(LengthPercentageAuto), parent: Size(?f32)) Size(?f32) {
-    return .{
-        .width = resolve_auto_value(value.width, parent.width),
-        .height = resolve_auto_value(value.height, parent.height),
-    };
+const resolvers = Resolvers(true);
+const resolve_length_value = resolvers.resolve_length_value;
+const resolve_auto_value = resolvers.resolve_auto_value;
+const resolve_dimension_value = resolvers.resolve_dimension_value;
+const resolve_length_rect = resolvers.resolve_length_rect;
+const resolve_length_rect_size = resolvers.resolve_length_rect_size;
+const resolve_auto_rect = resolvers.resolve_auto_rect;
+const resolve_auto_size_size = resolvers.resolve_auto_size_size;
+const resolve_auto_rect_to_option = resolvers.resolve_auto_rect_to_option;
+const resolve_auto_rect_size_to_option = resolvers.resolve_auto_rect_size_to_option;
+const resolve_dimension_size = resolvers.resolve_dimension_size;
+const resolve_auto_size = resolvers.resolve_auto_size;
+
+/// Whether any box length a flex item resolves at construction is `calc()`.
+fn box_lengths_have_calc(child_style: anytype) bool {
+    const size = child_style.get(.size);
+    const min_size = child_style.get(.min_size);
+    const max_size = child_style.get(.max_size);
+    const padding = child_style.get(.padding);
+    const border = child_style.get(.border);
+    const margin = child_style.get(.margin);
+    const inset = child_style.get(.inset);
+    return style.compact_length.CompactLength.any_calc(.{
+        size.width.value,     size.height.value,     min_size.width.value, min_size.height.value,
+        max_size.width.value, max_size.height.value, padding.left.value,   padding.right.value,
+        padding.top.value,    padding.bottom.value,  border.left.value,    border.right.value,
+        border.top.value,     border.bottom.value,   margin.left.value,    margin.right.value,
+        margin.top.value,     margin.bottom.value,   inset.left.value,     inset.right.value,
+        inset.top.value,      inset.bottom.value,
+    });
 }
 
 // ---------------------------------------------------------------------------

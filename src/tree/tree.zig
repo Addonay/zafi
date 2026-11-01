@@ -1376,3 +1376,33 @@ test "calc() values resolve through the tree's calc resolver in flex, grid and b
         try testing.expect(@import("../style/calc.zig").current == null);
     }
 }
+
+test "an item whose only calc() value is its padding still resolves it (calc-specialised paths)" {
+    const testing = std.testing;
+    const Dimension = style.dimension.Dimension;
+    const LengthPercentage = style.dimension.LengthPercentage;
+    const Expr = struct { px: f32 };
+    const Resolve = struct {
+        fn f(_: ?*anyopaque, handle: *const anyopaque, _: f32) f32 {
+            const expr: *const Expr = @ptrCast(@alignCast(handle));
+            return expr.px;
+        }
+    };
+    const seven: Expr = .{ .px = 7 };
+    inline for (.{ style.Display.flex, style.Display.grid, style.Display.block }) |display| {
+        var tree = Tree.init(testing.allocator);
+        defer tree.deinit();
+        tree.set_calc_resolver(.{ .func = Resolve.f });
+        const child = try tree.new_leaf(.{
+            .size = .{ .width = Dimension.length(20), .height = Dimension.length(20) },
+            .padding = .{ .left = LengthPercentage.calc(&seven), .right = .zero(), .top = .zero(), .bottom = .zero() },
+        });
+        const container = try tree.new_with_children(.{
+            .display = display,
+            .size = .{ .width = Dimension.length(200), .height = Dimension.length(100) },
+        }, &[_]NodeId{child});
+        try tree.compute_layout(container, .{ .width = .max_content, .height = .max_content });
+        const l = try tree.layout_of(child);
+        try testing.expectEqual(@as(f32, 7), l.padding.left);
+    }
+}
