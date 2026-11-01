@@ -2,6 +2,7 @@
 
 const geometry = @import("../geometry.zig");
 const std = @import("std");
+const css = @import("../util/css.zig");
 pub const FlexParseError = error{InvalidFlexValue};
 
 const serde_support = @import("../serde_support.zig");
@@ -40,13 +41,14 @@ pub const FlexDirection = enum {
         return self.main_axis().other_axis();
     }
 
+    /// Taffy's keyword parser: one ident, ASCII case-insensitive.
     pub fn from_str(input: []const u8) FlexParseError!FlexDirection {
-        const value = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(value, "row")) return .row;
-        if (std.ascii.eqlIgnoreCase(value, "column")) return .column;
-        if (std.ascii.eqlIgnoreCase(value, "row-reverse")) return .row_reverse;
-        if (std.ascii.eqlIgnoreCase(value, "column-reverse")) return .column_reverse;
-        return error.InvalidFlexValue;
+        return css.keyword_enum(FlexDirection, input, &.{
+            .{ "row", .row },
+            .{ "column", .column },
+            .{ "row-reverse", .row_reverse },
+            .{ "column-reverse", .column_reverse },
+        }) catch error.InvalidFlexValue;
     }
 };
 pub const FlexWrap = enum {
@@ -69,36 +71,43 @@ pub const FlexWrap = enum {
         return self == .balance or self == .balance_reverse;
     }
 
-    /// Parse `flex-wrap` exactly like Taffy's `flexbox_balance`-enabled
-    /// `FromCss` impl: `nowrap`, `wrap`, `wrap-reverse`, and any combination
-    /// of a wrap keyword with `balance` (compound values such as
-    /// `wrap balance` or `balance wrap-reverse`).
+    /// Taffy's `FromCss for FlexWrap` (with `flexbox_balance`): `nowrap`, or
+    /// a combination of at most one of `wrap` / `wrap-reverse` with `balance`.
     pub fn from_str(input: []const u8) FlexParseError!FlexWrap {
-        var tokens = std.mem.tokenizeAny(u8, std.mem.trim(u8, input, " \t\r\n"), " \t\r\n");
-        var wrap: ?FlexWrap = null;
-        var balance = false;
-        var is_first = true;
-        while (tokens.next()) |token| {
-            var valid = true;
-            if (std.ascii.eqlIgnoreCase(token, "nowrap")) {
-                if (is_first) return .no_wrap;
-                valid = false;
-            } else if (std.ascii.eqlIgnoreCase(token, "wrap")) {
-                if (wrap != null) valid = false else wrap = .wrap;
-            } else if (std.ascii.eqlIgnoreCase(token, "wrap-reverse")) {
-                if (wrap != null) valid = false else wrap = .wrap_reverse;
-            } else if (std.ascii.eqlIgnoreCase(token, "balance")) {
-                if (balance) valid = false else balance = true;
-            } else valid = false;
-            if (!valid) return error.InvalidFlexValue;
-            is_first = false;
-        }
-        if (wrap) |wrapped| {
-            if (balance) return if (wrapped == .wrap_reverse) .balance_reverse else .balance;
-            return wrapped;
-        }
-        if (balance) return .balance;
-        return error.InvalidFlexValue;
+        const S = struct {
+            fn parse(_: void, p: *css.Parser) css.Error!FlexWrap {
+                var wrap: ?FlexWrap = null;
+                var balance = false;
+                var is_first = true;
+                while (true) {
+                    const ident = if (is_first) try p.expect_ident() else blk: {
+                        const saved = p.state();
+                        break :blk p.expect_ident() catch {
+                            p.reset(saved);
+                            break;
+                        };
+                    };
+                    const valid = if (std.ascii.eqlIgnoreCase(ident, "nowrap")) {
+                        if (is_first) return .no_wrap;
+                        return error.InvalidCss;
+                    } else if (std.ascii.eqlIgnoreCase(ident, "wrap")) set: {
+                        defer wrap = .wrap;
+                        break :set wrap == null;
+                    } else if (std.ascii.eqlIgnoreCase(ident, "wrap-reverse")) set: {
+                        defer wrap = .wrap_reverse;
+                        break :set wrap == null;
+                    } else if (std.ascii.eqlIgnoreCase(ident, "balance")) set: {
+                        defer balance = true;
+                        break :set !balance;
+                    } else false;
+                    if (!valid) return error.InvalidCss;
+                    is_first = false;
+                }
+                if (balance) return if (wrap == .wrap_reverse) .balance_reverse else .balance;
+                return wrap orelse .no_wrap;
+            }
+        };
+        return css.parse_str_entirely(input, FlexWrap, {}, S.parse) catch error.InvalidFlexValue;
     }
 };
 

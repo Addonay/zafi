@@ -1,6 +1,7 @@
 //! Direct port of Taffy's `style/block.rs`.
 
 const std = @import("std");
+const css = @import("../util/css.zig");
 pub const BlockParseError = error{InvalidTextAlign};
 
 const serde_support = @import("../serde_support.zig");
@@ -18,13 +19,14 @@ pub const TextAlign = enum {
         return self != .auto;
     }
 
+    /// Taffy's keyword parser: one ident, ASCII case-insensitive.
     pub fn from_str(input: []const u8) BlockParseError!TextAlign {
-        const value = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(value, "auto")) return .auto;
-        if (std.ascii.eqlIgnoreCase(value, "-webkit-left") or std.ascii.eqlIgnoreCase(value, "-moz-left")) return .legacy_left;
-        if (std.ascii.eqlIgnoreCase(value, "-webkit-right") or std.ascii.eqlIgnoreCase(value, "-moz-right")) return .legacy_right;
-        if (std.ascii.eqlIgnoreCase(value, "-webkit-center") or std.ascii.eqlIgnoreCase(value, "-moz-center")) return .legacy_center;
-        return error.InvalidTextAlign;
+        return css.keyword_enum(TextAlign, input, &.{
+            .{ "auto", .auto },
+            .{ "-webkit-left", .legacy_left },
+            .{ "-webkit-right", .legacy_right },
+            .{ "-webkit-center", .legacy_center },
+        }) catch error.InvalidTextAlign;
     }
 };
 

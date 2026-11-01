@@ -14,8 +14,8 @@
 //! The generation is bumped every time a slot is recycled, so an id held across
 //! a `remove`/`clear` never resolves to a different node: stale ids fail every
 //! lookup instead of silently aliasing a new node. Node indices are dense into
-//! paged storage (see `tree_mod.NodeStore`), which keeps `NodeData` addresses
-//! stable without conflating address stability with identity stability.
+//! one slot array (see `tree_mod.NodeStore`): identity comes from the id, never
+//! from a `NodeData` address.
 
 /// Slot index bit width (2^24 = 16,777,216 slots).
 pub const index_bits: u6 = 24;

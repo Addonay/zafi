@@ -3,9 +3,9 @@
 //!
 //! # Storage and identity
 //!
-//! Nodes live in paged, never-relocated storage, so a `*NodeData` obtained from
-//! `raw_node()` stays valid for the tree's lifetime. Identity is *separate* from
-//! address: [`NodeId`] is a generational handle (`tree/node.zig`), so an id
+//! Nodes live in one contiguous slot array, so a `*NodeData` obtained from
+//! `raw_node()` is valid only until the next node is created. Identity is
+//! *separate* from address: [`NodeId`] is a generational handle (`tree/node.zig`), so an id
 //! retained across `remove`/`clear` fails every lookup instead of silently
 //! aliasing a recycled node.
 //!
@@ -96,16 +96,16 @@ pub const NodeData = struct {
     /// Stamp used by child-list validation to detect duplicates in O(n) without
     /// allocating (compared against `Tree.visit_epoch`; never wraps).
     visit_mark: u64 = 0,
-    style: style.Style,
+    /// Compact storage: grid-only properties live out of line (see
+    /// `style.StoredStyle`).
+    style: style.StoredStyle,
     unrounded_layout: layout.Layout = .{},
     final_layout: layout.Layout = .{},
     children: std.ArrayList(NodeId),
     parent: ?NodeId = null,
     cache: cache.Cache = .{},
-    /// The out-of-flow candidates of the cached final layout, owned by the
-    /// tree. A cache hit must surface them again: they are how absolutely
-    /// positioned descendants reach a containing block further up.
-    cached_oof_candidates: []layout.OofCandidate = &.{},
+    /// Rarely used per-node data, allocated on first use (see `NodeExtra`).
+    extra: ?*NodeExtra = null,
     alive: bool = true,
     /// The cached layout depends on an inherited float context (see
     /// `LayoutTree.cache_float_coupled`).
@@ -114,6 +114,45 @@ pub const NodeData = struct {
     /// Taffy's flag so a null context can still be a stored context.
     has_context: bool = false,
     context: ?*anyopaque = null,
+    /// Free everything the node owns (its slot stays allocated).
+    fn deinit(self: *NodeData, allocator: std.mem.Allocator) void {
+        self.style.deinit(allocator);
+        if (self.extra) |extra| {
+            extra.deinit(allocator);
+            allocator.destroy(extra);
+            self.extra = null;
+        }
+        self.children.deinit(allocator);
+        self.children = .empty;
+    }
+
+    fn extraOrCreate(self: *NodeData, allocator: std.mem.Allocator) error{OutOfMemory}!*NodeExtra {
+        if (self.extra) |extra| return extra;
+        const extra = try allocator.create(NodeExtra);
+        extra.* = .{};
+        self.extra = extra;
+        return extra;
+    }
+
+    inline fn oofCandidates(self: *const NodeData) []const layout.OofCandidate {
+        return if (self.extra) |extra| extra.cached_oof_candidates else &.{};
+    }
+    inline fn hoistedChildren(self: *const NodeData) []const NodeId {
+        return if (self.extra) |extra| extra.hoisted_children.items else &.{};
+    }
+    inline fn detailedInfo(self: *const NodeData) layout.DetailedLayoutInfo {
+        return if (self.extra) |extra| extra.detailed_layout_info else .none;
+    }
+};
+
+/// Per-node data most nodes never use, kept out of `NodeData` (about 70 bytes
+/// per node): only nodes that cache out-of-flow descendants, contain
+/// absolutely positioned boxes, or carry grid layout details allocate one.
+pub const NodeExtra = struct {
+    /// The out-of-flow candidates of the cached final layout, owned by the
+    /// tree. A cache hit must surface them again: they are how absolutely
+    /// positioned descendants reach a containing block further up.
+    cached_oof_candidates: []layout.OofCandidate = &.{},
     /// Out-of-flow (`absolute`/`fixed`) boxes whose containing block is this
     /// node, as recorded by the out-of-flow positioning pass. Laid out by this
     /// node rather than by their parent, so their `Layout.location` is relative
@@ -124,51 +163,45 @@ pub const NodeData = struct {
     /// produced it (the tree layer cannot know concrete detail types).
     detailed_info_deinit: ?*const fn (*const anyopaque, std.mem.Allocator) void = null,
 
-    fn deinit(self: *NodeData, allocator: std.mem.Allocator) void {
-        freeDetailedInfo(self, allocator);
+    fn deinit(self: *NodeExtra, allocator: std.mem.Allocator) void {
+        self.freeDetailedInfo(allocator);
         allocator.free(self.cached_oof_candidates);
         self.cached_oof_candidates = &.{};
         self.hoisted_children.deinit(allocator);
-        self.children.deinit(allocator);
+    }
+
+    fn freeDetailedInfo(self: *NodeExtra, allocator: std.mem.Allocator) void {
+        if (self.detailed_layout_info != .none) {
+            if (self.detailed_info_deinit) |deinit_fn| deinit_fn(self.detailed_layout_info.grid, allocator);
+            self.detailed_layout_info = .none;
+            self.detailed_info_deinit = null;
+        }
     }
 };
 
 fn freeDetailedInfo(node_data: *NodeData, allocator: std.mem.Allocator) void {
-    if (node_data.detailed_layout_info != .none) {
-        if (node_data.detailed_info_deinit) |deinit_fn| {
-            deinit_fn(node_data.detailed_layout_info.grid, allocator);
-        }
-        node_data.detailed_layout_info = .none;
-        node_data.detailed_info_deinit = null;
-    }
+    if (node_data.extra) |extra| extra.freeDetailedInfo(allocator);
 }
 
-/// Paged, generational node storage.
+/// Generational node storage: one contiguous slot array.
 ///
-/// Taffy's slotmap inserts into immovable blocks; the Zig port previously used
-/// one `ArrayList(NodeData)` whose doubling growth memcpy'd the entire tree on
-/// every capacity increase (`NodeData` is ~1.3 KB). Pages are allocated once and
-/// never moved, so node insertion is O(1) with no large copies.
+/// Growth goes through the allocator's `remap` (C `realloc`), which large
+/// general-purpose allocators serve by remapping pages instead of copying,
+/// exactly like Taffy's `Vec`. One large block also lets glibc's adaptive
+/// thresholds keep the memory mapped across tree lifetimes; many medium pages
+/// made glibc return the whole heap at every teardown and fault it back in on
+/// the next tree (2x slower tree creation than Taffy).
+///
+/// `NodeData` pointers are therefore invalidated by node creation. Nothing in
+/// the tree or the layout algorithms holds one across `new_leaf` (layout never
+/// creates nodes, and the measure callback cannot mutate the tree).
 ///
 /// Slots are recycled through a LIFO free list and every reuse bumps the slot's
 /// generation, so removed nodes do not accumulate storage forever and stale ids
 /// can never resolve to a recycled node.
 pub const NodeStore = struct {
-    /// Slots in the first page. Small trees (the overwhelmingly common case for a
-    /// retained tree plus a handful of edits) avoid paying for a full page.
-    pub const first_page_size: usize = 8;
-    /// Pages double from `first_page_size` up to this many slots, then stay
-    /// fixed. Small trees stay small, and full pages are large enough
-    /// (> 128 KiB) that general-purpose allocators serve them from mmap and
-    /// adapt to them, instead of trimming and re-faulting mid-sized heap chunks
-    /// on every tree teardown.
-    pub const page_size: usize = 128;
-    const doubling_pages = std.math.log2_int(usize, page_size / first_page_size);
-    /// Slots before the first fixed-size page: 8 + 16 + ... + page_size/2.
-    const doubling_slots = page_size - first_page_size;
-
     allocator: std.mem.Allocator,
-    pages: std.ArrayListUnmanaged([]NodeData) = .empty,
+    slots: std.ArrayListUnmanaged(NodeData) = .empty,
     /// Number of slots ever allocated; ids index into `0..len`.
     len: u32 = 0,
     /// Free slot indices, most recently released first.
@@ -180,44 +213,14 @@ pub const NodeStore = struct {
         return .{ .allocator = allocator };
     }
 
-    fn pageCount(count: u32) usize {
-        return if (count == 0) 0 else pageIndex(count - 1) + 1;
+    /// Reserve room for `count` slots.
+    pub fn reserve(self: *NodeStore, count: u32) !void {
+        try self.slots.ensureTotalCapacity(self.allocator, count);
     }
 
-    inline fn pageIndex(index: u32) usize {
-        if (index < doubling_slots) return 31 - @clz((index >> 3) + 1);
-        return doubling_pages + (index - doubling_slots) / page_size;
-    }
-
-    inline fn pageOffset(index: u32) usize {
-        if (index < doubling_slots) {
-            const k: u5 = @intCast(31 - @clz((index >> 3) + 1));
-            return index - ((@as(u32, 1) << k) - 1) * first_page_size;
-        }
-        return (index - doubling_slots) % page_size;
-    }
-
-    fn pageSlots(page: usize) usize {
-        return if (page < doubling_pages) first_page_size << @intCast(page) else page_size;
-    }
-
-    pub fn ensurePages(self: *NodeStore, count: u32) !void {
-        const required = pageCount(count);
-        while (self.pages.items.len < required) {
-            const size: usize = pageSlots(self.pages.items.len);
-            const page = try self.allocator.alloc(NodeData, size);
-            // The page is owned by `pages` only once the append succeeds; an
-            // allocation failure must not strand it.
-            errdefer self.allocator.free(page);
-            try self.pages.append(self.allocator, page);
-        }
-    }
-
-    /// Reserve room for `count` slots, releasing the backing pages.
+    /// Release capacity beyond the allocated slots.
     pub fn trim(self: *NodeStore) void {
-        var index: usize = 0;
-        while (index < self.pages.items.len) : (index += 1) self.allocator.free(self.pages.items[index]);
-        self.pages.clearRetainingCapacity();
+        self.slots.shrinkAndFree(self.allocator, self.slots.items.len);
     }
 
     /// Take a slot for a new node, recycling a free one when available.
@@ -225,10 +228,16 @@ pub const NodeStore = struct {
         if (self.free.pop()) |index| return index;
         if (self.len > node.max_index) return error.NodeIdExhausted;
         const index = self.len;
-        try self.ensurePages(index + 1);
+        // Grow by 1.5x: large blocks grow by remapping (no copy), so the
+        // smaller factor costs little time and wastes less memory than
+        // doubling (Rust's `Vec`).
+        if (self.slots.items.len == self.slots.capacity) {
+            try self.slots.ensureTotalCapacityPrecise(self.allocator, @max(8, self.slots.capacity + self.slots.capacity / 2));
+        }
+        // New slot memory is undefined; start it at generation 0 so the first
+        // `NodeId` minted for it is well defined.
+        self.slots.items.len += 1;
         self.len = index + 1;
-        // Freshly allocated page memory is undefined; start the slot at
-        // generation 0 so the first `NodeId` minted for it is well defined.
         self.at(index).generation = 0;
         return index;
     }
@@ -238,49 +247,57 @@ pub const NodeStore = struct {
     fn release(self: *NodeStore, index: u32) !void {
         const slot = self.at(index);
         slot.generation +%= 1;
-        if (slot.generation == 0) return error.NodeIdExhausted;
-        try self.free.append(self.allocator, index);
         self.live_count -= 1;
+        // A slot whose generation wrapped is retired (never reused). If the
+        // free list cannot grow, the slot is simply not recycled.
+        if (slot.generation == 0) return;
+        self.free.append(self.allocator, index) catch {};
     }
 
-    /// In-place leaf construction: write the new node directly into its page
-    /// slot instead of building a ~1.3 KB temporary and copying it.
+    /// In-place leaf construction: write the new node directly into its slot
+    /// instead of building a ~1.2 KB temporary and copying it.
     pub fn appendLeaf(self: *NodeStore, value: style.Style) !NodeId {
         const index = try self.acquire();
         const node_data = self.at(index);
+        // Written in place (no 500-byte temporaries); on failure nothing is
+        // allocated and the slot goes back to the free list.
+        node_data.style.initInPlace(self.allocator, &value) catch |err| {
+            // Leave a dead, safely deinit-able slot (a fresh slot's memory is
+            // undefined) and offer it for reuse.
+            node_data.children = .empty;
+            node_data.extra = null;
+            node_data.alive = false;
+            self.free.append(self.allocator, index) catch {};
+            return err;
+        };
         // Reset every owned field while preserving the slot's generation counter,
         // which is bumped by `release` when the slot is recycled.
-        node_data.style = value;
         node_data.unrounded_layout = .{};
         node_data.final_layout = .{};
         node_data.children = .empty;
         node_data.parent = null;
         node_data.cache = .{};
-        node_data.cached_oof_candidates = &.{};
         node_data.cache_float_coupled = false;
         node_data.alive = true;
         node_data.has_context = false;
         node_data.context = null;
-        node_data.hoisted_children = .empty;
-        node_data.detailed_layout_info = .none;
-        node_data.detailed_info_deinit = null;
+        node_data.extra = null;
         node_data.visit_mark = 0;
         self.live_count += 1;
         return node.fromParts(index, node_data.generation) orelse error.NodeIdExhausted;
     }
 
     /// Mutable access to an allocated slot. The slot must be `< len`.
-    pub fn at(self: *NodeStore, index: u32) *NodeData {
-        return &self.pages.items[pageIndex(index)][pageOffset(index)];
+    pub inline fn at(self: *NodeStore, index: u32) *NodeData {
+        return &self.slots.items[index];
     }
 
-    pub fn atConst(self: *const NodeStore, index: u32) *const NodeData {
-        return &self.pages.items[pageIndex(index)][pageOffset(index)];
+    pub inline fn atConst(self: *const NodeStore, index: u32) *const NodeData {
+        return &self.slots.items[index];
     }
 
     pub fn deinit(self: *NodeStore) void {
-        self.trim();
-        self.pages.deinit(self.allocator);
+        self.slots.deinit(self.allocator);
         self.free.deinit(self.allocator);
         self.len = 0;
         self.live_count = 0;
@@ -297,6 +314,8 @@ pub const Tree = struct {
     /// uses Taffy's default (zero-size) measure; `compute_layout_with_measure`
     /// installs the caller's callback for the duration of the run.
     measure_function: ?interfaces.MeasureFunc = null,
+    /// Host `calc()` resolver; see `set_calc_resolver`.
+    calc_resolver: ?CalcResolver = null,
     /// Per-tree stack allocator for layout-pass temporaries (line lists,
     /// placement scratch, track arrays, occupancy intervals, ...). Allocations
     /// made from `scratch_allocator()` are owned by the tree and valid until the
@@ -338,7 +357,7 @@ pub const Tree = struct {
     pub fn init_with_config(allocator: std.mem.Allocator, config: TreeConfig) Tree {
         var result = init(allocator);
         result.use_rounding = config.use_rounding;
-        if (config.initial_capacity > 0) result.nodes.ensurePages(@intCast(config.initial_capacity)) catch @panic("Taffy tree allocation failed");
+        if (config.initial_capacity > 0) result.nodes.reserve(@intCast(config.initial_capacity)) catch @panic("Taffy tree allocation failed");
         return result;
     }
 
@@ -402,8 +421,8 @@ pub const Tree = struct {
         return self.nodes.len;
     }
 
-    /// Release page capacity not backed by a live node. Useful after a burst of
-    /// churn; layout itself never shrinks.
+    /// Release memory held for removed nodes (their child lists) and spare
+    /// slot capacity. Useful after a burst of churn; layout never shrinks.
     pub fn trim(self: *Tree) void {
         var index: u32 = 0;
         while (index < self.nodes.len) : (index += 1) {
@@ -425,7 +444,8 @@ pub const Tree = struct {
             slot.deinit(self.allocator);
             slot.alive = false;
             slot.generation +%= 1;
-            self.nodes.free.append(self.allocator, index) catch @panic("Taffy tree mutation arena exhausted");
+            // On allocation failure the slot is just not recycled.
+            self.nodes.free.append(self.allocator, index) catch {};
             self.nodes.live_count -= 1;
         }
         self.reset_scratch();
@@ -547,10 +567,10 @@ pub const Tree = struct {
         _ = try self.validateChildList(parent_id, &.{child});
         const parent_node = self.get_node_mut(parent_id) orelse return error.InvalidParentNode;
         const child_node = self.get_node_mut(child) orelse return error.InvalidChildNode;
-        try self.detach_from_parent(child, child_node.parent, parent_id);
-        // Re-adding an existing child moves it to the end rather than creating a
-        // second edge.
+        // Reserve first so a failure leaves the graph untouched. Re-adding an
+        // existing child moves it to the end rather than creating a second edge.
         try parent_node.children.ensureTotalCapacity(self.allocator, parent_node.children.items.len + 1);
+        try self.detach_from_parent(child, child_node.parent, parent_id);
         parent_node.children.appendAssumeCapacity(child);
         child_node.parent = parent_id;
         self.mark_dirty(parent_id);
@@ -571,9 +591,10 @@ pub const Tree = struct {
             }
             if (current_index < target) target -= 1;
         }
-        if (target > parent_node.children.items.len) return error.ChildIndexOutOfBounds;
+        if (index > parent_node.children.items.len) return error.ChildIndexOutOfBounds;
+        try parent_node.children.ensureTotalCapacity(self.allocator, parent_node.children.items.len + 1);
         try self.detach_from_parent(child, child_node.parent, parent_id);
-        try parent_node.children.insert(self.allocator, target, child);
+        parent_node.children.insertAssumeCapacity(target, child);
         child_node.parent = parent_id;
         self.mark_dirty(parent_id);
     }
@@ -616,8 +637,19 @@ pub const Tree = struct {
         if (index >= parent_node.children.items.len) return error.ChildIndexOutOfBounds;
         const child_node = self.get_node_mut(child) orelse return error.InvalidChildNode;
         const old_child = parent_node.children.items[index];
-        try self.detach_from_parent(child, child_node.parent, parent_id);
-        parent_node.children.items[index] = child;
+        // Replacing a child with itself changes nothing.
+        if (old_child == child) return old_child;
+        var target = index;
+        if (child_node.parent == parent_id) {
+            // A sibling moves into the slot: drop its old edge, which shifts the
+            // slot down when it sat before it.
+            const from = std.mem.indexOfScalar(NodeId, parent_node.children.items, child).?;
+            _ = parent_node.children.orderedRemove(from);
+            if (from < target) target -= 1;
+        } else {
+            try self.detach_from_parent(child, child_node.parent, parent_id);
+        }
+        parent_node.children.items[target] = child;
         child_node.parent = parent_id;
         if (self.get_node_mut(old_child)) |old| old.parent = null;
         self.mark_dirty(parent_id);
@@ -668,7 +700,7 @@ pub const Tree = struct {
     /// as recorded by the last layout. Their `Layout.location` is relative to
     /// `node`, not to their parent.
     pub fn hoisted_children(self: *const Tree, id: NodeId) ![]const NodeId {
-        return (self.get_node(id) orelse return error.InvalidParentNode).hoisted_children.items;
+        return (self.get_node(id) orelse return error.InvalidParentNode).hoistedChildren();
     }
 
     // ---------------------------------------------------------------------
@@ -676,23 +708,17 @@ pub const Tree = struct {
     // ---------------------------------------------------------------------
 
     pub fn style_of(self: *const Tree, id: NodeId) !style.Style {
-        return (self.get_node(id) orelse return error.InvalidInputNode).style;
+        return (self.get_node(id) orelse return error.InvalidInputNode).style.toStyle();
     }
 
-    /// Borrowed style pointer: no ~512-byte `Style` copy per call. Pointers
-    /// are stable because nodes live in paged storage and are never moved.
-    ///
-    /// The `Style` record itself is owned by the tree, but the slices and strings
-    /// it references (`grid_template_columns`, `grid_template_areas`, ...) are
-    /// *borrowed from the caller* and must outlive the tree's use of them. See
-    /// `editStyle` for a mutation path that keeps invalidation correct.
-    pub fn style_ptr(self: *const Tree, id: NodeId) ?*const style.Style {
-        return &(self.get_node(id) orelse return null).style;
+    /// One style property of `id`, without materialising the whole `Style`.
+    pub fn style_get(self: *const Tree, id: NodeId, comptime field: style.view.Field) !style.view.FieldType(field) {
+        return (self.get_node(id) orelse return error.InvalidInputNode).style.get(field);
     }
 
     pub fn set_style(self: *Tree, id: NodeId, value: style.Style) !void {
         const node_data = self.get_node_mut(id) orelse return error.InvalidInputNode;
-        node_data.style = value;
+        try node_data.style.set(self.allocator, &value);
         self.mark_dirty(id);
     }
 
@@ -705,7 +731,9 @@ pub const Tree = struct {
     /// and always invalidates the affected cache entries.
     pub fn edit_style(self: *Tree, id: NodeId, comptime edit_fn: fn (*style.Style) void) !void {
         const node_data = self.get_node_mut(id) orelse return error.InvalidInputNode;
-        edit_fn(&node_data.style);
+        var value = node_data.style.toStyle();
+        edit_fn(&value);
+        try node_data.style.set(self.allocator, &value);
         self.mark_dirty(id);
     }
 
@@ -724,7 +752,7 @@ pub const Tree = struct {
     /// preserved (not cleared) by measure-only passes, which do not rewrite the
     /// node's completed layout.
     pub fn detailed_layout_info(self: *const Tree, id: NodeId) !layout.DetailedLayoutInfo {
-        return (self.get_node(id) orelse return error.InvalidInputNode).detailed_layout_info;
+        return (self.get_node(id) orelse return error.InvalidInputNode).detailedInfo();
     }
 
     /// Clear any recorded detailed layout information for `id`.
@@ -737,9 +765,10 @@ pub const Tree = struct {
     /// The `LayoutTree` hook name for `set_detailed_grid_info`.
     pub fn set_detailed_layout_info(self: *Tree, id: NodeId, info: *const anyopaque, deinit_fn: *const fn (*const anyopaque, std.mem.Allocator) void) !void {
         const node_data = self.get_node_mut(id) orelse return error.InvalidInputNode;
-        freeDetailedInfo(node_data, self.allocator);
-        node_data.detailed_layout_info = .{ .grid = info };
-        node_data.detailed_info_deinit = deinit_fn;
+        const extra = try node_data.extraOrCreate(self.allocator);
+        extra.freeDetailedInfo(self.allocator);
+        extra.detailed_layout_info = .{ .grid = info };
+        extra.detailed_info_deinit = deinit_fn;
     }
 
     pub fn unrounded_layout(self: *const Tree, id: NodeId) !layout.Layout {
@@ -763,10 +792,10 @@ pub const Tree = struct {
     pub fn cache_get(self: *Tree, id: NodeId, input: *const layout.LayoutInput) ?layout.LayoutOutput {
         const node_data = self.get_node_mut(id) orelse return null;
         var output = node_data.cache.get(input.*) orelse return null;
-        if (input.run_mode == .perform_layout and node_data.cached_oof_candidates.len != 0) {
+        if (input.run_mode == .perform_layout and node_data.oofCandidates().len != 0) {
             // Hand out a pass-scoped copy: callers translate the list in place.
             var candidates: layout.OofCandidates = .empty;
-            candidates.appendSlice(self.scratch_allocator(), node_data.cached_oof_candidates) catch return null;
+            candidates.appendSlice(self.scratch_allocator(), node_data.oofCandidates()) catch return null;
             output.oof_candidates = candidates;
         }
         return output;
@@ -789,12 +818,24 @@ pub const Tree = struct {
         const node_data = self.get_node_mut(id) orelse return;
         if (input.run_mode == .perform_layout) {
             // Keep the final layout's candidates alongside it, or fail the layout.
-            const owned = self.allocator.dupe(layout.OofCandidate, output.oof_candidates.items) catch |err| {
-                _ = node_data.cache.clear();
-                return err;
-            };
-            self.allocator.free(node_data.cached_oof_candidates);
-            node_data.cached_oof_candidates = owned;
+            const candidates = output.oof_candidates.items;
+            if (candidates.len == 0) {
+                if (node_data.extra) |extra| {
+                    self.allocator.free(extra.cached_oof_candidates);
+                    extra.cached_oof_candidates = &.{};
+                }
+            } else {
+                const extra = node_data.extraOrCreate(self.allocator) catch |err| {
+                    _ = node_data.cache.clear();
+                    return err;
+                };
+                const owned = self.allocator.dupe(layout.OofCandidate, candidates) catch |err| {
+                    _ = node_data.cache.clear();
+                    return err;
+                };
+                self.allocator.free(extra.cached_oof_candidates);
+                extra.cached_oof_candidates = owned;
+            }
         }
         node_data.cache.store(input.*, output);
     }
@@ -809,17 +850,27 @@ pub const Tree = struct {
         self.mark_dirty(id);
     }
 
+    /// Invalidate every node's cached layout.
+    pub fn mark_all_dirty(self: *Tree) void {
+        var index: u32 = 0;
+        while (index < self.nodes.len) : (index += 1) {
+            const node_data = self.nodes.at(index);
+            if (node_data.alive) _ = node_data.cache.clear();
+        }
+    }
+
     /// Invalidate `id` and every ancestor up to the root.
     pub fn mark_dirty(self: *Tree, id: NodeId) void {
         var current: ?NodeId = id;
         while (current) |current_id| {
             const node_data = self.get_node_mut(current_id) orelse break;
-            // Stop as soon as an ancestor is already dirty: its cache is empty,
-            // so every ancestor above it was cleared before.
-            switch (node_data.cache.clear()) {
-                .already_empty => break,
-                .cleared => {},
-            }
+            // Walk all the way up (O(depth)). Stopping at the first empty cache
+            // (Taffy) assumes an empty cache implies empty ancestor caches,
+            // which hidden subtrees break: hidden layout clears descendants'
+            // caches while the `display: none` node itself stays cached, so a
+            // node moved into, or restyled within, a hidden subtree kept a
+            // stale layout.
+            _ = node_data.cache.clear();
             current = node_data.parent;
         }
     }
@@ -858,6 +909,18 @@ pub const Tree = struct {
     pub fn get_node_context_mut(self: *Tree, id: NodeId) ?*anyopaque {
         const node_data = self.get_node_mut(id) orelse return null;
         return if (node_data.has_context) node_data.context else null;
+    }
+
+    /// The contexts of `N` distinct nodes at once (Taffy's
+    /// `get_disjoint_node_context_mut`). Null if any id is invalid, carries no
+    /// context, or appears twice.
+    pub fn get_disjoint_node_context_mut(self: *Tree, comptime N: usize, ids: [N]NodeId) ?[N]*anyopaque {
+        var result: [N]*anyopaque = undefined;
+        for (ids, 0..) |id, i| {
+            for (ids[0..i]) |earlier| if (earlier == id) return null;
+            result[i] = self.get_node_context_mut(id) orelse return null;
+        }
+        return result;
     }
 
     /// Typed, invalidating context edit. See `get_node_context_mut`.
@@ -900,67 +963,78 @@ pub const Tree = struct {
         return self.style_of(id);
     }
 
-    /// Default `calc()` resolver. Taffy's high-level trees also resolve calc to
-    /// zero unless a measure/resolver hook is supplied; see
-    /// `compute_layout_with_measure` and `Style.calc`.
-    pub fn resolve_calc_value(self: *const Tree, _: ?*const anyopaque, _: f32) f32 {
-        _ = self;
-        return 0;
+    /// A host `calc()` resolver: `func(ctx, handle, basis)` returns the value of
+    /// the calc expression `handle` (the pointer given to `Dimension.calc` and
+    /// friends) against `basis`, the size percentages resolve against.
+    pub const CalcResolver = struct {
+        ctx: ?*anyopaque = null,
+        func: *const fn (ctx: ?*anyopaque, handle: *const anyopaque, basis: f32) f32,
+    };
+
+    /// Install (or with `null`, remove) the resolver for `calc()` values.
+    pub fn set_calc_resolver(self: *Tree, resolver: ?CalcResolver) void {
+        self.calc_resolver = resolver;
+        // Calc results feed every cache entry; recompute everything.
+        self.mark_all_dirty();
+    }
+
+    /// Resolve a `calc()` value: the host resolver when set, otherwise zero
+    /// (Taffy's default tree behaviour).
+    pub fn resolve_calc_value(self: *const Tree, value: ?*const anyopaque, basis: f32) f32 {
+        const handle = value orelse return 0;
+        const r = self.calc_resolver orelse return 0;
+        return r.func(r.ctx, handle, basis);
     }
 
     /// The `LayoutTree` hook: resolve a `calc()` length against `basis`.
-    ///
-    /// Zero, matching `resolve_calc_value` and Taffy's default tree. A host with
-    /// a real expression engine overrides this.
     pub fn calc(self: *const Tree, value: ?*const anyopaque, basis: f32) ?f32 {
         return self.resolve_calc_value(value, basis);
     }
 
     /// The `LayoutTree` hook: a pointer to `id`'s style, valid for the pass.
     ///
-    /// Non-optional: the algorithms only ask about ids they walked to. `style_ptr`
-    /// is the checked form for callers that may hold a stale id.
-    pub fn get_style(self: *const Tree, id: NodeId) *const style.Style {
+    /// Non-optional: the algorithms only ask about ids they walked to.
+    /// The algorithms read it through `style.view.View(style.StoredStyle)`.
+    pub fn get_style(self: *const Tree, id: NodeId) *const style.StoredStyle {
         const node_data = self.get_node(id) orelse @panic("get_style: invalid or stale NodeId");
         return &node_data.style;
-    }
-
-    /// The style of an out-of-flow box being positioned by its containing block.
-    pub fn oof_item_style(self: *const Tree, id: NodeId) ?*const style.Style {
-        return self.style_ptr(id);
     }
 
     /// Drop the recorded out-of-flow child list. Called once per `perform_layout`
     /// pass before the node re-records it, so a previous run's list cannot
     /// persist.
     pub fn clear_hoisted_children(self: *Tree, id: NodeId) !void {
-        if (self.get_node_mut(id)) |node_data| node_data.hoisted_children.clearRetainingCapacity();
+        if (self.get_node_mut(id)) |node_data| {
+            if (node_data.extra) |extra| extra.hoisted_children.clearRetainingCapacity();
+        }
     }
 
     /// Append to the recorded out-of-flow child list, in document order.
     pub fn add_hoisted_children(self: *Tree, id: NodeId, hoisted: []const NodeId) !void {
         const node_data = self.get_node_mut(id) orelse return error.InvalidInputNode;
-        try node_data.hoisted_children.appendSlice(self.allocator, hoisted);
+        if (hoisted.len == 0) return;
+        const extra = try node_data.extraOrCreate(self.allocator);
+        try extra.hoisted_children.appendSlice(self.allocator, hoisted);
     }
 
     /// Whether `id` is an out-of-flow (`absolute`/`fixed`) box generating content.
     pub fn is_out_of_flow(self: *const Tree, id: NodeId) bool {
         const node_data = self.get_node(id) orelse return false;
-        return node_data.style.position.is_out_of_flow() and node_data.style.display != .none;
+        return node_data.style.get(.position).is_out_of_flow() and node_data.style.get(.display) != .none;
     }
 
     pub fn hoisted_child_count(self: *const Tree, id: NodeId) !usize {
-        return (self.get_node(id) orelse return error.InvalidParentNode).hoisted_children.items.len;
+        return (self.get_node(id) orelse return error.InvalidParentNode).hoistedChildren().len;
     }
 
     pub fn get_hoisted_child_id(self: *const Tree, id: NodeId, index: usize) !NodeId {
-        return (self.get_node(id) orelse return error.InvalidParentNode).hoisted_children.items[index];
+        return (self.get_node(id) orelse return error.InvalidParentNode).hoistedChildren()[index];
     }
 
     /// Read back the detailed layout information recorded for `id`, if any.
     pub fn get_detailed_layout_info(self: *const Tree, id: NodeId) ?*const anyopaque {
         const node_data = self.get_node(id) orelse return null;
-        return switch (node_data.detailed_layout_info) {
+        return switch (node_data.detailedInfo()) {
             .grid => |info| info,
             .none => null,
         };
@@ -993,13 +1067,14 @@ pub const Tree = struct {
             self.in_measure_callback = true;
             defer self.in_measure_callback = false;
         }
-        return compute.leaf_layout_with_measure(
-            id,
-            input,
-            &node_data.style,
-            if (node_data.has_context) node_data.context else null,
-            measure,
-        );
+        const context = if (node_data.has_context) node_data.context else null;
+        // `MeasureFunc` receives a full `Style`: materialise one for measured
+        // leaves only.
+        if (measure != null) {
+            const full = node_data.style.toStyle();
+            return compute.leaf_layout_with_measure(id, input, &full, context, measure);
+        }
+        return compute.leaf_layout_with_measure(id, input, &node_data.style, context, null);
     }
 
     pub fn compute_child_layout(self: *Tree, id: NodeId, input: layout.LayoutInput) !layout.LayoutOutput {
@@ -1117,13 +1192,10 @@ pub const Tree = struct {
         for (node_data.children.items) |child_id| {
             if (self.get_node_mut(child_id)) |child| child.parent = null;
         }
-        var owned_children = node_data.children;
-        node_data.children = .empty;
-        owned_children.deinit(self.allocator);
         node_data.parent = null;
-        freeDetailedInfo(node_data, self.allocator);
-        node_data.hoisted_children.deinit(self.allocator);
-        node_data.hoisted_children = .empty;
+        // Children, style, cached out-of-flow candidates, hoisted children and
+        // detailed info (the candidates used to leak here).
+        node_data.deinit(self.allocator);
         node_data.alive = false;
         _ = node_data.cache.clear();
         try self.nodes.release(node.indexOf(id));
@@ -1159,7 +1231,7 @@ pub const Tree = struct {
     /// This is the escape hatch the layout algorithms use: it exposes style,
     /// cache, graph and layout fields *without* invalidation, so edits made
     /// through it can leave ancestors serving stale layouts. Application code
-    /// should use `style_ptr`/`style_of` for reading, `set_style`/`edit_style`
+    /// should use `style_of`/`style_get` for reading, `set_style`/`edit_style`
     /// for style changes, and the dedicated mutation methods for the graph.
     pub fn raw_node(self: *Tree, id: NodeId) ?*NodeData {
         return self.get_node_mut(id);
@@ -1173,9 +1245,11 @@ pub const Tree = struct {
         return self.get_node(id);
     }
 
+    /// Remove `child_id`'s edge from `old_parent`, including when the old parent
+    /// is the new one (a move within the same parent re-inserts it).
     fn detach_from_parent(self: *Tree, child_id: NodeId, old_parent: ?NodeId, new_parent: NodeId) !void {
+        _ = new_parent;
         const old_parent_id = old_parent orelse return;
-        if (old_parent_id == new_parent) return;
         const old_parent_node = self.get_node_mut(old_parent_id) orelse return error.InvalidParentNode;
         var index: usize = 0;
         while (index < old_parent_node.children.items.len) : (index += 1) {
@@ -1303,4 +1377,281 @@ test "child-list validation rejects duplicates and cycles without mutating" {
     // Repeated validations reuse the stamps correctly.
     for (0..3) |_| try t.set_children(root, &.{ b, a });
     try testing.expectEqual(b, (try t.children(root))[0]);
+}
+
+test "calc() values resolve through the tree's calc resolver in flex, grid and block" {
+    const testing = std.testing;
+    const Dimension = style.dimension.Dimension;
+    const LengthPercentage = style.dimension.LengthPercentage;
+    // An expression handle: `calc(<percent>% + <px>px)`.
+    const Expr = struct { percent: f32, px: f32 };
+    const Resolve = struct {
+        fn f(_: ?*anyopaque, handle: *const anyopaque, basis: f32) f32 {
+            const expr: *const Expr = @ptrCast(@alignCast(handle));
+            return basis * expr.percent / 100 + expr.px;
+        }
+    };
+    const half_plus_ten: Expr = .{ .percent = 50, .px = 10 };
+    const ten: Expr = .{ .percent = 0, .px = 10 };
+
+    inline for (.{ style.Display.flex, style.Display.grid, style.Display.block }) |display| {
+        var tree = Tree.init(testing.allocator);
+        defer tree.deinit();
+        const child = try tree.new_leaf(.{
+            .size = .{ .width = Dimension.calc(&half_plus_ten), .height = Dimension.length(20) },
+            .margin = .{ .left = style.dimension.LengthPercentageAuto.calc(&ten), .right = .zero(), .top = .zero(), .bottom = .zero() },
+        });
+        // The container's calc padding resolves against the outer root's width.
+        const container = try tree.new_with_children(.{
+            .display = display,
+            .size = .{ .width = Dimension.length(200), .height = Dimension.length(100) },
+            .padding = .{ .left = LengthPercentage.calc(&ten), .right = .zero(), .top = .zero(), .bottom = .zero() },
+        }, &[_]NodeId{child});
+        const root = try tree.new_with_children(.{
+            .display = .block,
+            .size = .{ .width = Dimension.length(400), .height = Dimension.length(400) },
+        }, &[_]NodeId{container});
+
+        // Without a resolver, calc resolves to zero (Taffy's default tree).
+        try tree.compute_layout(root, .{ .width = .max_content, .height = .max_content });
+        try testing.expectEqual(@as(f32, 0), (try tree.layout_of(child)).size.width);
+
+        tree.set_calc_resolver(.{ .func = Resolve.f });
+        try tree.compute_layout(root, .{ .width = .max_content, .height = .max_content });
+        const l = try tree.layout_of(child);
+        // Child width: 50% of the container's 190px content box + 10px.
+        try testing.expectEqual(@as(f32, 105), l.size.width);
+        // Padding 10 + margin 10.
+        try testing.expectEqual(@as(f32, 20), l.location.x);
+        // The resolver is scoped to the layout call.
+        try testing.expect(@import("../style/calc.zig").current == null);
+    }
+}
+
+test "an item whose only calc() value is its padding still resolves it (calc-specialised paths)" {
+    const testing = std.testing;
+    const Dimension = style.dimension.Dimension;
+    const LengthPercentage = style.dimension.LengthPercentage;
+    const Expr = struct { px: f32 };
+    const Resolve = struct {
+        fn f(_: ?*anyopaque, handle: *const anyopaque, _: f32) f32 {
+            const expr: *const Expr = @ptrCast(@alignCast(handle));
+            return expr.px;
+        }
+    };
+    const seven: Expr = .{ .px = 7 };
+    inline for (.{ style.Display.flex, style.Display.grid, style.Display.block }) |display| {
+        var tree = Tree.init(testing.allocator);
+        defer tree.deinit();
+        tree.set_calc_resolver(.{ .func = Resolve.f });
+        const child = try tree.new_leaf(.{
+            .size = .{ .width = Dimension.length(20), .height = Dimension.length(20) },
+            .padding = .{ .left = LengthPercentage.calc(&seven), .right = .zero(), .top = .zero(), .bottom = .zero() },
+        });
+        const container = try tree.new_with_children(.{
+            .display = display,
+            .size = .{ .width = Dimension.length(200), .height = Dimension.length(100) },
+        }, &[_]NodeId{child});
+        try tree.compute_layout(container, .{ .width = .max_content, .height = .max_content });
+        const l = try tree.layout_of(child);
+        try testing.expectEqual(@as(f32, 7), l.padding.left);
+    }
+}
+
+test "trim keeps live nodes; remove frees everything a node owns" {
+    const testing = std.testing;
+    var tree = Tree.init(testing.allocator);
+    defer tree.deinit();
+    const columns = [_]style.grid.GridTemplateComponent{ .{ .single = .auto }, .{ .single = .auto } };
+    // A grid style (stored out of line) and an absolutely positioned child (so
+    // the container caches out-of-flow candidates).
+    const abs = try tree.new_leaf(.{ .position = .absolute, .size = .{ .width = .length(5), .height = .length(5) } });
+    const a = try tree.new_leaf(.{ .size = .{ .width = .length(10), .height = .length(10) }, .grid_row = .{ .start = .{ .line = 1 }, .end = .auto } });
+    const inner = try tree.new_with_children(.{ .display = .grid, .grid_template_columns = &columns }, &[_]NodeId{ a, abs });
+    const root = try tree.new_with_children(.{ .display = .block }, &[_]NodeId{inner});
+    try tree.compute_layout(root, .{ .width = .max_content, .height = .max_content });
+
+    // Removing nodes that own out-of-line data must not leak (testing allocator).
+    _ = try tree.remove(abs);
+    _ = try tree.remove(a);
+    tree.trim();
+    // Live nodes survive trim.
+    try testing.expectEqual(style.Display.grid, try tree.style_get(inner, .display));
+    try testing.expectEqual(@as(usize, 2), (try tree.style_of(inner)).grid_template_columns.len);
+    try tree.compute_layout(root, .{ .width = .max_content, .height = .max_content });
+    // Recycled slots start clean.
+    const b = try tree.new_leaf(.{});
+    try testing.expectEqual(@as(usize, 0), (try tree.style_of(b)).grid_template_columns.len);
+}
+
+test "get_disjoint_node_context_mut" {
+    const testing = std.testing;
+    var tree = Tree.init(testing.allocator);
+    defer tree.deinit();
+    var x: u32 = 1;
+    var y: u32 = 2;
+    const a = try tree.new_leaf_with_context(.{}, &x);
+    const b = try tree.new_leaf_with_context(.{}, &y);
+    const c = try tree.new_leaf(.{});
+    const both = tree.get_disjoint_node_context_mut(2, .{ a, b }).?;
+    try testing.expectEqual(@as(*anyopaque, &x), both[0]);
+    try testing.expectEqual(@as(*anyopaque, &y), both[1]);
+    try testing.expect(tree.get_disjoint_node_context_mut(2, .{ a, a }) == null);
+    try testing.expect(tree.get_disjoint_node_context_mut(2, .{ a, c }) == null);
+}
+
+// Regression tests from the 0.4.0 review.
+test "review: add_child twice duplicates edge" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const p = try t.new_leaf(.{});
+    const c = try t.new_leaf(.{});
+    try t.add_child(p, c);
+    try t.add_child(p, c);
+    try testing.expectEqual(@as(usize, 1), try t.child_count(p));
+}
+
+test "review: insert_child_at_index same parent duplicates edge" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    const b = try t.new_leaf(.{});
+    const p = try t.new_with_children(.{}, &.{ a, b });
+    try t.insert_child_at_index(p, 0, b);
+    try testing.expectEqual(@as(usize, 2), try t.child_count(p));
+}
+
+test "review: replace_child_at_index with itself orphans it" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    const p = try t.new_with_children(.{}, &.{a});
+    _ = try t.replace_child_at_index(p, 0, a);
+    try testing.expectEqual(p, (try t.parent(a)).?);
+}
+
+test "review: replace_child_at_index with sibling duplicates" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    const b = try t.new_leaf(.{});
+    const p = try t.new_with_children(.{}, &.{ a, b });
+    _ = try t.replace_child_at_index(p, 0, b);
+    try testing.expectEqual(@as(usize, 1), try t.child_count(p));
+}
+
+test "review: clear then deinit" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    _ = try t.new_with_children(.{}, &.{a});
+    t.clear();
+}
+
+test "review: clear then trim" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    _ = try t.new_with_children(.{}, &.{a});
+    t.clear();
+    t.trim();
+}
+
+test "review: remove leaks cached oof candidates on slot reuse" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const abs = try t.new_leaf(.{  .size = .{ .width = .length(10), .height = .length(10) } });
+    const mid = try t.new_with_children(.{ .display = .flex }, &.{abs});
+    const root = try t.new_with_children(.{ .display = .flex, .position = .relative }, &.{mid});
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
+    _ = try t.remove(mid);
+    _ = try t.new_leaf(.{});
+}
+test "review: negative percent padding basis trips ScrollableOverflow assert" {
+    const testing = std.testing;
+    const LP = style.dimension.LengthPercentage;
+    const LPA = style.dimension.LengthPercentageAuto;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const leaf_id = try t.new_leaf(.{ .padding = .{ .left = LP.percent(0.5), .right = .zero(), .top = .zero(), .bottom = .zero() } });
+    const flex = try t.new_with_children(.{ .display = .flex, .flex_direction = .column, .margin = .{ .left = LPA.length(30), .right = .zero(), .top = .zero(), .bottom = .zero() }, .padding = .{ .left = LP.length(4), .right = .zero(), .top = .zero(), .bottom = .zero() } }, &.{leaf_id});
+    const root = try t.new_with_children(.{ .display = .block, .size = .{ .width = .length(10), .height = .length(10) } }, &.{flex});
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
+}
+test "review: second compute_layout with no changes alters layout" {
+    const testing = std.testing;
+    const LP = style.dimension.LengthPercentage;
+    const LPA = style.dimension.LengthPercentageAuto;
+    const Dim = style.dimension.Dimension;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const item = try t.new_leaf(.{
+        .display = .block,
+        .size = .{ .width = Dim.percent(0.98), .height = Dim.length(52) },
+        
+    });
+    const flex = try t.new_with_children(.{
+        .display = .flex,
+        .flex_direction = .column,
+        .float = .right,
+        .size = .{ .width = Dim.percent(0.45), .height = Dim.percent(0.23) },
+        
+        .padding = .{ .left = .zero(), .right = LP.length(11), .top = .zero(), .bottom = .zero() },
+    }, &.{item});
+    const abs = try t.new_with_children(.{
+        .display = .block,
+        .position = .absolute,
+        .margin = .{ .left = LPA.length(0), .right = LPA.length(2), .top = LPA.percent(0.29), .bottom = LPA.percent(0.28) },
+        
+        
+    }, &.{flex});
+    const root = try t.new_with_children(.{
+        .display = .block,
+        
+    }, &.{abs});
+    const avail: geometry.Size(@import("../style/available_space.zig").AvailableSpace) = .{ .width = .{ .definite = 300 }, .height = .{ .definite = 300 } };
+    try t.compute_layout(root, avail);
+    const first = try t.layout_of(item);
+    try t.compute_layout(root, avail);
+    const second = try t.layout_of(item);
+    t.mark_all_dirty();
+    try t.compute_layout(root, avail);
+    const third = try t.layout_of(item);
+    try testing.expectEqual(first.size.height, second.size.height);
+    try testing.expectEqual(third.size.height, second.size.height);
+}
+test "review: node moved into a display:none subtree keeps its stale visible layout" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const x = try t.new_leaf(.{ .size = .{ .width = .length(10), .height = .length(10) } });
+    const a = try t.new_leaf(.{ .display = .block });
+    const h = try t.new_with_children(.{ .display = .none }, &.{a});
+    const root = try t.new_with_children(.{ .display = .block }, &.{ h, x });
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
+    try testing.expectEqual(@as(f32, 10), (try t.layout_of(x)).size.width);
+    try t.add_child(a, x); // x is now inside the hidden subtree
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
+    try testing.expectEqual(@as(f32, 0), (try t.layout_of(x)).size.width);
+}
+test "review: print_tree panics on a non-last child that has children" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const g = try t.new_leaf(.{});
+    const a = try t.new_with_children(.{}, &.{g});
+    const b = try t.new_leaf(.{});
+    const mid = try t.new_with_children(.{}, &.{ a, b });
+    const root = try t.new_with_children(.{}, &.{mid});
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try @import("../util/print.zig").write_tree(&writer, &t, root);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "│   ") != null);
 }
