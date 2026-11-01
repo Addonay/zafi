@@ -101,6 +101,57 @@ The algorithms (`compute_flexbox_layout`, `compute_grid_layout`,
 host with its own node storage — a retained UI tree, an ECS — can run layout
 directly on it instead of mirroring nodes into `zafi.Tree`.
 
+### Custom style types
+
+A custom tree does not have to store `zafi.Style` either: `get_style` may
+return a pointer to the host's own style type. (This is the counterpart of
+Taffy's style traits, `CoreStyle`, `FlexboxContainerStyle` and friends.) The
+algorithms read every property as `style.get(.name)`, and for a host type that
+resolves at compile time to the first of:
+
+1. a method `pub fn name(self: *const MyStyle) T`, to compute the property from
+   your own representation;
+2. a field `name: T` of the same type as `zafi.Style.name`;
+3. zafi's default for that property.
+
+So you declare only the properties you support, and the rest cost nothing.
+
+```zig
+const MyStyle = struct {
+    // Your own representation, exposed through methods.
+    kind: enum { row, column, grid } = .row,
+    pad_px: f32 = 0,
+    // zafi's own types, read directly.
+    size: zafi.Size(zafi.Dimension) = .{ .width = .auto, .height = .auto },
+    flex_grow: f32 = 0,
+
+    pub fn display(self: *const MyStyle) zafi.Display {
+        return if (self.kind == .grid) .grid else .flex;
+    }
+    pub fn flex_direction(self: *const MyStyle) zafi.FlexDirection {
+        return if (self.kind == .column) .column else .row;
+    }
+    pub fn padding(self: *const MyStyle) zafi.Rect(zafi.LengthPercentage) {
+        const p: zafi.LengthPercentage = .length(self.pad_px);
+        return .{ .left = p, .right = p, .top = p, .bottom = p };
+    }
+    // Everything else (margins, gaps, alignment, ...) reads as zafi's default.
+};
+
+// In your tree:
+pub fn get_style(self: *const MyTree, id: zafi.NodeId) *const MyStyle { ... }
+```
+
+Derived queries (`is_block`, `is_replaced`, `is_compressible_replaced`,
+`box_generation_mode`, ...) can be overridden the same way, with a method of
+that name. A field with the right name but the wrong type is a compile error
+that names the expected type. With `zafi.Style` itself, `get` is a plain field
+load, so the built-in `Tree` pays nothing for this.
+
+The `MeasureFunc` callback receives a `*const zafi.Style`, so a host with its
+own style type measures content through the size callback of
+`zafi.compute_leaf_layout` (from its `compute_leaf_layout` hook) instead.
+
 ## `calc()`
 
 `calc()` values are opaque host handles: zafi stores the pointer and asks the
