@@ -14,7 +14,11 @@ for the Taffy pin.
 - **Do not confuse with github.com/Addonay/zlay**: that is a *different*
   project (a Zig port of the Clay UI layout library). Never push to it,
   rename it, or put Taffy-port code there.
-- Toolchain: **Zig 0.17.0** (installed via zvm locally). Zig 0.17 spellings:
+- Toolchain: **Zig 0.17.0** (installed via zvm locally; in a cloud session,
+  download the tarball from ziglang.org/download/index.json). Behind the cloud
+  proxy `zig build -Dserde=true` cannot fetch serde.zig: `git clone` it, check
+  out the pinned commit, `rm -rf .git`, then `zig fetch <dir>` (the hash
+  matches build.zig.zon). Zig 0.17 spellings:
   `std.lang.Optimize` values `.debug/.safe/.fast/.small`, `@backingInt` /
   `@fromBackingInt`.
 
@@ -114,7 +118,7 @@ Then: more speed, a Codex review, and release **0.4.0**.
 - Test: "calc() values resolve through the tree's calc resolver in flex, grid
   and block" (`src/tree/tree.zig`).
 
-### Done but not merged: custom style types (branch `feat/style-view`)
+### Done but not merged: custom style types (branch `feat/style-view`, carried on `claude/festive-ptolemy-vdv58m`)
 
 - `src/style/view.zig`: algorithms read every property as `s.get(.field)`.
   - For zafi's `Style`, `Style.get` is an inlined field load: zero cost.
@@ -138,48 +142,50 @@ Then: more speed, a Codex review, and release **0.4.0**.
   body, this test also proves at compile time that no algorithm code reaches a
   style field directly.
 - Status: all gates pass (tests, serde, 6652/6652 fixtures).
-- TODO before PR: README section for custom style types; resolve the perf
-  regression below (it predates this branch, but the branch also carries the
-  in-progress fix attempts).
+- README section: done ("Custom style types").
 
-### In progress: perf regression from #24 (calc)
+### Done: perf regression from #24 (calc) (branch `claude/festive-ptolemy-vdv58m`)
 
-Measured zafi vs zafi (base `e979025` = 0.3.0 vs current), ReleaseFast,
-pinned to one core, min over both run orders:
+The work continued on `claude/festive-ptolemy-vdv58m`, which is
+`feat/style-view` plus the fix; PR that branch (it supersedes
+`feat/style-view`).
 
-| scenario | ratio (new / base) |
-|---|---|
-| relayout_grid_50x50 | **~1.38–1.46×** |
-| mixed_flex_grid_block | ~1.15× |
-| block_nested_50, flex_wrap_500 | ~1.08–1.11× |
-| others | ~1.0–1.07× |
+Result (A/B vs 0.3.0, interleaved, pinned, min over 20-40 rounds):
+`relayout_grid_50x50` 1.43x (#24) -> 1.00x; every other scenario within ~3%
+(`mixed_flex_grid_block`, `flex_row_1000` ~1.03x). Callgrind instruction
+counts are at or below 0.3.0 except flex (~+4%).
 
-Findings so far:
+Root cause (found with `perf annotate` + callgrind cache/branch sim):
 
-- Bisected: the regression is entirely in #24; the style-view change adds
-  nothing measurable.
-- **Not** the TLS resolver binding (disabling `bind` changed nothing).
-- **Not** the `style/grid.zig` calc arms (reverting that file changed nothing).
-- `perf` shows small resolve helpers that used to inline now as out-of-line
-  functions with frame setup and register saves
-  (`grid_item.resolve_dimension_size`, `common.resolve_length_rect`,
-  `grid.alignment.resolve_length_rect_or_zero`), plus growth in
-  `GridItem.known_dimensions` / `minimum_contribution`. About +7% instructions
-  and lower IPC overall. Before #24 the calc arm was a constant (`=> 0`), so
-  LLVM could if-convert the switch; now there is a call in it.
-- Already tried (committed on this branch, not sufficient on its own):
-  making `calc.resolve` `noinline` + `@branchHint(.cold)`; `inline` on the
-  `Dimension`/`LengthPercentage(Auto)` resolve methods,
-  `resolve_length_rect` and grid_item `resolve_dimension_size`; folding the
-  early `if (tag == .calc)` checks into the switch.
-- **Next idea (was about to try):** make `calc.resolve` an `inline` wrapper
-  whose first statement is `@branchHint(.cold)` and which calls a `noinline
-  resolveSlow`, so each call site's calc branch itself is cold and LLVM can
-  shrink-wrap the hot path (no prologue). If that does not work, try keeping
-  the hot switch branch-free (compute the non-calc result with the old
-  constant `.calc => 0` arm, then `if (tag == .calc) { @branchHint(.cold); … }`),
-  or check a per-pass "any calc present" flag before entering slow paths.
-  Also inspect `alignment.resolve_length_rect_or_zero` (not yet `inline`).
+- Zig lowers `?f32` by reference. A resolve `switch` whose arms each return
+  `?f32` is merged as a pointer select between a rodata `null` constant and a
+  stack slot. Once an arm cannot be if-converted (the calc arm's call; even a
+  constant extra arm did it in an experiment), SROA cannot scalarise it, and
+  the optional is written with two narrow stores (f32, flag byte) then read
+  back with one 8-byte load: a **store-forwarding stall** (~15 cycles), in
+  the innermost grid loops. Instruction counts barely move; time does.
+- Also: tiny rect/size wrappers stopped inlining once the arms held a call.
+
+Fixes (see commits on the branch):
+
+- `CompactLength.maybe_resolve_with(basis, comptime with_calc)` and
+  `resolve_or_with`: every case (calc too) merges on scalars and the optional
+  is built once via `some_if` (`var r: ?f32 = v; if (!ok) r = null;`), never
+  from a `null` constant. All ~15 duplicated length/percent/calc switches
+  (block, flexbox, grid, util/resolve, track `definite_value`, `Dimension`/
+  `LengthPercentage(Auto)`) go through it.
+- `CompactLength.any_calc(.{...})`: branch-free "is any of these calc()".
+  `GridItem.has_calc` and flex item construction (`Resolvers(with_calc)`)
+  comptime-specialise on it. Tried for leaves too: the check cost more than it
+  saved on a once-per-node path, reverted.
+- `inline` on the small resolve wrappers in every algorithm.
+- `if (c) x else null` on `?f32` in hot code is a smell; prefer the
+  `some_if` shape. Code shape matters more than instruction count here.
+
+Tooling: `perf` works in cloud VMs only with software events
+(`-e cpu-clock`); there are no HW counters. Callgrind needs a
+`-Dcpu=x86_64_v3` build (valgrind chokes on AVX-512). This VM is very noisy:
+same-binary runs vary 30%; always run an A/A control.
 
 ### Benchmarking notes
 
@@ -195,16 +201,21 @@ Findings so far:
 
 ## Remaining roadmap to 0.4.0
 
-1. Fix the #24 perf regression (above), then PR `feat/style-view` into dev.
-2. README: document custom style types (`calc()` is already documented).
-3. CSS parsing completeness (allocator-taking `from_str`, parity with Taffy's
-   parsers).
-4. More perf: fresh-tree glibc trimming behaviour, `relayout_grid_50x50`
-   (was 1.09× vs Taffy before the regression).
-5. Codex adversarial review (two runs max, in the background):
+1. ~~Fix the #24 perf regression~~ DONE; ~~README for custom style types~~
+   DONE. PR `claude/festive-ptolemy-vdv58m` into dev (needs the owner's go).
+2. CSS parsing completeness: IN PROGRESS. Plan: a differential oracle
+   (`tools/parse_oracle`, Rust, Taffy `parse`+`serde`) prints Taffy's serde
+   JSON (or ERR) for a corpus of `(type, input)`; a Zig checker does the same
+   through zafi's `from_str` + serde and diffs. Known gaps: no `from_str` for
+   `GridPlacement`, `RepetitionCount`, `GridAutoTracks` (zafi's accepts line
+   names; Taffy's does not); the template parsers map OOM to
+   `InvalidGridSyntax` and leak partial allocations on error.
+3. More perf: fresh-tree glibc trimming behaviour, flex (~+4% instructions
+   vs 0.3.0), `relayout_grid_50x50` vs Taffy.
+4. Codex adversarial review (two runs max, in the background):
    `codex exec -m gpt-6.1-sol -c model_reasoning_effort='"medium"' -s read-only -o <file> "<prompt>"`.
    Fix the findings in PRs.
-6. Bump to 0.4.0 and run `tools/release.sh 0.4.0`; push main and the tag; ask
+5. Bump to 0.4.0 and run `tools/release.sh 0.4.0`; push main and the tag; ask
    the owner before `gh release create`.
 
 ## Architecture notes worth knowing
