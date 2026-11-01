@@ -79,6 +79,14 @@ comptime {
     }
 }
 
+/// `isGridField` per `view.Field`, computed once.
+const is_grid_field = blk: {
+    const fields = @typeInfo(view.Field).@"enum".field_names;
+    var flags: [fields.len]bool = undefined;
+    for (fields, 0..) |name, i| flags[i] = isGridField(name);
+    break :blk flags;
+};
+
 pub const StoredStyle = struct {
     core: Core = .{},
     /// Owned by the tree; null when every grid property has its default.
@@ -87,7 +95,7 @@ pub const StoredStyle = struct {
     /// The generic property getter `view.View` uses for host style types.
     pub inline fn get(self: *const StoredStyle, comptime field: view.Field) view.FieldType(field) {
         const name = @tagName(field);
-        if (comptime isGridField(name)) {
+        if (comptime is_grid_field[@intFromEnum(field)]) {
             const g = self.grid orelse return @field(default_grid, name);
             return @field(g, name);
         }
