@@ -3,9 +3,9 @@
 //!
 //! # Storage and identity
 //!
-//! Nodes live in paged, never-relocated storage, so a `*NodeData` obtained from
-//! `raw_node()` stays valid for the tree's lifetime. Identity is *separate* from
-//! address: [`NodeId`] is a generational handle (`tree/node.zig`), so an id
+//! Nodes live in one contiguous slot array, so a `*NodeData` obtained from
+//! `raw_node()` is valid only until the next node is created. Identity is
+//! *separate* from address: [`NodeId`] is a generational handle (`tree/node.zig`), so an id
 //! retained across `remove`/`clear` fails every lookup instead of silently
 //! aliasing a recycled node.
 //!
@@ -1215,7 +1215,7 @@ pub const Tree = struct {
     /// This is the escape hatch the layout algorithms use: it exposes style,
     /// cache, graph and layout fields *without* invalidation, so edits made
     /// through it can leave ancestors serving stale layouts. Application code
-    /// should use `style_ptr`/`style_of` for reading, `set_style`/`edit_style`
+    /// should use `style_of`/`style_get` for reading, `set_style`/`edit_style`
     /// for style changes, and the dedicated mutation methods for the graph.
     pub fn raw_node(self: *Tree, id: NodeId) ?*NodeData {
         return self.get_node_mut(id);

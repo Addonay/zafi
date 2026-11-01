@@ -81,7 +81,8 @@ pub fn place_grid_items(
     // Resolve every child's placement and style pointer once. The three
     // placement passes below are pure with respect to occupancy, and the
     // literal port re-resolved (a map lookup plus a ~700-byte style copy) per
-    // child per pass. Node pointers are stable in the paged node store.
+    // child per pass. Style pointers are stable for the pass: layout never
+    // creates nodes.
     const child_count = in_flow_children.len;
     // Every child produces exactly one grid item; reserving once avoids the
     // ArrayList doubling copies of the 424-byte GridItem struct.
