@@ -105,7 +105,6 @@ test {
     _ = @import("util/root.zig");
     _ = @import("test.zig");
     _ = @import("scroll_tests.zig");
-    _ = @import("fuzz_test.zig");
     // Taffy-compatible serde tests are compiled only when the optional
     // dependency is enabled (`zig build test -Dserde=true`).
     if (@import("serde_support.zig").enabled) _ = @import("serde_tests.zig");

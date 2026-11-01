@@ -9,8 +9,12 @@
 const std = @import("std");
 const zafi = @import("root.zig");
 const grid = zafi.style.grid;
+/// When false, `rlen` never produces NaN or infinite lengths (consistency
+/// checks: NaN layouts have no meaningful "same result").
+pub var hostile = true;
+
 fn rlen(r: std.Random) zafi.Dimension {
-    return switch (r.uintLessThan(u8, 9)) {
+    return switch (r.uintLessThan(u8, if (hostile) 9 else 6)) {
         0 => .auto,
         1 => .length(r.float(f32) * 200 - 20),
         2 => .percent(r.float(f32) * 1.5),
@@ -33,8 +37,9 @@ fn rlpa(r: std.Random) zafi.LengthPercentageAuto {
 fn rlp(r: std.Random) zafi.LengthPercentage {
     return if (r.boolean()) .length(r.float(f32) * 20) else .percent(r.float(f32) * 0.5);
 }
+pub var no_floats = false;
 var tracks_buf: [6]zafi.GridTemplateComponent = undefined;
-fn rstyle(r: std.Random) zafi.Style {
+pub fn rstyle(r: std.Random) zafi.Style {
     const displays = [_]zafi.Display{ .flex, .grid, .block, .none, .flow_root };
     var s: zafi.Style = .{};
     s.display = displays[r.uintLessThan(usize, displays.len)];
@@ -47,47 +52,81 @@ fn rstyle(r: std.Random) zafi.Style {
     s.inset = .{ .left = rlpa(r), .right = rlpa(r), .top = rlpa(r), .bottom = rlpa(r) };
     s.gap = .{ .width = rlp(r), .height = rlp(r) };
     s.flex_wrap = if (r.boolean()) .wrap else .no_wrap;
-    s.flex_direction = @enumFromInt(r.uintLessThan(u8, 4));
+    s.flex_direction = @fromBackingInt(@intCast(r.uintLessThan(u8, 4)));
     s.flex_grow = r.float(f32) * 3;
     s.flex_shrink = r.float(f32) * 3;
     s.flex_basis = rlen(r);
     s.aspect_ratio = if (r.uintLessThan(u8, 5) == 0) r.float(f32) * 3 else null;
-    s.overflow = .{ .x = @enumFromInt(r.uintLessThan(u8, 4)), .y = @enumFromInt(r.uintLessThan(u8, 4)) };
-    s.float = @enumFromInt(r.uintLessThan(u8, 3));
+    s.overflow = .{ .x = @fromBackingInt(@intCast(r.uintLessThan(u8, 4))), .y = @fromBackingInt(@intCast(r.uintLessThan(u8, 4))) };
+    s.float = if (no_floats) .none else @fromBackingInt(@intCast(r.uintLessThan(u8, 3)));
     s.box_sizing = if (r.boolean()) .border_box else .content_box;
     if (r.boolean()) {
         s.grid_template_columns = tracks_buf[0..r.uintLessThan(usize, 6)];
-        s.grid_auto_flow = @enumFromInt(r.uintLessThan(u8, 4));
+        s.grid_auto_flow = @fromBackingInt(@intCast(r.uintLessThan(u8, 4)));
     }
     s.grid_row = .{ .start = if (r.boolean()) .auto else .{ .line = @as(i16, @intCast(r.uintLessThan(u8, 9))) - 4 }, .end = if (r.boolean()) .{ .span = r.uintLessThan(u16, 70) } else .auto };
     s.grid_column = .{ .start = .auto, .end = if (r.boolean()) .{ .span = r.uintLessThan(u16, 5) } else .{ .line = -1 } };
     return s;
 }
-test "layout fuzz" {
-    inline for (.{ 1, 42 }) |seed| {
+/// Equal up to float noise (relative 1e-4), NaN equal to NaN.
+fn same(a: f32, b: f32) bool {
+    if (std.math.isNan(a) or std.math.isNan(b)) return std.math.isNan(a) and std.math.isNan(b);
+    if (a == b) return true;
+    return @abs(a - b) <= 1e-4 * @max(1, @max(@abs(a), @abs(b)));
+}
+
+pub fn init_tracks() void {
     tracks_buf = .{ .{ .single = .auto }, .{ .single = .from_fr(1) }, .{ .single = .from_length(20) }, .{ .single = .min_content }, .{ .single = .from_percent(0.3) }, .{ .single = .max_content } };
-    var prng = std.Random.DefaultPrng.init(seed);
-    const r = prng.random();
-    for (0..300) |_| {
-        var tree = zafi.Tree.init(std.testing.allocator);
-        defer tree.deinit();
-        var ids: [40]zafi.NodeId = undefined;
-        const n = 1 + r.uintLessThan(usize, ids.len);
-        for (0..n) |i| ids[i] = try tree.new_leaf(rstyle(r));
-        var i: usize = n;
-        while (i > 1) {
-            i -= 1;
-            const parent = ids[r.uintLessThan(usize, i)];
-            try tree.add_child(parent, ids[i]);
+}
+
+test "layout fuzz" {
+    no_floats = false;
+    defer hostile = true;
+    inline for (.{ true, false }) |hostile_mode| {
+        hostile = hostile_mode;
+        inline for (.{ 1, 42 }) |seed| {
+            tracks_buf = .{ .{ .single = .auto }, .{ .single = .from_fr(1) }, .{ .single = .from_length(20) }, .{ .single = .min_content }, .{ .single = .from_percent(0.3) }, .{ .single = .max_content } };
+            var prng = std.Random.DefaultPrng.init(seed);
+            const r = prng.random();
+            for (0..300) |_| {
+                var tree = zafi.Tree.init(std.testing.allocator);
+                defer tree.deinit();
+                var ids: [40]zafi.NodeId = undefined;
+                const n = 1 + r.uintLessThan(usize, ids.len);
+                for (0..n) |i| ids[i] = try tree.new_leaf(rstyle(r));
+                var i: usize = n;
+                while (i > 1) {
+                    i -= 1;
+                    const parent = ids[r.uintLessThan(usize, i)];
+                    try tree.add_child(parent, ids[i]);
+                }
+                const spaces = [_]zafi.AvailableSpace{ .max_content, .min_content, .{ .definite = 300 }, .{ .definite = 0 } };
+                try tree.compute_layout(ids[0], .{ .width = spaces[r.uintLessThan(usize, 4)], .height = spaces[r.uintLessThan(usize, 4)] });
+                try tree.set_style(ids[r.uintLessThan(usize, n)], rstyle(r));
+                try tree.compute_layout(ids[0], .{ .width = .{ .definite = 500 }, .height = .max_content });
+                // Incremental relayout must match a from-scratch layout (finite styles;
+                // NaN layouts have no meaningful "same result").
+                if (!hostile_mode) {
+                    var incremental: [40]zafi.Layout = undefined;
+                    for (0..n) |k| incremental[k] = try tree.unrounded_layout(ids[k]);
+                    tree.mark_all_dirty();
+                    try tree.compute_layout(ids[0], .{ .width = .{ .definite = 500 }, .height = .max_content });
+                    for (0..n) |k| {
+                        const full = try tree.unrounded_layout(ids[k]);
+                        const inc = incremental[k];
+                        if (!same(full.size.width, inc.size.width) or !same(full.size.height, inc.size.height) or
+                            !same(full.location.x, inc.location.x) or !same(full.location.y, inc.location.y))
+                        {
+                            std.debug.print("relayout mismatch seed={d} node {d}: incremental {any} {any} full {any} {any}\n", .{ seed, k, inc.size, inc.location, full.size, full.location });
+                            return error.RelayoutMismatch;
+                        }
+                    }
+                }
+                if (n > 2) _ = try tree.remove(ids[n - 1]);
+                try tree.compute_layout(ids[0], .{ .width = .{ .definite = 200 }, .height = .{ .definite = 200 } });
+            }
         }
-        const spaces = [_]zafi.AvailableSpace{ .max_content, .min_content, .{ .definite = 300 }, .{ .definite = 0 } };
-        try tree.compute_layout(ids[0], .{ .width = spaces[r.uintLessThan(usize, 4)], .height = spaces[r.uintLessThan(usize, 4)] });
-        try tree.set_style(ids[r.uintLessThan(usize, n)], rstyle(r));
-        try tree.compute_layout(ids[0], .{ .width = .{ .definite = 500 }, .height = .max_content });
-        if (n > 2) _ = try tree.remove(ids[n - 1]);
-        try tree.compute_layout(ids[0], .{ .width = .{ .definite = 200 }, .height = .{ .definite = 200 } });
     }
-  }
 }
 
 test "parser fuzz" {

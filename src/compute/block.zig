@@ -1127,15 +1127,34 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                 item_non_auto_margin,
                 // The margins of a float never collapse
                 .{ .start = false, .end = false });
-            var item_layout = try TreeApi.perform_child_layout(tree_ref, 
-                item.node_id,
-                geometry.Size(?f32){ .width = item_known_width, .height = item_known_height },
-                parent_size,
-                geometry.Size(@import("../style/available_space.zig").AvailableSpace){ .width = item_available_width, .height = .max_content },
-                .inherent_size,
-                // A float establishes a new block formatting context: its margins do not
-                // collapse with the margins of its children
-                .{ .start = false, .end = false });
+            const float_known = geometry.Size(?f32){ .width = item_known_width, .height = item_known_height };
+            const float_available = geometry.Size(@import("../style/available_space.zig").AvailableSpace){ .width = item_available_width, .height = .max_content };
+            // A measure pass only needs the float's size: performing its layout
+            // here (as Taffy does) rewrote the float subtree's final layouts with
+            // measure-pass inputs, and a later perform pass served from the
+            // cache never restored them (a second `compute_layout` with no
+            // changes could change the layout).
+            var item_layout = if (run_mode == .compute_size)
+                try TreeApi.compute_child_layout(tree_ref, item.node_id, .{
+                    .run_mode = .compute_size,
+                    .sizing_mode = .inherent_size,
+                    .axis = .both,
+                    .known_dimensions = float_known,
+                    .known_dimensions_are_definite = .{ .width = true, .height = true },
+                    .parent_size = parent_size,
+                    .available_space = float_available,
+                    .vertical_margins_are_collapsible = .{ .start = false, .end = false },
+                })
+            else
+                try TreeApi.perform_child_layout(tree_ref,
+                    item.node_id,
+                    float_known,
+                    parent_size,
+                    float_available,
+                    .inherent_size,
+                    // A float establishes a new block formatting context: its margins do not
+                    // collapse with the margins of its children
+                    .{ .start = false, .end = false });
             item.oof_candidates = item_layout.oof_candidates;
             item_layout.oof_candidates = .empty;
             const margin_box = item_layout.size.add(item_non_auto_margin.sum_axes());

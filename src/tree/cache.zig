@@ -128,6 +128,10 @@ const PackedKey = struct {
     inline fn from(key: CacheKey) PackedKey {
         return .{ .kd_available_space = key.kd_available_space, .parent_size = key.parent_size };
     }
+    /// The parent size (both axes) without the requested-axis bits.
+    inline fn parent_size_value(self: PackedKey) u64 {
+        return self.parent_size & ~(@as(u64, 1) << 63 | @as(u64, 1) << 31);
+    }
     inline fn x_axis_parent_size(self: PackedKey) u64 {
         return self.parent_size & ((@as(u64, 0xffff_ffff) << 32) & ~(@as(u64, 1) << 63 | @as(u64, 1) << 31));
     }
@@ -258,7 +262,7 @@ pub const Cache = struct {
                 const cached = self.measure_keys[index];
                 if (cached.kd_available_space == key.kd_available_space and
                     self.definiteAt(index) == definite and
-                    cached.x_axis_parent_size() == key.x_axis_parent_size() and
+                    cached.parent_size_value() == key.parent_size_value() and
                     cached.size_is_valid_for(key))
                 {
                     self.recently_used_entries |= @as(u16, 1) << @intCast(index);

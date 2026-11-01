@@ -1302,3 +1302,13 @@ test "grid sizing functions parse CSS spellings and preserve tags" {
     }
     try testing.expectError(error.InvalidGridValue, MinTrackSizingFunction.from_str("1fr"));
 }
+
+
+test "review: deeply nested brackets overflow the stack" {
+    const a = std.testing.allocator;
+    const n = 500_000;
+    const input = try a.alloc(u8, n);
+    defer a.free(input);
+    @memset(input, '[');
+    try std.testing.expectError(error.InvalidGridSyntax, GridTemplateComponents.from_str(a, input));
+}

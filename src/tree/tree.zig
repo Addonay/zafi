@@ -247,9 +247,11 @@ pub const NodeStore = struct {
     fn release(self: *NodeStore, index: u32) !void {
         const slot = self.at(index);
         slot.generation +%= 1;
-        if (slot.generation == 0) return error.NodeIdExhausted;
-        try self.free.append(self.allocator, index);
         self.live_count -= 1;
+        // A slot whose generation wrapped is retired (never reused). If the
+        // free list cannot grow, the slot is simply not recycled.
+        if (slot.generation == 0) return;
+        self.free.append(self.allocator, index) catch {};
     }
 
     /// In-place leaf construction: write the new node directly into its slot
@@ -442,7 +444,8 @@ pub const Tree = struct {
             slot.deinit(self.allocator);
             slot.alive = false;
             slot.generation +%= 1;
-            self.nodes.free.append(self.allocator, index) catch @panic("Taffy tree mutation arena exhausted");
+            // On allocation failure the slot is just not recycled.
+            self.nodes.free.append(self.allocator, index) catch {};
             self.nodes.live_count -= 1;
         }
         self.reset_scratch();
@@ -564,10 +567,10 @@ pub const Tree = struct {
         _ = try self.validateChildList(parent_id, &.{child});
         const parent_node = self.get_node_mut(parent_id) orelse return error.InvalidParentNode;
         const child_node = self.get_node_mut(child) orelse return error.InvalidChildNode;
-        try self.detach_from_parent(child, child_node.parent, parent_id);
-        // Re-adding an existing child moves it to the end rather than creating a
-        // second edge.
+        // Reserve first so a failure leaves the graph untouched. Re-adding an
+        // existing child moves it to the end rather than creating a second edge.
         try parent_node.children.ensureTotalCapacity(self.allocator, parent_node.children.items.len + 1);
+        try self.detach_from_parent(child, child_node.parent, parent_id);
         parent_node.children.appendAssumeCapacity(child);
         child_node.parent = parent_id;
         self.mark_dirty(parent_id);
@@ -588,9 +591,10 @@ pub const Tree = struct {
             }
             if (current_index < target) target -= 1;
         }
-        if (target > parent_node.children.items.len) return error.ChildIndexOutOfBounds;
+        if (index > parent_node.children.items.len) return error.ChildIndexOutOfBounds;
+        try parent_node.children.ensureTotalCapacity(self.allocator, parent_node.children.items.len + 1);
         try self.detach_from_parent(child, child_node.parent, parent_id);
-        try parent_node.children.insert(self.allocator, target, child);
+        parent_node.children.insertAssumeCapacity(target, child);
         child_node.parent = parent_id;
         self.mark_dirty(parent_id);
     }
@@ -633,8 +637,19 @@ pub const Tree = struct {
         if (index >= parent_node.children.items.len) return error.ChildIndexOutOfBounds;
         const child_node = self.get_node_mut(child) orelse return error.InvalidChildNode;
         const old_child = parent_node.children.items[index];
-        try self.detach_from_parent(child, child_node.parent, parent_id);
-        parent_node.children.items[index] = child;
+        // Replacing a child with itself changes nothing.
+        if (old_child == child) return old_child;
+        var target = index;
+        if (child_node.parent == parent_id) {
+            // A sibling moves into the slot: drop its old edge, which shifts the
+            // slot down when it sat before it.
+            const from = std.mem.indexOfScalar(NodeId, parent_node.children.items, child).?;
+            _ = parent_node.children.orderedRemove(from);
+            if (from < target) target -= 1;
+        } else {
+            try self.detach_from_parent(child, child_node.parent, parent_id);
+        }
+        parent_node.children.items[target] = child;
         child_node.parent = parent_id;
         if (self.get_node_mut(old_child)) |old| old.parent = null;
         self.mark_dirty(parent_id);
@@ -849,12 +864,13 @@ pub const Tree = struct {
         var current: ?NodeId = id;
         while (current) |current_id| {
             const node_data = self.get_node_mut(current_id) orelse break;
-            // Stop as soon as an ancestor is already dirty: its cache is empty,
-            // so every ancestor above it was cleared before.
-            switch (node_data.cache.clear()) {
-                .already_empty => break,
-                .cleared => {},
-            }
+            // Walk all the way up (O(depth)). Stopping at the first empty cache
+            // (Taffy) assumes an empty cache implies empty ancestor caches,
+            // which hidden subtrees break: hidden layout clears descendants'
+            // caches while the `display: none` node itself stays cached, so a
+            // node moved into, or restyled within, a hidden subtree kept a
+            // stale layout.
+            _ = node_data.cache.clear();
             current = node_data.parent;
         }
     }
@@ -1229,9 +1245,11 @@ pub const Tree = struct {
         return self.get_node(id);
     }
 
+    /// Remove `child_id`'s edge from `old_parent`, including when the old parent
+    /// is the new one (a move within the same parent re-inserts it).
     fn detach_from_parent(self: *Tree, child_id: NodeId, old_parent: ?NodeId, new_parent: NodeId) !void {
+        _ = new_parent;
         const old_parent_id = old_parent orelse return;
-        if (old_parent_id == new_parent) return;
         const old_parent_node = self.get_node_mut(old_parent_id) orelse return error.InvalidParentNode;
         var index: usize = 0;
         while (index < old_parent_node.children.items.len) : (index += 1) {
@@ -1480,4 +1498,160 @@ test "get_disjoint_node_context_mut" {
     try testing.expectEqual(@as(*anyopaque, &y), both[1]);
     try testing.expect(tree.get_disjoint_node_context_mut(2, .{ a, a }) == null);
     try testing.expect(tree.get_disjoint_node_context_mut(2, .{ a, c }) == null);
+}
+
+// Regression tests from the 0.4.0 review.
+test "review: add_child twice duplicates edge" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const p = try t.new_leaf(.{});
+    const c = try t.new_leaf(.{});
+    try t.add_child(p, c);
+    try t.add_child(p, c);
+    try testing.expectEqual(@as(usize, 1), try t.child_count(p));
+}
+
+test "review: insert_child_at_index same parent duplicates edge" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    const b = try t.new_leaf(.{});
+    const p = try t.new_with_children(.{}, &.{ a, b });
+    try t.insert_child_at_index(p, 0, b);
+    try testing.expectEqual(@as(usize, 2), try t.child_count(p));
+}
+
+test "review: replace_child_at_index with itself orphans it" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    const p = try t.new_with_children(.{}, &.{a});
+    _ = try t.replace_child_at_index(p, 0, a);
+    try testing.expectEqual(p, (try t.parent(a)).?);
+}
+
+test "review: replace_child_at_index with sibling duplicates" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    const b = try t.new_leaf(.{});
+    const p = try t.new_with_children(.{}, &.{ a, b });
+    _ = try t.replace_child_at_index(p, 0, b);
+    try testing.expectEqual(@as(usize, 1), try t.child_count(p));
+}
+
+test "review: clear then deinit" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    _ = try t.new_with_children(.{}, &.{a});
+    t.clear();
+}
+
+test "review: clear then trim" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const a = try t.new_leaf(.{});
+    _ = try t.new_with_children(.{}, &.{a});
+    t.clear();
+    t.trim();
+}
+
+test "review: remove leaks cached oof candidates on slot reuse" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const abs = try t.new_leaf(.{  .size = .{ .width = .length(10), .height = .length(10) } });
+    const mid = try t.new_with_children(.{ .display = .flex }, &.{abs});
+    const root = try t.new_with_children(.{ .display = .flex, .position = .relative }, &.{mid});
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
+    _ = try t.remove(mid);
+    _ = try t.new_leaf(.{});
+}
+test "review: negative percent padding basis trips ScrollableOverflow assert" {
+    const testing = std.testing;
+    const LP = style.dimension.LengthPercentage;
+    const LPA = style.dimension.LengthPercentageAuto;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const leaf_id = try t.new_leaf(.{ .padding = .{ .left = LP.percent(0.5), .right = .zero(), .top = .zero(), .bottom = .zero() } });
+    const flex = try t.new_with_children(.{ .display = .flex, .flex_direction = .column, .margin = .{ .left = LPA.length(30), .right = .zero(), .top = .zero(), .bottom = .zero() }, .padding = .{ .left = LP.length(4), .right = .zero(), .top = .zero(), .bottom = .zero() } }, &.{leaf_id});
+    const root = try t.new_with_children(.{ .display = .block, .size = .{ .width = .length(10), .height = .length(10) } }, &.{flex});
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
+}
+test "review: second compute_layout with no changes alters layout" {
+    const testing = std.testing;
+    const LP = style.dimension.LengthPercentage;
+    const LPA = style.dimension.LengthPercentageAuto;
+    const Dim = style.dimension.Dimension;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const item = try t.new_leaf(.{
+        .display = .block,
+        .size = .{ .width = Dim.percent(0.98), .height = Dim.length(52) },
+        
+    });
+    const flex = try t.new_with_children(.{
+        .display = .flex,
+        .flex_direction = .column,
+        .float = .right,
+        .size = .{ .width = Dim.percent(0.45), .height = Dim.percent(0.23) },
+        
+        .padding = .{ .left = .zero(), .right = LP.length(11), .top = .zero(), .bottom = .zero() },
+    }, &.{item});
+    const abs = try t.new_with_children(.{
+        .display = .block,
+        .position = .absolute,
+        .margin = .{ .left = LPA.length(0), .right = LPA.length(2), .top = LPA.percent(0.29), .bottom = LPA.percent(0.28) },
+        
+        
+    }, &.{flex});
+    const root = try t.new_with_children(.{
+        .display = .block,
+        
+    }, &.{abs});
+    const avail: geometry.Size(@import("../style/available_space.zig").AvailableSpace) = .{ .width = .{ .definite = 300 }, .height = .{ .definite = 300 } };
+    try t.compute_layout(root, avail);
+    const first = try t.layout_of(item);
+    try t.compute_layout(root, avail);
+    const second = try t.layout_of(item);
+    t.mark_all_dirty();
+    try t.compute_layout(root, avail);
+    const third = try t.layout_of(item);
+    try testing.expectEqual(first.size.height, second.size.height);
+    try testing.expectEqual(third.size.height, second.size.height);
+}
+test "review: node moved into a display:none subtree keeps its stale visible layout" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const x = try t.new_leaf(.{ .size = .{ .width = .length(10), .height = .length(10) } });
+    const a = try t.new_leaf(.{ .display = .block });
+    const h = try t.new_with_children(.{ .display = .none }, &.{a});
+    const root = try t.new_with_children(.{ .display = .block }, &.{ h, x });
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
+    try testing.expectEqual(@as(f32, 10), (try t.layout_of(x)).size.width);
+    try t.add_child(a, x); // x is now inside the hidden subtree
+    try t.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 100 } });
+    try testing.expectEqual(@as(f32, 0), (try t.layout_of(x)).size.width);
+}
+test "review: print_tree panics on a non-last child that has children" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const g = try t.new_leaf(.{});
+    const a = try t.new_with_children(.{}, &.{g});
+    const b = try t.new_leaf(.{});
+    const mid = try t.new_with_children(.{}, &.{ a, b });
+    const root = try t.new_with_children(.{}, &.{mid});
+    var buffer: [1024]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try @import("../util/print.zig").write_tree(&writer, &t, root);
+    try testing.expect(std.mem.indexOf(u8, writer.buffered(), "│   ") != null);
 }

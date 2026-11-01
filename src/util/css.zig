@@ -207,17 +207,34 @@ const Tokenizer = struct {
         };
     }
 
+    /// Nesting deeper than this is treated as unclosed to the end of the input
+    /// (cssparser keeps an unbounded stack; real CSS never gets near this).
+    const max_block_depth = 512;
+
     /// Skip to just after the close of a `kind` block whose opener was consumed.
     /// Returns the position of the closing character (the content end).
+    /// Iterative, so hostile nesting cannot overflow the call stack. Inside a
+    /// block only its own closer ends it; other closers are ordinary tokens.
     fn skipBlock(self: *Tokenizer, kind: BlockKind) usize {
+        var stack: [max_block_depth]BlockKind = undefined;
+        stack[0] = kind;
+        var depth: usize = 1;
         while (true) {
             self.skipTrivia();
             const before = self.pos;
             const token = self.next() orelse return self.input.len;
             switch (token) {
-                .close => |k| if (k == kind) return before,
+                .close => |k| if (k == stack[depth - 1]) {
+                    depth -= 1;
+                    if (depth == 0) return before;
+                },
                 else => if (token.opensBlock()) |inner| {
-                    _ = self.skipBlock(inner);
+                    if (depth == max_block_depth) {
+                        self.pos = self.input.len;
+                        return self.input.len;
+                    }
+                    stack[depth] = inner;
+                    depth += 1;
                 },
             }
         }
