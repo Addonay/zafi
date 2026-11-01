@@ -1655,3 +1655,636 @@ test "review: print_tree panics on a non-last child that has children" {
     try @import("../util/print.zig").write_tree(&writer, &t, root);
     try testing.expect(std.mem.indexOf(u8, writer.buffered(), "│   ") != null);
 }
+
+// ---- Upstream Taffy issue regressions (triage batch B) ----
+
+const upstream_avail = struct {
+    const AS = @import("../style/available_space.zig").AvailableSpace;
+    fn definite(w: f32, h: f32) geometry.Size(AS) {
+        return .{ .width = .{ .definite = w }, .height = .{ .definite = h } };
+    }
+    const max_content: geometry.Size(AS) = .{ .width = .max_content, .height = .max_content };
+};
+
+test "taffy#954: a grid scroll container's scrollable overflow includes its (empty) tracks" {
+    const testing = std.testing;
+    const grid = style.grid;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const child = try t.new_leaf(.{ .size = .{ .width = .length(50), .height = .length(50) } });
+    const cols = try grid.GridTemplateComponents.from_str(testing.allocator, "300px");
+    defer cols.deinit(testing.allocator);
+    const rows = try grid.GridTemplateComponents.from_str(testing.allocator, "500px");
+    defer rows.deinit(testing.allocator);
+    const P = style.dimension.LengthPercentage.length(10);
+    var s: style.Style = .{
+        .display = .grid,
+        .size = .{ .width = .length(100), .height = .length(100) },
+        .padding = .{ .left = P, .right = P, .top = P, .bottom = P },
+        .grid_template_rows = rows.tracks,
+        .grid_template_columns = cols.tracks,
+        .overflow = .{ .x = .scroll, .y = .scroll },
+    };
+    const g = try t.new_with_children(s, &.{child});
+    // padding 10 + track + padding 10, minus the 100px client box
+    try t.compute_layout(g, upstream_avail.max_content);
+    try testing.expectEqual(@as(f32, 220), (try t.layout_of(g)).scroll_width());
+    try testing.expectEqual(@as(f32, 420), (try t.layout_of(g)).scroll_height());
+    s.direction = .rtl;
+    try t.set_style(g, s);
+    try t.compute_layout(g, upstream_avail.max_content);
+    try testing.expectEqual(@as(f32, 220), (try t.layout_of(g)).scroll_width());
+    try testing.expectEqual(@as(f32, 420), (try t.layout_of(g)).scroll_height());
+}
+
+test "taffy#884: a max-width-clamped grid under a max-content constraint sizes its columns to the clamped width" {
+    const testing = std.testing;
+    const T = @import("../test.zig");
+    // ten 4-character words: max-content 400px, wraps to two lines at 200px
+    const text = "HHHH\xE2\x80\x8BHHHH\xE2\x80\x8BHHHH\xE2\x80\x8BHHHH\xE2\x80\x8BHHHH\xE2\x80\x8BHHHH\xE2\x80\x8BHHHH\xE2\x80\x8BHHHH\xE2\x80\x8BHHHH\xE2\x80\x8BHHHH";
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    var c1 = T.TestNodeContext.ahem_text(text, .horizontal);
+    var c2 = T.TestNodeContext.ahem_text(text, .horizontal);
+    const a = try t.new_leaf_with_context(.{}, &c1);
+    const b = try t.new_leaf_with_context(.{}, &c2);
+    const rows = try style.grid.GridTemplateComponents.from_str(testing.allocator, "1fr");
+    defer rows.deinit(testing.allocator);
+    const root = try t.new_with_children(.{ .display = .grid, .grid_template_rows = rows.tracks, .max_size = .{ .width = .length(200), .height = .auto() } }, &.{ a, b });
+    try t.compute_layout_with_measure(root, upstream_avail.max_content, T.fixture_measure_function);
+    try testing.expectEqual(@as(f32, 200), (try t.layout_of(root)).size.width);
+    try testing.expectEqual(@as(f32, 40), (try t.layout_of(root)).size.height);
+    try testing.expectEqual(@as(f32, 200), (try t.layout_of(a)).size.width);
+    try testing.expectEqual(@as(f32, 20), (try t.layout_of(a)).size.height);
+    try testing.expectEqual(@as(f32, 20), (try t.layout_of(b)).location.y);
+}
+
+test "taffy#847: an in-flow flex root's children resolve inline percentages against its min-width-clamped width" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    const child = try t.new_leaf(.{ .size = .{ .width = .length(500), .height = .length(500) } });
+    const container = try t.new_with_children(.{ .min_size = .{ .width = .percent(1), .height = .percent(1) } }, &.{child});
+    const root = try t.new_with_children(.{ .min_size = .{ .width = .percent(1), .height = .percent(1) } }, &.{container});
+    try t.compute_layout(root, upstream_avail.definite(1000, 1000));
+    try testing.expectEqual(@as(f32, 1000), (try t.layout_of(root)).size.width);
+    try testing.expectEqual(@as(f32, 1000), (try t.layout_of(container)).size.width);
+    try testing.expectEqual(@as(f32, 1000), (try t.layout_of(container)).size.height);
+}
+
+test "taffy#804: a flex item's auto cross size follows its aspect ratio from the flexed main size" {
+    const testing = std.testing;
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    var kids: [8]NodeId = undefined;
+    for (&kids) |*k| k.* = try t.new_leaf(.{
+        .min_size = .{ .width = .length(64), .height = .length(64) },
+        .max_size = .{ .width = .length(128), .height = .length(128) },
+        .flex_grow = 1,
+        .flex_shrink = 0,
+        .aspect_ratio = 1,
+    });
+    const c = try t.new_with_children(.{
+        .display = .flex,
+        .justify_content = style.alignment.JustifyContent.center,
+        .align_items = style.alignment.AlignItems.center,
+        .gap = .{ .width = .length(8), .height = .length(8) },
+        .size = .{ .width = .length(2048), .height = .length(512) },
+    }, &kids);
+    try t.compute_layout(c, upstream_avail.max_content);
+    for (kids) |k| {
+        const l = try t.layout_of(k);
+        try testing.expectEqual(@as(f32, 128), l.size.width);
+        try testing.expectEqual(@as(f32, 128), l.size.height);
+        try testing.expectEqual(@as(f32, 192), l.location.y);
+    }
+    // Without a min size the transferred height was 0.
+    try t.set_style(kids[0], .{ .max_size = .{ .width = .length(128), .height = .auto() }, .flex_grow = 1, .aspect_ratio = 2 });
+    try t.compute_layout(c, upstream_avail.max_content);
+    try testing.expectEqual(@as(f32, 64), (try t.layout_of(kids[0])).size.height);
+}
+
+test "taffy#950/#923/#830/#803/#733: already handled" {
+    const testing = std.testing;
+    const T = @import("../test.zig");
+    const LPA = style.dimension.LengthPercentageAuto;
+    const LP = style.dimension.LengthPercentage;
+    { // #950: a percentage height under a flexed item with an indefinite basis behaves as auto
+        var t = Tree.init(testing.allocator);
+        defer t.deinit();
+        const inner = try t.new_leaf(.{ .display = .block, .size = .{ .width = .auto, .height = .percent(1) } });
+        const mid = try t.new_with_children(.{ .display = .block, .flex_grow = 1 }, &.{inner});
+        const outer = try t.new_with_children(.{ .display = .flex, .flex_direction = .column, .size = .{ .width = .length(200), .height = .auto }, .min_size = .{ .width = .auto(), .height = .length(200) } }, &.{mid});
+        try t.compute_layout(outer, upstream_avail.definite(800, 600));
+        try testing.expectEqual(@as(f32, 200), (try t.layout_of(mid)).size.height);
+        try testing.expectEqual(@as(f32, 0), (try t.layout_of(inner)).size.height);
+    }
+    { // #923: nested absolutely positioned boxes centred with auto margins
+        var t = Tree.init(testing.allocator);
+        defer t.deinit();
+        const A = LPA.auto();
+        const inner = try t.new_leaf(.{ .display = .block, .box_sizing = .content_box, .position = .absolute, .inset = .{ .left = .length(0), .right = .length(0), .top = .length(0), .bottom = .length(0) }, .size = .{ .width = .length(40), .height = .length(30) }, .margin = .{ .left = A, .right = A, .top = A, .bottom = A }, .border = .{ .left = LP.length(2), .right = LP.length(2), .top = LP.length(2), .bottom = LP.length(2) } });
+        const outer = try t.new_with_children(.{ .display = .block, .box_sizing = .content_box, .position = .absolute, .inset = .{ .left = .length(0), .right = .length(0), .top = .length(20), .bottom = A }, .size = .{ .width = .length(120), .height = .length(80) }, .margin = .{ .left = A, .right = A, .top = .zero(), .bottom = .zero() }, .border = .{ .left = LP.length(3), .right = LP.length(3), .top = LP.length(3), .bottom = LP.length(3) }, .padding = .{ .left = LP.length(10), .right = LP.length(10), .top = LP.length(10), .bottom = LP.length(10) } }, &.{inner});
+        const root = try t.new_with_children(.{ .display = .block, .box_sizing = .content_box, .position = .relative, .size = .{ .width = .length(300), .height = .length(200) }, .border = .{ .left = LP.length(5), .right = LP.length(5), .top = LP.length(5), .bottom = LP.length(5) }, .padding = .{ .left = LP.length(15), .right = LP.length(15), .top = LP.length(15), .bottom = LP.length(15) } }, &.{outer});
+        try t.compute_layout(root, upstream_avail.definite(800, 600));
+        try testing.expectEqual(@as(f32, 97), (try t.layout_of(outer)).location.x);
+        try testing.expectEqual(@as(f32, 25), (try t.layout_of(outer)).location.y);
+        try testing.expectEqual(@as(f32, 51), (try t.layout_of(inner)).location.x);
+        try testing.expectEqual(@as(f32, 36), (try t.layout_of(inner)).location.y);
+    }
+    { // #830: a flex container shrinks after all its children are removed
+        var t = Tree.init(testing.allocator);
+        defer t.deinit();
+        const k1 = try t.new_leaf(.{ .size = .{ .width = .length(50), .height = .length(40) } });
+        const k2 = try t.new_leaf(.{ .size = .{ .width = .length(50), .height = .length(40) } });
+        const col = try t.new_with_children(.{ .display = .flex, .flex_direction = .column, .size = .{ .width = .percent(1), .height = .auto } }, &.{ k1, k2 });
+        const root = try t.new_with_children(.{ .display = .block }, &.{col});
+        try t.compute_layout(root, upstream_avail.definite(300, 300));
+        try testing.expectEqual(@as(f32, 80), (try t.layout_of(col)).size.height);
+        _ = try t.remove_child(col, k1);
+        _ = try t.remove_child(col, k2);
+        try t.compute_layout(root, upstream_avail.definite(300, 300));
+        try testing.expectEqual(@as(f32, 0), (try t.layout_of(col)).size.height);
+    }
+    { // #803: rounding keeps an end-justified child inside its parent's border
+        var t = Tree.init(testing.allocator);
+        defer t.deinit();
+        const leaf = try t.new_leaf(.{ .size = .{ .width = .length(1), .height = .length(1) } });
+        const B = LP.length(1);
+        const flex = try t.new_with_children(.{ .justify_content = style.alignment.JustifyContent.end, .border = .{ .left = B, .right = B, .top = B, .bottom = B }, .grid_row = .{ .start = .{ .line = 1 }, .end = .{ .span = 4 } }, .grid_column = .{ .start = .{ .line = 2 }, .end = .{ .span = 1 } } }, &.{leaf});
+        const tracks = try style.grid.GridTemplateComponents.from_str(testing.allocator, "repeat(12, 1fr)");
+        defer tracks.deinit(testing.allocator);
+        const g = try t.new_with_children(.{ .display = .grid, .size = .{ .width = .percent(1), .height = .percent(1) }, .grid_template_rows = tracks.tracks, .grid_template_columns = tracks.tracks }, &.{flex});
+        try t.compute_layout(g, upstream_avail.definite(127, 29));
+        const fl = try t.layout_of(flex);
+        try testing.expectEqual(fl.size.width - 2, (try t.layout_of(leaf)).location.x);
+    }
+    { // #733: an image in nested flex containers keeps its natural size
+        var t = Tree.init(testing.allocator);
+        defer t.deinit();
+        var ctx = T.TestNodeContext.aspect_ratio(440, 291.0 / 440.0);
+        const img = try t.new_leaf_with_context(.{ .display = .flex }, &ctx);
+        const div = try t.new_with_children(.{ .display = .flex }, &.{img});
+        const body = try t.new_with_children(.{ .display = .flex }, &.{div});
+        const html = try t.new_with_children(.{ .display = .block }, &.{body});
+        try t.compute_layout_with_measure(html, upstream_avail.definite(1280, 720), T.fixture_measure_function);
+        try testing.expectEqual(@as(f32, 1280), (try t.layout_of(body)).size.width);
+        try testing.expectEqual(@as(f32, 291), (try t.layout_of(body)).size.height);
+        try testing.expectEqual(@as(f32, 440), (try t.layout_of(img)).size.width);
+        try testing.expectEqual(@as(f32, 291), (try t.layout_of(img)).size.height);
+    }
+}
+
+fn upstreamNanTree(comptime field: []const u8, value: anytype, disp: style.Display, avail: geometry.Size(@import("../style/available_space.zig").AvailableSpace)) !void {
+    const T = @import("../test.zig");
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    var s: style.Style = .{ .display = disp, .flex_wrap = .wrap };
+    @field(s, field) = value;
+    var ctx = T.TestNodeContext.fixed(.{ .width = 30, .height = 12 });
+    var actx = T.TestNodeContext.aspect_ratio(40, 0.5);
+    const a = try t.new_leaf_with_context(s, &ctx);
+    const b = try t.new_leaf_with_context(s, &actx);
+    var bs = s;
+    bs.display = .block;
+    const c = try t.new_with_children(bs, &.{ a, b });
+    var abs = s;
+    abs.position = .absolute;
+    const d = try t.new_leaf(abs);
+    var fs = s;
+    fs.display = .flex;
+    const e = try t.new_with_children(fs, &.{try t.new_leaf(s)});
+    var gs = s;
+    gs.display = .grid;
+    const f = try t.new_with_children(gs, &.{try t.new_leaf(s)});
+    var fl = s;
+    fl.display = .block;
+    fl.float = .left;
+    const h = try t.new_leaf(fl);
+    const root = try t.new_with_children(s, &.{ c, d, e, f, h });
+    try t.compute_layout_with_measure(root, avail, T.fixture_measure_function);
+    t.mark_all_dirty();
+    try t.compute_layout_with_measure(root, avail, T.fixture_measure_function);
+}
+
+test "taffy#231: NaN and infinite style values and available space never crash" {
+    const LP = style.dimension.LengthPercentage;
+    const LPA = style.dimension.LengthPercentageAuto;
+    const Dim = style.dimension.Dimension;
+    const nan = std.math.nan(f32);
+    const inf = std.math.inf(f32);
+    const AS = @import("../style/available_space.zig").AvailableSpace;
+    const avails = [_]geometry.Size(AS){ upstream_avail.max_content, upstream_avail.definite(300, 300), .{ .width = .min_content, .height = .min_content }, upstream_avail.definite(nan, nan), upstream_avail.definite(inf, inf) };
+    for ([_]style.Display{ .flex, .grid, .block }) |disp| for (avails) |av| for ([_]f32{ nan, inf, -inf }) |v| {
+        const Rp = geometry.Rect(LP){ .left = LP.length(v), .right = LP.length(v), .top = LP.length(v), .bottom = LP.length(v) };
+        const Ra = geometry.Rect(LPA){ .left = LPA.length(v), .right = LPA.length(v), .top = LPA.length(v), .bottom = LPA.length(v) };
+        try upstreamNanTree("size", geometry.Size(Dim){ .width = .length(v), .height = .length(v) }, disp, av);
+        try upstreamNanTree("size", geometry.Size(Dim){ .width = .percent(v), .height = .percent(v) }, disp, av);
+        try upstreamNanTree("min_size", geometry.Size(LPA){ .width = .length(v), .height = .length(v) }, disp, av);
+        try upstreamNanTree("max_size", geometry.Size(LPA){ .width = .length(v), .height = .length(v) }, disp, av);
+        try upstreamNanTree("margin", Ra, disp, av);
+        try upstreamNanTree("inset", Ra, disp, av);
+        try upstreamNanTree("padding", Rp, disp, av);
+        try upstreamNanTree("border", Rp, disp, av);
+        try upstreamNanTree("gap", geometry.Size(LP){ .width = .length(v), .height = .length(v) }, disp, av);
+        try upstreamNanTree("flex_grow", v, disp, av);
+        try upstreamNanTree("flex_shrink", v, disp, av);
+        try upstreamNanTree("flex_basis", Dim.length(v), disp, av);
+        try upstreamNanTree("aspect_ratio", @as(?f32, v), disp, av);
+        try upstreamNanTree("scrollbar_width", v, disp, av);
+        const tr = [_]style.grid.TrackSizingFunction{style.grid.TrackSizingFunction.from_length(v)};
+        try upstreamNanTree("grid_auto_rows", @as([]const style.grid.TrackSizingFunction, &tr), disp, av);
+        try upstreamNanTree("grid_auto_columns", @as([]const style.grid.TrackSizingFunction, &tr), disp, av);
+    };
+}
+
+
+// ---------------------------------------------------------------- triage ----
+const TLP = style.dimension.LengthPercentage;
+const TLPA = style.dimension.LengthPercentageAuto;
+const TDim = style.dimension.Dimension;
+const t_max: geometry.Size(@import("../style/available_space.zig").AvailableSpace) = .{ .width = .max_content, .height = .max_content };
+
+test "triage 1354a: swapping relative/absolute does not overflow the stack" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    const abs = try t.new_leaf(.{ .position = .absolute });
+    const rel = try t.new_with_children(.{ .position = .relative }, &.{abs});
+    const root = try t.new_with_children(.{}, &.{rel});
+    try t.compute_layout(root, t_max);
+    _ = try t.remove_child(rel, abs);
+    _ = try t.remove_child(root, rel);
+    try t.add_child(root, abs);
+    try t.add_child(abs, rel);
+    try t.compute_layout(root, t_max);
+    try std.testing.expectEqual(@as(usize, 0), (try t.hoisted_children(rel)).len);
+}
+
+fn t1354Build(t: *Tree, box_in_first: bool) ![4]NodeId {
+    const rel = struct {
+        fn f(top: f32) style.Style {
+            return .{ .position = .relative, .margin = .{ .left = TLPA.zero(), .right = TLPA.zero(), .top = TLPA.length(top), .bottom = TLPA.zero() } };
+        }
+    }.f;
+    const boxed = try t.new_leaf(.{ .position = .absolute, .size = .{ .width = .auto, .height = TDim.length(1.5) } });
+    const first = try t.new_with_children(rel(0.25), if (box_in_first) &.{boxed} else &.{});
+    const second = try t.new_with_children(rel(0.5), if (box_in_first) &.{} else &.{boxed});
+    const root = try t.new_with_children(.{ .display = .block }, &.{ first, second });
+    try t.compute_layout(root, t_max);
+    return .{ root, first, second, boxed };
+}
+
+test "triage 1354b: moved abspos box is rounded from its new containing block" {
+    var edited = Tree.init(std.testing.allocator);
+    defer edited.deinit();
+    const ids = try t1354Build(&edited, false);
+    _ = try edited.remove_child(ids[2], ids[3]);
+    try edited.add_child(ids[1], ids[3]);
+    try edited.compute_layout(ids[0], t_max);
+    var fresh = Tree.init(std.testing.allocator);
+    defer fresh.deinit();
+    const fids = try t1354Build(&fresh, true);
+    try std.testing.expectEqual((try fresh.unrounded_layout(fids[3])).location, (try edited.unrounded_layout(ids[3])).location);
+    try std.testing.expectEqual(@as(f32, 2), (try fresh.layout_of(fids[3])).size.height);
+    try std.testing.expectEqual(@as(f32, 2), (try edited.layout_of(ids[3])).size.height);
+}
+
+test "triage 1354c: becoming display:none drops stale abspos rounding" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    const ids = try t1354Build(&t, false);
+    var s = try t.style_of(ids[2]);
+    s.display = .none;
+    try t.set_style(ids[2], s);
+    try t.compute_layout(ids[0], t_max);
+    try std.testing.expectEqual(@as(usize, 0), (try t.hoisted_children(ids[2])).len);
+    try std.testing.expectEqual(@as(f32, 0), (try t.layout_of(ids[3])).size.height);
+}
+
+test "triage 1357: abspos box inside a display:none subtree gets a zeroed final layout" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    const abs = try t.new_leaf(.{ .position = .absolute, .size = .{ .width = TDim.length(10), .height = TDim.length(10) } });
+    const inner_abs = try t.new_leaf(.{ .position = .absolute, .size = .{ .width = TDim.length(5), .height = TDim.length(5) } });
+    const rel = try t.new_with_children(.{ .position = .relative, .size = .{ .width = TDim.length(50), .height = TDim.length(50) } }, &.{abs});
+    const static_wrap = try t.new_with_children(.{ .size = .{ .width = TDim.length(20), .height = TDim.length(20) } }, &.{inner_abs});
+    const hider = try t.new_with_children(.{ .display = .block }, &.{ rel, static_wrap });
+    const root = try t.new_with_children(.{ .position = .relative, .display = .block }, &.{hider});
+    try t.compute_layout(root, t_max);
+    try std.testing.expectEqual(@as(f32, 10), (try t.layout_of(abs)).size.width);
+    try std.testing.expectEqual(@as(f32, 5), (try t.layout_of(inner_abs)).size.width);
+    var s = try t.style_of(hider);
+    s.display = .none;
+    try t.set_style(hider, s);
+    try t.compute_layout(root, t_max);
+    try std.testing.expectEqual(@as(f32, 0), (try t.layout_of(abs)).size.width);
+    try std.testing.expectEqual(@as(f32, 0), (try t.layout_of(inner_abs)).size.width);
+    try std.testing.expectEqual(@as(usize, 0), (try t.hoisted_children(root)).len);
+}
+
+test "triage 1100: add_child to a second parent detaches from the first" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    const n1 = try t.new_leaf(.{});
+    const n2 = try t.new_leaf(.{});
+    const n3 = try t.new_leaf(.{});
+    try t.add_child(n1, n2);
+    try t.add_child(n3, n2);
+    try std.testing.expectEqual(@as(usize, 0), try t.child_count(n1));
+    try std.testing.expectEqual(n3, (try t.parent(n2)).?);
+    _ = try t.remove(n1);
+    _ = try t.remove(n2);
+    _ = try t.remove(n3);
+    const m1 = try t.new_leaf(.{});
+    const m2 = try t.new_leaf(.{});
+    const m3 = try t.new_leaf(.{});
+    try t.add_child(m1, m2);
+    try t.insert_child_at_index(m3, 0, m2);
+    try std.testing.expectEqual(@as(usize, 0), try t.child_count(m1));
+    _ = try t.remove(m1);
+    _ = try t.remove(m2);
+    _ = try t.remove(m3);
+}
+
+fn wrapper400(t: *Tree, kids: []const NodeId) !NodeId {
+    return t.new_with_children(.{ .display = .block, .position = .relative, .size = .{ .width = TDim.length(400), .height = TDim.length(300) } }, kids);
+}
+
+test "triage 1299.1: fit-content flex row with inflexible small basis" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    const c = try t.new_leaf(.{ .display = .block, .size = .{ .width = TDim.length(20), .height = TDim.length(10) } });
+    const b = try t.new_with_children(.{ .display = .block, .flex_grow = 0, .flex_shrink = 0, .flex_basis = TDim.length(4) }, &.{c});
+    const a = try t.new_with_children(.{ .display = .flex }, &.{b});
+    const col = try t.new_with_children(.{ .display = .flex, .flex_direction = .column, .align_items = .FLEX_START }, &.{a});
+    const root = try wrapper400(&t, &.{col});
+    try t.compute_layout(root, t_max);
+    try std.testing.expectEqual(@as(f32, 20), (try t.layout_of(a)).size.width);
+    try std.testing.expectEqual(@as(f32, 20), (try t.layout_of(b)).size.width);
+}
+
+test "triage 1299.2: intrinsic column height with flex-basis 0 item" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    const b = try t.new_leaf(.{ .display = .block, .flex_grow = 1, .flex_shrink = 1, .flex_basis = TDim.length(0), .size = .{ .width = .auto, .height = TDim.length(67) }, .padding = .{ .left = TLP.zero(), .right = TLP.zero(), .top = TLP.length(14), .bottom = TLP.zero() } });
+    const a = try t.new_with_children(.{ .display = .flex, .flex_direction = .column, .size = .{ .width = TDim.length(100), .height = .auto } }, &.{b});
+    const root = try wrapper400(&t, &.{a});
+    try t.compute_layout(root, t_max);
+    try std.testing.expectEqual(@as(f32, 14), (try t.layout_of(a)).size.height);
+    try std.testing.expectEqual(@as(f32, 14), (try t.layout_of(b)).size.height);
+}
+
+test "triage 1299.3: percent height inside auto-height abspos behaves as auto" {
+    const Case = struct { display: style.Display, row: bool = false, bottom: ?f32 = null, want: f32 };
+    const cases = [_]Case{
+        .{ .display = .flex, .want = 16 },
+        .{ .display = .block, .want = 16 },
+        .{ .display = .flex, .row = true, .want = 16 },
+        // top+bottom insets make the height definite (300 - 0 - 100 = 200): 50% = 100
+        .{ .display = .flex, .bottom = 100, .want = 100 },
+        .{ .display = .block, .bottom = 100, .want = 100 },
+    };
+    for (cases) |c| {
+        var t = Tree.init(std.testing.allocator);
+        defer t.deinit();
+        const inner = try t.new_leaf(.{ .display = .block, .size = .{ .width = TDim.length(20), .height = TDim.length(16) } });
+        const b = try t.new_with_children(.{ .display = .block, .align_self = if (c.row) .FLEX_START else null, .size = .{ .width = .auto, .height = TDim.percent(0.5) } }, &.{inner});
+        const a = try t.new_with_children(.{ .display = c.display, .flex_direction = if (c.row) .row else .column, .position = .absolute, .inset = .{ .left = TLPA.length(0), .top = TLPA.length(0), .right = TLPA.auto(), .bottom = if (c.bottom) |v| TLPA.length(v) else TLPA.auto() }, .size = .{ .width = TDim.length(100), .height = .auto } }, &.{b});
+        const root = try wrapper400(&t, &.{a});
+        try t.compute_layout(root, t_max);
+        try std.testing.expectEqual(c.want, (try t.layout_of(b)).size.height);
+    }
+}
+
+fn wordsSize(context: ?*anyopaque, known: geometry.Size(?f32), avail: geometry.Size(@import("../style/available_space.zig").AvailableSpace)) geometry.Size(f32) {
+    _ = context;
+    const w: f32 = known.width orelse switch (avail.width) {
+        .min_content => 45,
+        .max_content => 495,
+        .definite => |v| std.math.clamp(@floor(v / 45) * 45, 45, 495),
+    };
+    const per_line = @max(1, @floor(w / 45));
+    return .{ .width = w, .height = known.height orelse @ceil(11 / per_line) * 16 };
+}
+fn wordsMeasure(context: ?*anyopaque, inputs: layout.LayoutInput, id: NodeId, s: *const style.Style) layout.LayoutOutput {
+    _ = id;
+    if (context == null) return @import("../compute/leaf.zig").compute_leaf_layout(inputs, s, null, null);
+    return @import("../compute/leaf.zig").compute_leaf_layout(inputs, s, context, wordsSize);
+}
+
+test "triage 1299.4: auto-width abspos column measures wrapping content at final width" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    var dummy: u8 = 0;
+    const spacer = try t.new_leaf(.{ .display = .block, .size = .{ .width = TDim.length(160), .height = TDim.length(0) } });
+    const b = try t.new_leaf_with_context(.{ .display = .block }, @ptrCast(&dummy));
+    const a = try t.new_with_children(.{ .display = .flex, .flex_direction = .column, .position = .absolute, .inset = .{ .left = TLPA.length(0), .top = TLPA.length(0), .right = TLPA.auto(), .bottom = TLPA.auto() } }, &.{ spacer, b });
+    const rel = try t.new_with_children(.{ .display = .block, .position = .relative, .size = .{ .width = TDim.length(0), .height = TDim.length(100) } }, &.{a});
+    const root = try wrapper400(&t, &.{rel});
+    try t.compute_layout_with_measure(root, t_max, wordsMeasure);
+    try std.testing.expectEqual(@as(f32, 160), (try t.layout_of(a)).size.width);
+    try std.testing.expectEqual(@as(f32, 64), (try t.layout_of(a)).size.height);
+    try std.testing.expectEqual(@as(f32, 64), (try t.layout_of(b)).size.height);
+}
+
+test "triage 1299.5: cross-axis auto margin zeroed when overflowing" {
+    // flex column 56px wide, 136px item: [direction, left auto, right auto, expected x]
+    const Case = struct { dir: style.Direction, l: bool, r: bool, x: f32 };
+    const cases = [_]Case{
+        .{ .dir = .ltr, .l = true, .r = false, .x = 0 },
+        .{ .dir = .ltr, .l = false, .r = true, .x = 0 },
+        .{ .dir = .ltr, .l = true, .r = true, .x = 0 },
+        .{ .dir = .rtl, .l = true, .r = false, .x = -80 },
+        .{ .dir = .rtl, .l = false, .r = true, .x = -80 },
+        .{ .dir = .rtl, .l = true, .r = true, .x = -80 },
+    };
+    for (cases) |c| {
+        var t = Tree.init(std.testing.allocator);
+        defer t.deinit();
+        const b = try t.new_leaf(.{ .display = .block, .size = .{ .width = TDim.length(136), .height = TDim.length(10) }, .margin = .{ .left = if (c.l) TLPA.auto() else TLPA.zero(), .right = if (c.r) TLPA.auto() else TLPA.zero(), .top = TLPA.zero(), .bottom = TLPA.zero() } });
+        const a = try t.new_with_children(.{ .display = .flex, .direction = c.dir, .flex_direction = .column, .align_items = .FLEX_END, .size = .{ .width = TDim.length(56), .height = .auto } }, &.{b});
+        const root = try wrapper400(&t, &.{a});
+        try t.compute_layout(root, t_max);
+        try std.testing.expectEqual(c.x, (try t.layout_of(b)).location.x);
+    }
+    // Row: the top (block-start) auto margin is zeroed.
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    const b = try t.new_leaf(.{ .display = .block, .size = .{ .width = TDim.length(10), .height = TDim.length(136) }, .margin = .{ .left = TLPA.zero(), .right = TLPA.zero(), .top = TLPA.auto(), .bottom = TLPA.auto() } });
+    const a = try t.new_with_children(.{ .display = .flex, .size = .{ .width = .auto, .height = TDim.length(56) } }, &.{b});
+    const root = try wrapper400(&t, &.{a});
+    try t.compute_layout(root, t_max);
+    try std.testing.expectEqual(@as(f32, 0), (try t.layout_of(b)).location.y);
+}
+
+test "triage 1299.6: percent max-width in fit-content column" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    const p17 = TLP.length(17);
+    const first = try t.new_leaf(.{ .display = .block, .box_sizing = .content_box, .size = .{ .width = TDim.length(142), .height = TDim.length(10) } });
+    const a = try t.new_with_children(.{ .display = .flex, .box_sizing = .content_box, .max_size = .{ .width = TLPA.percent(0.25), .height = TLPA.auto() }, .size = .{ .width = .auto, .height = TDim.length(16) } }, &.{});
+    const c = try t.new_with_children(.{ .display = .flex, .box_sizing = .content_box, .flex_direction = .column, .position = .absolute, .max_size = .{ .width = TLPA.length(200), .height = TLPA.auto() }, .padding = .{ .left = p17, .right = p17, .top = p17, .bottom = p17 } }, &.{ first, a });
+    const root = try wrapper400(&t, &.{c});
+    try t.compute_layout(root, t_max);
+    try std.testing.expectEqual(@as(f32, 176), (try t.layout_of(c)).size.width);
+    try std.testing.expectEqual(@as(f32, 35.5), (try t.unrounded_layout(a)).size.width);
+}
+
+test "triage 1296: auto-width row with flex-basis 0 item in align-items:start column" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    var boxes: [9]NodeId = undefined;
+    for (&boxes) |*bx| bx.* = try t.new_leaf(.{ .size = .{ .width = TDim.length(60), .height = TDim.length(16) }, .flex_shrink = 0 });
+    const grows = try t.new_with_children(.{ .flex_wrap = .wrap, .flex_grow = 1, .flex_shrink = 0, .flex_basis = TDim.length(0) }, &boxes);
+    const fixed = try t.new_leaf(.{ .size = .{ .width = TDim.length(30), .height = TDim.length(16) }, .flex_shrink = 0 });
+    const row = try t.new_with_children(.{}, &.{ grows, fixed });
+    const column = try t.new_with_children(.{ .flex_direction = .column, .align_items = .START, .size = .{ .width = TDim.length(316), .height = .auto } }, &.{row});
+    try t.compute_layout(column, t_max);
+    try std.testing.expectEqual(@as(f32, 316), (try t.layout_of(row)).size.width);
+    try std.testing.expectEqual(@as(f32, 48), (try t.layout_of(row)).size.height);
+    try std.testing.expectEqual(@as(f32, 286), (try t.layout_of(grows)).size.width);
+    try std.testing.expectEqual(@as(f32, 48), (try t.layout_of(grows)).size.height);
+}
+
+test "triage 1295: auto-width grid in align-items:start column" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    var boxes: [9]NodeId = undefined;
+    for (&boxes) |*bx| bx.* = try t.new_leaf(.{ .size = .{ .width = TDim.length(60), .height = TDim.length(16) }, .flex_shrink = 0 });
+    const wrap = try t.new_with_children(.{ .flex_wrap = .wrap }, &boxes);
+    const cols = [_]style.grid.GridTemplateComponent{.{ .single = style.grid.TrackSizingFunction.from_fr(1) }};
+    const grid = try t.new_with_children(.{ .display = .grid, .grid_template_columns = &cols }, &.{wrap});
+    const column = try t.new_with_children(.{ .flex_direction = .column, .align_items = .START, .size = .{ .width = TDim.length(316), .height = .auto } }, &.{grid});
+    try t.compute_layout(column, t_max);
+    try std.testing.expectEqual(@as(f32, 316), (try t.layout_of(grid)).size.width);
+    try std.testing.expectEqual(@as(f32, 32), (try t.layout_of(grid)).size.height);
+}
+
+test "triage 1240: overflowing grid item with auto margins" {
+    for ([_]style.Direction{ .ltr, .rtl }) |dir| {
+        var t = Tree.init(std.testing.allocator);
+        defer t.deinit();
+        t.disable_rounding();
+        const item = try t.new_leaf(.{ .size = .{ .width = TDim.length(600), .height = TDim.length(20) }, .margin = .{ .left = TLPA.auto(), .right = TLPA.auto(), .top = TLPA.zero(), .bottom = TLPA.zero() }, .justify_self = .CENTER });
+        const cols = [_]style.grid.GridTemplateComponent{.{ .single = style.grid.TrackSizingFunction.from_length(300) }};
+        const root = try t.new_with_children(.{ .display = .grid, .direction = dir, .size = .{ .width = TDim.length(300), .height = .auto }, .grid_template_columns = &cols }, &.{item});
+        try t.compute_layout(root, t_max);
+        try std.testing.expectEqual(@as(f32, if (dir == .ltr) 0 else -300), (try t.layout_of(item)).location.x);
+    }
+}
+
+test "triage 1239: f32 precision in grid distribution" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    t.disable_rounding();
+    const G = style.grid;
+    const item = try t.new_leaf(.{});
+    const second = try t.new_leaf(.{});
+    const cols = [_]G.GridTemplateComponent{
+        .{ .single = G.TrackSizingFunction.from_min_max(G.MinTrackSizingFunction.length(173.68802), G.MaxTrackSizingFunction.from_length_percentage(TLP.length(993.3))) },
+        .{ .single = G.TrackSizingFunction.from_min_max(G.MinTrackSizingFunction.length(0), G.MaxTrackSizingFunction.from_length_percentage(TLP.length(3000))) },
+    };
+    const root = try t.new_with_children(.{ .display = .grid, .size = .{ .width = TDim.length(2000), .height = .auto }, .grid_template_columns = &cols }, &.{ item, second });
+    try t.compute_layout(root, t_max);
+    const w1 = (try t.layout_of(item)).size.width;
+    const w2 = (try t.layout_of(second)).size.width;
+    try std.testing.expectApproxEqAbs(@as(f32, 993.3), w1, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 1006.7), w2, 0.01);
+}
+
+fn size1238(context: ?*anyopaque, known: geometry.Size(?f32), avail: geometry.Size(@import("../style/available_space.zig").AvailableSpace)) geometry.Size(f32) {
+    _ = context;
+    const w: f32 = known.width orelse switch (avail.width) {
+        .min_content => 100,
+        .max_content => 600,
+        .definite => |v| std.math.clamp(v, 100, 600),
+    };
+    return .{ .width = w, .height = known.height orelse @ceil(600 / w) * 10 };
+}
+fn measure1238(context: ?*anyopaque, inputs: layout.LayoutInput, id: NodeId, s: *const style.Style) layout.LayoutOutput {
+    _ = id;
+    return @import("../compute/leaf.zig").compute_leaf_layout(inputs, s, context, size1238);
+}
+
+test "triage 1238: non-stretched auto-width grid item gets fit-content width" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    t.disable_rounding();
+    const leaf = try t.new_leaf(.{});
+    const fr1 = [_]style.grid.GridTemplateComponent{.{ .single = style.grid.TrackSizingFunction.from_fr(1) }};
+    const item = try t.new_with_children(.{ .display = .grid, .grid_template_columns = &fr1, .justify_self = .CENTER }, &.{leaf});
+    const cols = [_]style.grid.GridTemplateComponent{.{ .single = style.grid.TrackSizingFunction.from_length(300) }};
+    const root = try t.new_with_children(.{ .display = .grid, .size = .{ .width = TDim.length(300), .height = .auto }, .grid_template_columns = &cols }, &.{item});
+    try t.compute_layout_with_measure(root, t_max, measure1238);
+    try std.testing.expectEqual(@as(f32, 300), (try t.layout_of(item)).size.width);
+    try std.testing.expectEqual(@as(f32, 0), (try t.layout_of(item)).location.x);
+    try std.testing.expectEqual(@as(f32, 20), (try t.layout_of(item)).size.height);
+    try std.testing.expectEqual(@as(f32, 20), (try t.layout_of(root)).size.height);
+}
+
+test "triage 1211: float placed beside a shorter float keeps its lower part" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    const f1 = try t.new_leaf(.{ .display = .block, .float = .left, .size = .{ .width = TDim.length(100), .height = TDim.length(20) } });
+    const f2 = try t.new_leaf(.{ .display = .block, .float = .right, .size = .{ .width = TDim.length(50), .height = TDim.length(40) } });
+    const spacer = try t.new_leaf(.{ .display = .block, .size = .{ .width = .auto, .height = TDim.length(25) } });
+    const last = try t.new_leaf(.{ .display = .flow_root, .size = .{ .width = .auto, .height = TDim.length(10) } });
+    const root = try t.new_with_children(.{ .display = .flow_root, .size = .{ .width = TDim.length(300), .height = .auto } }, &.{ f1, f2, spacer, last });
+    try t.compute_layout(root, t_max);
+    try std.testing.expectEqual(@as(f32, 25), (try t.layout_of(last)).location.y);
+    try std.testing.expectEqual(@as(f32, 250), (try t.layout_of(last)).size.width);
+    try std.testing.expectEqual(@as(f32, 250), (try t.layout_of(f2)).location.x);
+}
+
+test "triage 1299.2b: without padding the column collapses to 0" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    const b = try t.new_leaf(.{ .display = .block, .flex_grow = 1, .flex_shrink = 1, .flex_basis = TDim.length(0), .size = .{ .width = .auto, .height = TDim.length(67) } });
+    const a = try t.new_with_children(.{ .display = .flex, .flex_direction = .column, .size = .{ .width = TDim.length(100), .height = .auto } }, &.{b});
+    const root = try wrapper400(&t, &.{a});
+    try t.compute_layout(root, t_max);
+    try std.testing.expectEqual(@as(f32, 0), (try t.layout_of(a)).size.height);
+    try std.testing.expectEqual(@as(f32, 0), (try t.layout_of(b)).size.height);
+}
+
+fn size1238Unbreakable(context: ?*anyopaque, known: geometry.Size(?f32), avail: geometry.Size(@import("../style/available_space.zig").AvailableSpace)) geometry.Size(f32) {
+    _ = context;
+    const w: f32 = known.width orelse switch (avail.width) {
+        .min_content => 400,
+        .max_content => 600,
+        .definite => |v| std.math.clamp(v, 400, 600),
+    };
+    return .{ .width = w, .height = known.height orelse @ceil(600 / w) * 10 };
+}
+fn measure1238Unbreakable(context: ?*anyopaque, inputs: layout.LayoutInput, id: NodeId, s: *const style.Style) layout.LayoutOutput {
+    _ = id;
+    return @import("../compute/leaf.zig").compute_leaf_layout(inputs, s, context, size1238Unbreakable);
+}
+
+test "triage 1238b: a fit-content grid item keeps its min-content floor" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    t.disable_rounding();
+    const leaf = try t.new_leaf(.{});
+    const fr1 = [_]style.grid.GridTemplateComponent{.{ .single = style.grid.TrackSizingFunction.from_fr(1) }};
+    const item = try t.new_with_children(.{ .display = .grid, .grid_template_columns = &fr1, .justify_self = .START }, &.{leaf});
+    const cols = [_]style.grid.GridTemplateComponent{.{ .single = style.grid.TrackSizingFunction.from_length(300) }};
+    const root = try t.new_with_children(.{ .display = .grid, .size = .{ .width = TDim.length(300), .height = .auto }, .grid_template_columns = &cols }, &.{item});
+    try t.compute_layout_with_measure(root, t_max, measure1238Unbreakable);
+    try std.testing.expectEqual(@as(f32, 400), (try t.layout_of(item)).size.width);
+    try std.testing.expectEqual(@as(f32, 20), (try t.layout_of(item)).size.height);
+}
+
+test "triage 1296b: a fit-content row narrower than its space keeps its max-content width" {
+    var t = Tree.init(std.testing.allocator);
+    defer t.deinit();
+    var boxes: [2]NodeId = undefined;
+    for (&boxes) |*bx| bx.* = try t.new_leaf(.{ .size = .{ .width = TDim.length(60), .height = TDim.length(16) }, .flex_shrink = 0 });
+    const grows = try t.new_with_children(.{ .flex_wrap = .wrap, .flex_grow = 1, .flex_shrink = 0, .flex_basis = TDim.length(0) }, &boxes);
+    const fixed = try t.new_leaf(.{ .size = .{ .width = TDim.length(30), .height = TDim.length(16) }, .flex_shrink = 0 });
+    const row = try t.new_with_children(.{}, &.{ grows, fixed });
+    const column = try t.new_with_children(.{ .flex_direction = .column, .align_items = .START, .size = .{ .width = TDim.length(316), .height = .auto } }, &.{row});
+    try t.compute_layout(column, t_max);
+    try std.testing.expectEqual(@as(f32, 150), (try t.layout_of(row)).size.width);
+    try std.testing.expectEqual(@as(f32, 16), (try t.layout_of(row)).size.height);
+}

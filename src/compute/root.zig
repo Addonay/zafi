@@ -346,6 +346,24 @@ fn compute_in_flow_root_layout(comptime Tree: type, tree_ref: *Tree,
         };
         known_dimensions = orSize(orSize(orSize(known_dimensions, min_max_definite_size), clamped_style_size), available_space_based_size);
         known_dimensions = maybeMaxSize(known_dimensions, padding_border_size);
+    } else if (root_style.get(.display) == .flex and
+        root_style.get(.size).width.resolve(available_space.width.into_option()) == null)
+    {
+        // A flex root's auto width is shrink-to-fit. As for an
+        // out-of-flow root (and in browsers), that width is determined before
+        // the root's own layout, so its children's inline-axis percentages
+        // resolve against its final width (Taffy #847).
+        const size_input = layout.LayoutInput{
+            .run_mode = .compute_size,
+            .sizing_mode = .inherent_size,
+            .axis = .horizontal,
+            .known_dimensions = known_dimensions,
+            .known_dimensions_are_definite = .{ .width = true, .height = true },
+            .parent_size = icbFor(available_space),
+            .available_space = root_available_space,
+            .vertical_margins_are_collapsible = .{ .start = false, .end = false },
+        };
+        known_dimensions.width = (try compute_cached_layout(Tree, tree_ref, root, size_input)).size.width;
     }
 
     const input = layout.LayoutInput{

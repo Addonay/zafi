@@ -297,6 +297,18 @@ pub fn track_sizing_algorithm(comptime Tree: type, tree_ref: *Tree,
         .max_content, .definite => .max_content,
     };
 
+    // An auto inline size with definite available space is fit-content:
+    // min(max-content, available). Flexible tracks sized from their max-content
+    // contributions are therefore capped like a max-size would cap them, so the
+    // container does not overflow its available space (Taffy #1295).
+    const flex_max_size: ?f32 = if (axis == .inline_axis and inner_node_size.get(axis) == null)
+        switch (available_grid_space.get(axis)) {
+            .definite => |space| math.option_maybe_min(axis_max_size, space) orelse space,
+            else => axis_max_size,
+        }
+    else
+        axis_max_size;
+
     // 11.7. Expand Flexible Tracks
     expand_flexible_tracks(
         Tree,
@@ -306,7 +318,7 @@ pub fn track_sizing_algorithm(comptime Tree: type, tree_ref: *Tree,
         other_axis_tracks,
         items,
         axis_min_size,
-        axis_max_size,
+        flex_max_size,
         axis_available_space_for_expansion,
         inner_node_size,
         get_track_size_estimate,
@@ -1291,7 +1303,7 @@ fn distribute_space_up_to_limits(
         var proportion_sum: f32 = 0;
         for (tracks) |track| {
             if (!trackAffectedFiltered(track, is_flex, track_is_affected, extra_filter, axis_inner_node_size)) continue;
-            if (track_affected_property(track, axis_inner_node_size) + track.item_incurred_increase < track_limit(track, axis_inner_node_size)) {
+            if (trackHasRoom(track_affected_property(track, axis_inner_node_size) + track.item_incurred_increase, track_limit(track, axis_inner_node_size))) {
                 proportion_sum += track_distribution_proportion(track, axis_inner_node_size);
             }
         }
@@ -1301,7 +1313,7 @@ fn distribute_space_up_to_limits(
         var min_increase_limit = std.math.inf(f32);
         for (tracks) |track| {
             if (!trackAffectedFiltered(track, is_flex, track_is_affected, extra_filter, axis_inner_node_size)) continue;
-            if (track_affected_property(track, axis_inner_node_size) + track.item_incurred_increase < track_limit(track, axis_inner_node_size)) {
+            if (trackHasRoom(track_affected_property(track, axis_inner_node_size) + track.item_incurred_increase, track_limit(track, axis_inner_node_size))) {
                 const value = (track_limit(track, axis_inner_node_size) - track_affected_property(track, axis_inner_node_size) - track.item_incurred_increase) /
                     track_distribution_proportion(track, axis_inner_node_size);
                 min_increase_limit = @min(min_increase_limit, value);
@@ -1322,6 +1334,16 @@ fn distribute_space_up_to_limits(
     }
 
     return remaining;
+}
+
+/// Whether a track below its limit can still usefully grow. A track whose
+/// remaining room is within f32 rounding of its limit counts as frozen: its
+/// tiny room would otherwise cap every other track's per-iteration increase
+/// and stall distribution before the iteration bound (Taffy #1239).
+inline fn trackHasRoom(current: f32, limit: f32) bool {
+    if (!(current < limit)) return false;
+    if (std.math.isInf(limit)) return true;
+    return limit - current > @max(@abs(limit), 1.0) * (std.math.floatEps(f32) * 4);
 }
 
 inline fn trackAffected(track: GridTrack, is_flex: bool, predicate: TrackPredicate, axis_inner_node_size: ?f32) bool {
