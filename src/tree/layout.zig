@@ -321,13 +321,17 @@ pub const ScrollableOverflow = struct {
     pub const ZERO: ScrollableOverflow = .{};
 
     /// Pack an origin-containing rectangle and its scroll-origin directions.
+    ///
+    /// Edges on the wrong side of the origin, and NaN edges (from NaN or
+    /// infinite style lengths), are clamped to the origin. Taffy asserts here
+    /// instead (debug builds only); in an optimized Zig build a failed assert
+    /// would be undefined behaviour.
     pub fn new(r: geometry.Rect(f32), reversed: geometry.Point(bool)) ScrollableOverflow {
-        std.debug.assert(r.left <= 0 and r.top <= 0 and r.right >= 0 and r.bottom >= 0);
         return .{ .packed_rect = .{
-            .left = r.left,
-            .top = r.top,
-            .right = std.math.copysign(r.right, @as(f32, if (reversed.x) -1 else 1)),
-            .bottom = std.math.copysign(r.bottom, @as(f32, if (reversed.y) -1 else 1)),
+            .left = @min(r.left, -0.0),
+            .top = @min(r.top, -0.0),
+            .right = std.math.copysign(@max(r.right, 0), @as(f32, if (reversed.x) -1 else 1)),
+            .bottom = std.math.copysign(@max(r.bottom, 0), @as(f32, if (reversed.y) -1 else 1)),
         } };
     }
 

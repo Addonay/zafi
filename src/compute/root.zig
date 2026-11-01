@@ -136,6 +136,10 @@ pub fn compute_child_layout_with_block_ctx(comptime Tree: type, tree_ref: *Tree,
     }
 
     if (try TreeApi.child_count(tree_ref, node_id) == 0) {
+        // A leaf positions nothing: drop the hoisted list of a container that
+        // has lost its children, or rounding would follow it to removed boxes
+        // (Taffy has the same gap).
+        if (input.run_mode == .perform_layout) try TreeApi.clear_hoisted_children(tree_ref, node_id);
         return TreeApi.compute_leaf_layout(tree_ref, node_id, input);
     }
 
@@ -414,6 +418,11 @@ fn icbFor(available_space: geometry.Size(AvailableSpace)) geometry.Size(?f32) {
 pub fn compute_hidden_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId) ComputeError!layout.LayoutOutput {
     const TreeApi = LayoutTree(Tree);
     try TreeApi.cache_clear(tree_ref, node_id);
+    // A hidden box contains no positioned boxes. Without this, a node that
+    // becomes `display: none` keeps the hoisted list of its last visible
+    // layout, and rounding follows it to boxes that may since have been
+    // removed (Taffy has the same gap).
+    try TreeApi.clear_hoisted_children(tree_ref, node_id);
     try TreeApi.set_unrounded_layout(tree_ref, node_id, .with_order(0));
     try TreeApi.set_final_layout(tree_ref, node_id, .with_order(0));
     for (try TreeApi.child_ids(tree_ref, node_id)) |child_id| {
