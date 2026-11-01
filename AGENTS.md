@@ -189,6 +189,27 @@ Tooling: `perf` works in cloud VMs only with software events
 `-Dcpu=x86_64_v3` build (valgrind chokes on AVX-512). This VM is very noisy:
 same-binary runs vary 30%; always run an A/A control.
 
+### Done: faster than Taffy everywhere, less memory (same branch)
+
+vs Taffy (time / memory): geomean **0.80x / 0.71x**; every scenario faster;
+memory <= 1.0x everywhere (flex_wrap and mixed ~1.0x, big trees 0.46-0.76x).
+See README "Performance".
+
+- The fresh-tree gap (1.3-2.3x slower) was glibc, not layout: the paged
+  NodeStore grew the heap in 152 KiB `brk` steps and glibc trimmed the whole
+  heap at each tree teardown, re-faulting it next time (strace: 1584 brk vs
+  Taffy's 40). `NodeStore` is now one contiguous array grown with realloc
+  (mremap for big blocks), 1.5x growth. `*NodeData` is invalidated by node
+  creation (layout never creates nodes).
+- `style.StoredStyle`: grid-only properties out of line (comptime-derived
+  from `Style`; `gridIsDefault` has a comptime guard). View supports a
+  host-level generic `get`. `Tree.style_ptr` removed; `style_get(id, .f)`.
+- `NodeExtra`: hoisted children, detailed info, cached OOF candidates are
+  lazily allocated. NodeData 1192 -> 880 B.
+- Tried and reverted (no gain): scalar-merge `?f32` math helpers in
+  util/math.zig (relayout +9%), scalar clamp of known_dimensions' result.
+  New leaves pay ~30 ns for the Style -> StoredStyle gather; accepted.
+
 ### Benchmarking notes
 
 - `tools/zig-out/bin/bench [scenario]` prints `bench|scenario|iters|ns_per_iter|peak_live_bytes|allocs_per_iter`.
@@ -214,11 +235,10 @@ same-binary runs vary 30%; always run an A/A control.
    under a failing allocator (OOM must surface as `OutOfMemory`, no leaks).
    Regenerate expected.txt only when the Taffy pin changes. Known deviation:
    CSS escapes (`\`) are not decoded.
-3. More perf: fresh-tree glibc trimming behaviour, flex (~+4% instructions
-   vs 0.3.0), `relayout_grid_50x50` vs Taffy.
-4. Codex adversarial review (two runs max, in the background):
-   `codex exec -m gpt-6.1-sol -c model_reasoning_effort='"medium"' -s read-only -o <file> "<prompt>"`.
-   Fix the findings in PRs.
+3. ~~More perf~~ DONE (above). Remaining ideas: relayout_grid (0.95x) is
+   the closest; layout cache (328 B/node) is the biggest per-node item left.
+4. Review: the owner dropped the Codex requirement; a Claude review subagent
+   is used instead.
 5. Bump to 0.4.0 and run `tools/release.sh 0.4.0`; push main and the tag; ask
    the owner before `gh release create`.
 
