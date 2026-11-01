@@ -579,6 +579,24 @@ tree_ref,
     }
 
     var measured_size: Size(f32) = .{ .width = 0, .height = 0 };
+    if (known_dimensions.width == null and known_dimensions.height == null) {
+        // Resolve the fit-content width first, then measure the height at that
+        // width: content that wraps (e.g. a column flex container's items) must
+        // not keep the height it had at a provisional width (Taffy #1299 case 4).
+        const width = try TreeApi.measure_child_size(tree_ref,
+            candidate.node,
+            known_dimensions,
+            to_optional_size(area_size),
+            oof_available_space,
+            .content_size,
+            .horizontal,
+            .{ .start = false, .end = false });
+        known_dimensions.width = math.f32_maybe_clamp(width, min_size.width, max_size.width);
+        known_dimensions = math.optional_size_maybe_clamp(known_dimensions.maybe_apply_aspect_ratio(aspect_ratio), min_size, max_size);
+    }
+    // An auto (content-sized) height is not definite for the box's children:
+    // their percentage heights behave as `auto` (CSS2 §10.5).
+    const height_is_definite = known_dimensions.height != null;
     if (known_dimensions.width == null or known_dimensions.height == null) {
         measured_size = try TreeApi.measure_child_size_both(tree_ref, 
             candidate.node,
@@ -599,7 +617,7 @@ tree_ref,
 
     const layout_input = layout.LayoutInput{
         .known_dimensions = to_optional_size(final_size),
-        .known_dimensions_are_definite = .{ .width = true, .height = true },
+        .known_dimensions_are_definite = .{ .width = true, .height = height_is_definite },
         .parent_size = to_optional_size(area_size),
         .available_space = oof_available_space,
         .sizing_mode = .content_size,

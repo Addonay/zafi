@@ -655,7 +655,12 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         }
     }
     const parent_width_indefinite = outer_node_size.width == null;
-    rerun_column_sizing = parent_width_indefinite and has_percentage_column;
+    // An indefinite-width container whose min/max width clamped it away from
+    // the width of its tracks is laid out at that clamped width: re-size the
+    // columns against it as definite available space (Taffy #884).
+    const width_clamped = parent_width_indefinite and
+        container_content_box.width != initial_column_sum;
+    rerun_column_sizing = parent_width_indefinite and (has_percentage_column or width_clamped);
 
     if (!rerun_column_sizing) {
         for (items.items) |*item| {
@@ -706,6 +711,8 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
 
     if (rerun_column_sizing) {
         // Re-run track sizing algorithm for Inline axis
+        var rerun_grid_space = available_grid_space;
+        if (width_clamped) rerun_grid_space.width = .{ .definite = container_content_box.width };
         track_sizing.track_sizing_algorithm(
             Tree,
             tree_ref,
@@ -714,7 +721,7 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
             inner_max_size.get(.inline_axis),
             justify_content,
             align_content,
-            available_grid_space,
+            rerun_grid_space,
             inner_node_size,
             columns.items,
             rows.items,
@@ -881,6 +888,15 @@ pub fn compute_grid_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId
         item.height = result.height;
         item.baseline = result.baseline;
         item_overflow_rect = item_overflow_rect.@"union"(result.contribution);
+    }
+
+    // The grid itself (its tracks and gutters) is part of the container's
+    // scrollable overflow (CSS Grid 2 §5.3), so empty tracks stay reachable.
+    // End padding is added past the grid's end edge. Only scroll containers
+    // (where the overflow is observable) include it, as other boxes only
+    // propagate their items' overflow (as Taffy does).
+    if (is_scroll_container) {
+        item_overflow_rect = item_overflow_rect.@"union"(gridTrackOverflowRect(columns.items, rows.items, padding_box_inset, padding, direction.is_rtl()));
     }
 
     // Detailed grid information (`detailed_layout_info` feature, default-on in
@@ -1423,6 +1439,35 @@ test "grid fr track subtracts container padding" {
     }, &[_]NodeId{child});
     try tree_ref.compute_layout(root, .{ .width = .{ .definite = 100 }, .height = .{ .definite = 20 } });
     try testing.expectEqual(@as(f32, 80), (try tree_ref.layout_of(child)).size.width);
+}
+
+/// The physical bounds of the grid's tracks in the padding-box frame. Track
+/// offsets are physical left/top border-box edges in both directions.
+fn gridTrackOverflowRect(columns: []const GridTrack, rows: []const GridTrack, padding_box_inset: geometry.Rect(f32), padding: geometry.Rect(f32), rtl: bool) geometry.Rect(f32) {
+    const ZERO = geometry.Rect(f32){ .left = 0, .right = 0, .top = 0, .bottom = 0 };
+    if (columns.len < 3 or rows.len < 3) return ZERO;
+    var left: f32 = std.math.inf(f32);
+    var right: f32 = -std.math.inf(f32);
+    for (columns[1 .. columns.len - 1]) |track| {
+        left = @min(left, track.offset);
+        right = @max(right, track.offset + track.base_size);
+    }
+    var top: f32 = std.math.inf(f32);
+    var bottom: f32 = -std.math.inf(f32);
+    for (rows[1 .. rows.len - 1]) |track| {
+        top = @min(top, track.offset);
+        bottom = @max(bottom, track.offset + track.base_size);
+    }
+    var r = geometry.Rect(f32){
+        .left = left - padding_box_inset.left,
+        .right = right - padding_box_inset.left,
+        .top = top - padding_box_inset.top,
+        .bottom = bottom - padding_box_inset.top,
+    };
+    if (!(r.right > r.left) or !(r.bottom > r.top)) return ZERO;
+    if (rtl) r.left -= @max(0, padding.left) else r.right += @max(0, padding.right);
+    r.bottom += @max(0, padding.bottom);
+    return r;
 }
 
 /// A grid container's scrollable overflow: in RTL the overflow reaches the

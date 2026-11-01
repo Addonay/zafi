@@ -467,7 +467,13 @@ pub fn align_item_within_area(
     };
 
     const overflows = resolved_size + non_auto_margin.sum() > grid_area_size;
-    const alignment_keyword = alignment.resolve_self_alignment_safety(alignment_style, overflows);
+    // Auto margins take precedence over self-alignment (css-grid §11.2): they
+    // absorb any positive free space, and an in-flow item that leaves none
+    // (auto margins treated as zero) is start-aligned rather than centred.
+    const alignment_keyword: AlignItemsKeyword = if (auto_margin_count > 0 and !position.is_out_of_flow())
+        .start
+    else
+        alignment.resolve_self_alignment_safety(alignment_style, overflows);
 
     // Compute offset in the axis
     const alignment_based_offset: f32 = switch (alignment_keyword) {

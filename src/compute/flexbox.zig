@@ -902,10 +902,16 @@ inline fn generate_anonymous_flex_items(comptime Tree: type, tree_ref: *Tree, no
     // Percentage sizes of items resolve against the container's inner size, but only if that size
     // is definite. A known main size which is derived from the container's own content is treated
     // as indefinite here.
-    const percent_resolution_size = if (constants.known_main_size_is_definite)
+    // The same holds for the cross size (e.g. the content-sized height of an
+    // auto-height absolutely positioned container).
+    const main_resolution_size = if (constants.known_main_size_is_definite)
         constants.node_inner_size
     else
         constants.node_inner_size.with_main(constants.dir, null);
+    const percent_resolution_size = if (constants.has_definite_cross_size)
+        main_resolution_size
+    else
+        main_resolution_size.with_cross(constants.dir, null);
 
     const allocator = TreeApi.scratch_allocator(tree_ref);
     var items = std.ArrayList(FlexItem).empty;
@@ -1566,6 +1572,14 @@ fn determine_container_main_size(comptime Tree: type, tree_ref: *Tree,
                 if (lines.len > 1) {
                     break :blk math.f32_max(size, main_axis_available_space);
                 }
+                if (constants.is_row) {
+                    // A row whose width is unknown is fit-content sized:
+                    // min(max-content, available), where the max-content size counts
+                    // each item's content, not just its flex base size. Chrome and
+                    // Firefox agree (Taffy #1296, #1299 case 1).
+                    const mc = try container_max_content_size(Tree, tree_ref, available_space.with_main(dir, .max_content), lines, constants);
+                    break :blk math.f32_max(size, math.f32_min(mc, main_axis_available_space));
+                }
                 break :blk size;
             },
             .min_content => {
@@ -1641,6 +1655,15 @@ fn container_max_content_size(comptime Tree: type, tree_ref: *Tree, available_sp
                 math.option_maybe_min(style_max, flex_basis_max) orelse flex_basis_max orelse std.math.inf(f32);
 
             const content_contribution = content_contribution: {
+                if (!constants.is_row) {
+                    // A column container's intrinsic main (block) size is the sum of its
+                    // items' hypothetical main sizes: the flex base size clamped by the
+                    // max size and the automatic minimum. Chrome and Firefox both do this;
+                    // an item's `height` must not override a definite `flex-basis`
+                    // (Taffy #1299 case 2: `flex: 1 1 0px; height: 67px` contributes
+                    // its 14px automatic minimum, not 67px).
+                    break :content_contribution @max(math.f32_maybe_min(item.flex_basis, style_max), item.resolved_minimum_main_size) + item.margin.main_axis_sum(constants.dir);
+                }
                 if (style_preferred) |pref| {
                     if (max_main_size <= min_main_size or max_main_size <= pref) {
                         break :content_contribution @max(@min(pref, max_main_size), min_main_size) + item.margin.main_axis_sum(constants.dir);
@@ -2072,7 +2095,19 @@ inline fn determine_hypothetical_cross_size(comptime Tree: type, tree_ref: *Tree
             .exact => {},
         };
 
-        const child_inner_cross = child_cross orelse blk: {
+        // An auto cross size of an item with a preferred aspect ratio is
+        // transferred from its used main size (Taffy #804).
+        const ratio_cross: ?f32 = if (child_cross == null and child.size_style.cross(constants.dir).is_auto())
+            if (child.aspect_ratio) |ratio|
+                (if (constants.is_row) child.target_size.width / ratio else child.target_size.height * ratio)
+            else
+                null
+        else
+            null;
+
+        const child_inner_cross = child_cross orelse if (ratio_cross) |cross|
+            @max(math.f32_maybe_clamp(cross, transferred_min_cross, transferred_max_cross), padding_border_sum)
+        else blk: {
             const input = layout.LayoutInput{
                 .run_mode = .compute_size,
                 .sizing_mode = .content_size,
@@ -2427,7 +2462,20 @@ inline fn resolve_cross_axis_auto_margins(flex_lines: []FlexLine, constants: *co
         for (line.items) |*child| {
             const free_space = line_cross_size - child.outer_target_size.cross(constants.dir);
 
-            if (child.margin_is_auto.cross_start(constants.dir) and child.margin_is_auto.cross_end(constants.dir)) {
+            const start_auto = child.margin_is_auto.cross_start(constants.dir);
+            const end_auto = child.margin_is_auto.cross_end(constants.dir);
+            if ((start_auto or end_auto) and free_space < 0) {
+                // 13. An item that does not fit its line: the auto margin on the
+                // inline/block-start side is zero, and the opposite margin is set
+                // so the outer size equals the line. `cross_start` here is the
+                // physical top/left; in an RTL column the start side is the right.
+                if (constants.is_column and constants.layout_direction.is_rtl()) {
+                    if (end_auto) child.margin.right = 0;
+                    child.margin.left += free_space;
+                } else if (end_auto) {
+                    if (constants.is_row) child.margin.bottom = free_space else child.margin.right = free_space;
+                }
+            } else if (start_auto and end_auto) {
                 if (constants.is_row) {
                     child.margin.top = free_space / 2.0;
                     child.margin.bottom = free_space / 2.0;
@@ -2435,7 +2483,7 @@ inline fn resolve_cross_axis_auto_margins(flex_lines: []FlexLine, constants: *co
                     child.margin.left = free_space / 2.0;
                     child.margin.right = free_space / 2.0;
                 }
-            } else if (child.margin_is_auto.cross_start(constants.dir)) {
+            } else if (start_auto) {
                 if (constants.is_row) {
                     child.margin.top = free_space;
                 } else {
