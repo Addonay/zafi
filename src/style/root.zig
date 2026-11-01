@@ -18,6 +18,8 @@ pub const flex = @import("flex.zig");
 pub const float = @import("float.zig");
 pub const grid = @import("grid.zig");
 pub const view = @import("view.zig");
+pub const stored = @import("stored.zig");
+pub const StoredStyle = stored.StoredStyle;
 
 pub const Display = enum {
     /// Taffy-compatible serde: PascalCase variant names.
@@ -888,4 +890,6 @@ test {
     _ = @import("flex.zig");
     _ = @import("float.zig");
     _ = @import("grid.zig");
+    _ = @import("stored.zig");
+    _ = @import("view.zig");
 }

@@ -7,6 +7,9 @@
 //! algorithms then see it through `View(HostStyle)`, which resolves each
 //! property, at compile time, to the first of:
 //!
+//!   0. a generic getter `pub fn get(self: *const HostStyle, comptime field:
+//!      view.Field) view.FieldType(field)`, if the host declares one (it then
+//!      answers every property; `StoredStyle` uses this),
 //!   1. a method `pub fn name(self: *const HostStyle) T` (compute it on the fly
 //!      from the host's own representation),
 //!   2. a field `name: T` of the same type as zafi's `Style.name`,
@@ -67,7 +70,9 @@ pub fn View(comptime S: type) type {
 
         pub inline fn get(self: Self, comptime field: Field) FieldType(field) {
             const name = @tagName(field);
-            if (comptime @hasDecl(S, name)) {
+            if (comptime @hasDecl(S, "get")) {
+                return S.get(self.inner, field);
+            } else if (comptime @hasDecl(S, name)) {
                 return @field(S, name)(self.inner);
             } else if (comptime @hasField(S, name)) {
                 if (comptime @FieldType(S, name) != FieldType(field)) {
