@@ -17,6 +17,8 @@ tree type.
 | Layout behavior | Passes all 6,652 Taffy fixtures at Taffy `c6421c1` (upstream `main`, after v0.15.1) |
 | Zig | 0.17.0 or newer |
 | Dependencies | none (optional `serde.zig` for Taffy-compatible JSON) |
+| CSS value parsing | Same results as Taffy's `parse` feature on a 17,126-case differential corpus |
+| Robustness | Randomized trees with hostile styles (NaN, infinities, huge spans) never crash, and incremental relayout matches a fresh layout |
 
 ## Performance
 
@@ -27,15 +29,15 @@ lower is better.
 
 | scenario | time | memory |
 | --- | --- | --- |
-| rebuild a 1000-item flex row every frame (`clear` + rebuild + layout) | **0.89x** | **0.81x** |
-| relayout a 50x50 auto grid after restyling one cell | **0.95x** | **0.76x** |
-| flex row, 1000 items | **0.81x** | **0.81x** |
-| wrapping flex, 500 items | **0.78x** | 1.00x |
-| 50-deep nested blocks | **0.49x** | **0.39x** |
-| nested flex > grid > block | **0.94x** | 0.99x |
+| rebuild a 1000-item flex row every frame (`clear` + rebuild + layout) | **0.85x** | **0.81x** |
+| relayout a 50x50 auto grid after restyling one cell | **0.98x** | **0.76x** |
+| flex row, 1000 items | **0.85x** | **0.81x** |
+| wrapping flex, 500 items | **0.81x** | 1.00x |
+| 50-deep nested blocks | **0.52x** | **0.39x** |
+| nested flex > grid > block | **0.89x** | **0.99x** |
 | 50x50 fixed grid, fresh tree | **0.88x** | **0.76x** |
-| create a 10,000-node tree | **0.78x** | **0.46x** |
-| **geometric mean** | **0.80x** | **0.71x** |
+| create a 10,000-node tree | **0.88x** | **0.46x** |
+| **geometric mean** | **0.82x** | **0.71x** |
 
 A node takes 880 bytes (Taffy: about 1.3 KB): grid-only style properties
 and rarely used per-node data are stored out of line, only for the nodes
