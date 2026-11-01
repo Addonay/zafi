@@ -297,7 +297,7 @@ pub fn compute_oof_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId,
     }
 
     const node_style = TreeApi.get_style(tree_ref, node_id);
-    const direction = node_style.direction;
+    const direction = node_style.get(.direction);
     const claims = node_style.is_containing_block();
 
     const candidates = output.oof_candidates;
@@ -309,7 +309,7 @@ pub fn compute_oof_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId,
     try TreeApi.clear_hoisted_children(tree_ref, node_id);
     try TreeApi.add_hoisted_children(tree_ref, node_id, result.hoisted.items);
     output.oof_candidates = result.unclaimed;
-    const overflow = node_style.overflow;
+    const overflow = node_style.get(.overflow);
     output.scrollable_overflow_rect = scrollable_overflow.finalize_scrollable_overflow(
         output.scrollable_overflow_rect.rect().@"union"(result.scrollable_overflow_rect),
         area.size,
@@ -358,7 +358,7 @@ fn compute_oof_layout_for_area_with_origin(comptime Tree: type, tree_ref: *Tree,
     reversed: Point(bool)) !OofLayoutResult {
     const TreeApi = LayoutTree(Tree);
     const owner_style = TreeApi.get_style(tree_ref, geometry_owner);
-    const overflow = owner_style.overflow;
+    const overflow = owner_style.get(.overflow);
     const scratch = TreeApi.scratch_allocator(tree_ref);
 
     var hoisted = std.ArrayList(NodeId).empty;
@@ -438,7 +438,7 @@ pub fn layout_oof_box(comptime Tree: type, tree_ref: *Tree,
                 .top = area_offset.y,
                 .bottom = area_offset.y + area_size.height,
             };
-            const grid_area = detailed.resolve_absolute_grid_area(child_style.grid_row, child_style.grid_column, direction, area_rect);
+            const grid_area = detailed.resolve_absolute_grid_area(child_style.get(.grid_row), child_style.get(.grid_column), direction, area_rect);
             area_size = .{ .width = grid_area.right - grid_area.left, .height = grid_area.bottom - grid_area.top };
             area_offset = .{ .x = grid_area.left, .y = grid_area.top };
         }
@@ -446,40 +446,40 @@ pub fn layout_oof_box(comptime Tree: type, tree_ref: *Tree,
     const area_width = area_size.width;
     const area_height = area_size.height;
 
-    const aspect_ratio = child_style.aspect_ratio;
-    const margin = resolve_margin_options(child_style.margin, area_width);
-    const padding = resolve_length_rect_or_zero(child_style.padding, area_width);
-    const border = resolve_length_rect_or_zero(child_style.border, area_width);
+    const aspect_ratio = child_style.get(.aspect_ratio);
+    const margin = resolve_margin_options(child_style.get(.margin), area_width);
+    const padding = resolve_length_rect_or_zero(child_style.get(.padding), area_width);
+    const border = resolve_length_rect_or_zero(child_style.get(.border), area_width);
     const padding_border_sum = padding.add(border).sum_axes();
-    const box_sizing_adjustment = if (child_style.box_sizing == .content_box) padding_border_sum else geometry.SIZE_F32_ZERO;
+    const box_sizing_adjustment = if (child_style.get(.box_sizing) == .content_box) padding_border_sum else geometry.SIZE_F32_ZERO;
 
     // Resolve inset
-    const left = child_style.inset.left.resolve_to_option(area_width);
-    const right = child_style.inset.right.resolve_to_option(area_width);
-    const top = child_style.inset.top.resolve_to_option(area_height);
-    const bottom = child_style.inset.bottom.resolve_to_option(area_height);
+    const left = child_style.get(.inset).left.resolve_to_option(area_width);
+    const right = child_style.get(.inset).right.resolve_to_option(area_width);
+    const top = child_style.get(.inset).top.resolve_to_option(area_height);
+    const bottom = child_style.get(.inset).bottom.resolve_to_option(area_height);
 
     // Compute known dimensions from min/max/inherent size styles
-    const size_style = child_style.size;
+    const size_style = child_style.get(.size);
     const style_size = math.optional_size_maybe_add(resolveDimensionSize(size_style, area_size).maybe_apply_aspect_ratio(aspect_ratio), to_optional_size(box_sizing_adjustment));
-    const min_size_raw = math.optional_size_maybe_add(resolveAutoSize(child_style.min_size, area_size).maybe_apply_aspect_ratio(aspect_ratio), to_optional_size(box_sizing_adjustment));
+    const min_size_raw = math.optional_size_maybe_add(resolveAutoSize(child_style.get(.min_size), area_size).maybe_apply_aspect_ratio(aspect_ratio), to_optional_size(box_sizing_adjustment));
     // A box's min size is at least its padding+border sum: `or(padding_border_sum)`
     // then `.maybe_max(padding_border_sum)`.
     var min_size = Size(?f32){
         .width = @max(min_size_raw.width orelse padding_border_sum.width, padding_border_sum.width),
         .height = @max(min_size_raw.height orelse padding_border_sum.height, padding_border_sum.height),
     };
-    const max_size = math.optional_size_maybe_add(resolveAutoSize(child_style.max_size, area_size).maybe_apply_aspect_ratio(aspect_ratio), to_optional_size(box_sizing_adjustment));
+    const max_size = math.optional_size_maybe_add(resolveAutoSize(child_style.get(.max_size), area_size).maybe_apply_aspect_ratio(aspect_ratio), to_optional_size(box_sizing_adjustment));
     var known_dimensions = math.optional_size_maybe_clamp(style_size, min_size, max_size);
 
     const is_replaced = child_style.is_replaced();
     const is_table = child_style.is_table();
-    const item_direction = child_style.direction;
-    const justify_self = alignment_common.resolve_self_relative(child_style.justify_self orelse alignment.AlignSelf.NORMAL, item_direction, direction, true);
-    const align_self = alignment_common.resolve_self_relative(child_style.align_self orelse alignment.AlignSelf.NORMAL, item_direction, direction, false);
-    const overflow = child_style.overflow;
-    const scrollbar_width = child_style.scrollbar_width;
-    const contain = child_style.contain;
+    const item_direction = child_style.get(.direction);
+    const justify_self = alignment_common.resolve_self_relative(child_style.get(.justify_self) orelse alignment.AlignSelf.NORMAL, item_direction, direction, true);
+    const align_self = alignment_common.resolve_self_relative(child_style.get(.align_self) orelse alignment.AlignSelf.NORMAL, item_direction, direction, false);
+    const overflow = child_style.get(.overflow);
+    const scrollbar_width = child_style.get(.scrollbar_width);
+    const contain = child_style.get(.contain);
 
     // Static positions are relative to the containing block's border box: make
     // them relative to the inset-resolution area

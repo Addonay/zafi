@@ -15,7 +15,16 @@ pub const Resolver = struct {
 pub threadlocal var current: ?Resolver = null;
 
 /// Resolve a calc handle against `basis`.
+///
+/// Every length-resolution helper has a calc arm. The arm is marked cold and
+/// the indirect call lives out of line, so the hot (non-calc) paths of those
+/// helpers stay frame-free and keep inlining into the layout loops.
 pub inline fn resolve(value: ?*const anyopaque, basis: f32) f32 {
+    @branchHint(.cold);
+    return resolveSlow(value, basis);
+}
+
+noinline fn resolveSlow(value: ?*const anyopaque, basis: f32) f32 {
     const handle = value orelse return 0;
     const r = current orelse return 0;
     return r.func(r.ctx, handle, basis);

@@ -140,44 +140,44 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
 
     const item_style = TreeApi.get_style(tree_ref, node);
 
-    const overflow = item_style.overflow;
-    const contain = item_style.contain;
-    const scrollbar_width_value = item_style.scrollbar_width;
-    const aspect_ratio = item_style.aspect_ratio;
+    const overflow = item_style.get(.overflow);
+    const contain = item_style.get(.contain);
+    const scrollbar_width_value = item_style.get(.scrollbar_width);
+    const aspect_ratio = item_style.get(.aspect_ratio);
     // Resolve writing-mode-relative self-start/self-end keywords against the item's own direction.
-    const item_direction = item_style.direction;
+    const item_direction = item_style.get(.direction);
     // `auto` (null) self-alignment takes the container's `*-items` value.
-    const justify_self = resolve_self_relative(item_style.justify_self orelse container_alignment_styles.horizontal, item_direction, direction, true);
-    const align_self = resolve_self_relative(item_style.align_self orelse container_alignment_styles.vertical, item_direction, direction, false);
+    const justify_self = resolve_self_relative(item_style.get(.justify_self) orelse container_alignment_styles.horizontal, item_direction, direction, true);
+    const align_self = resolve_self_relative(item_style.get(.align_self) orelse container_alignment_styles.vertical, item_direction, direction, false);
 
-    const position = item_style.position;
+    const position = item_style.get(.position);
     const inset_horizontal = geometry.Line(?f32){
-        .start = item_style.inset.left.resolve_to_option(grid_area_size.width),
-        .end = item_style.inset.right.resolve_to_option(grid_area_size.width),
+        .start = item_style.get(.inset).left.resolve_to_option(grid_area_size.width),
+        .end = item_style.get(.inset).right.resolve_to_option(grid_area_size.width),
     };
     const inset_vertical = geometry.Line(?f32){
-        .start = item_style.inset.top.resolve_to_option(grid_area_size.height),
-        .end = item_style.inset.bottom.resolve_to_option(grid_area_size.height),
+        .start = item_style.get(.inset).top.resolve_to_option(grid_area_size.height),
+        .end = item_style.get(.inset).bottom.resolve_to_option(grid_area_size.height),
     };
-    const padding = resolve_length_rect_or_zero(item_style.padding, grid_area_size.width);
-    const border = resolve_length_rect_or_zero(item_style.border, grid_area_size.width);
+    const padding = resolve_length_rect_or_zero(item_style.get(.padding), grid_area_size.width);
+    const border = resolve_length_rect_or_zero(item_style.get(.border), grid_area_size.width);
     const padding_border_size = padding.add(border).sum_axes();
 
-    const box_sizing_adjustment = if (item_style.box_sizing == .content_box) padding_border_size else geometry.F32Size{ .width = 0, .height = 0 };
+    const box_sizing_adjustment = if (item_style.get(.box_sizing) == .content_box) padding_border_size else geometry.F32Size{ .width = 0, .height = 0 };
 
-    const size_style = item_style.size;
+    const size_style = item_style.get(.size);
     const inherent_size = maybe_add_optional_size(
         geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_dimension_size(size_style, grid_area_size), aspect_ratio),
         box_sizing_adjustment);
     const min_size = maybe_apply_aspect_ratio_optional(
         maybe_max_optional_size(
             maybe_or_optional_size(
-                maybe_add_optional_size(resolve_lpa_size(item_style.min_size, grid_area_size), box_sizing_adjustment),
+                maybe_add_optional_size(resolve_lpa_size(item_style.get(.min_size), grid_area_size), box_sizing_adjustment),
                 geometry.Size(?f32){ .width = padding_border_size.width, .height = padding_border_size.height }),
             padding_border_size),
         aspect_ratio);
     const max_size = maybe_add_optional_size(
-        geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(item_style.max_size, grid_area_size), aspect_ratio),
+        geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(item_style.get(.max_size), grid_area_size), aspect_ratio),
         box_sizing_adjustment);
 
     // Resolve default alignment styles if they are set on neither the parent or the node itself.
@@ -200,10 +200,10 @@ pub fn align_and_position_item(comptime Tree: type, tree_ref: *Tree,
     // Note: This is not a bug. It is part of the CSS spec that both horizontal and vertical
     // margins resolve against the WIDTH of the grid area.
     const margin = geometry.Rect(?f32){
-        .left = item_style.margin.left.resolve_to_option(grid_area_size.width),
-        .right = item_style.margin.right.resolve_to_option(grid_area_size.width),
-        .top = item_style.margin.top.resolve_to_option(grid_area_size.width),
-        .bottom = item_style.margin.bottom.resolve_to_option(grid_area_size.width),
+        .left = item_style.get(.margin).left.resolve_to_option(grid_area_size.width),
+        .right = item_style.get(.margin).right.resolve_to_option(grid_area_size.width),
+        .top = item_style.get(.margin).top.resolve_to_option(grid_area_size.width),
+        .bottom = item_style.get(.margin).bottom.resolve_to_option(grid_area_size.width),
     };
 
     const minus_h_margins = math.f32_maybe_sub(math.f32_maybe_sub(grid_area_size.width, margin.left), margin.right);

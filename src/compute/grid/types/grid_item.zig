@@ -131,7 +131,7 @@ pub const GridItem = struct {
         node: NodeId,
         col_span: geometry.Line(OriginZeroLine),
         row_span: geometry.Line(OriginZeroLine),
-        item_style: *const style.Style,
+        item_style: anytype,
         parent_align_items: style.alignment.AlignItems,
         parent_justify_items: style.alignment.AlignItems,
         source_order: u16) GridItem {
@@ -142,17 +142,17 @@ pub const GridItem = struct {
             .column = col_span,
             .is_compressible_replaced = item_style.is_compressible_replaced(),
             .is_replaced = item_style.is_replaced(),
-            .overflow = item_style.overflow,
-            .box_sizing = item_style.box_sizing,
-            .size = item_style.size,
-            .min_size = item_style.min_size,
-            .max_size = item_style.max_size,
-            .aspect_ratio = item_style.aspect_ratio,
-            .padding = item_style.padding,
-            .border = item_style.border,
-            .margin = item_style.margin,
-            .align_self = item_style.align_self orelse parent_align_items,
-            .justify_self = item_style.justify_self orelse parent_justify_items,
+            .overflow = item_style.get(.overflow),
+            .box_sizing = item_style.get(.box_sizing),
+            .size = item_style.get(.size),
+            .min_size = item_style.get(.min_size),
+            .max_size = item_style.get(.max_size),
+            .aspect_ratio = item_style.get(.aspect_ratio),
+            .padding = item_style.get(.padding),
+            .border = item_style.get(.border),
+            .margin = item_style.get(.margin),
+            .align_self = item_style.get(.align_self) orelse parent_align_items,
+            .justify_self = item_style.get(.justify_self) orelse parent_justify_items,
             .row_indexes = .{ .start = 0, .end = 0 }, // Properly initialised later
             .column_indexes = .{ .start = 0, .end = 0 }, // Properly initialised later
         };
@@ -601,7 +601,7 @@ fn align_is_stretch(alignment_value: style.alignment.AlignItems, is_replaced: bo
     };
 }
 
-fn resolve_dimension_size(value: geometry.Size(style.dimension.Dimension), basis: geometry.Size(?f32)) geometry.Size(?f32) {
+inline fn resolve_dimension_size(value: geometry.Size(style.dimension.Dimension), basis: geometry.Size(?f32)) geometry.Size(?f32) {
     return .{ .width = value.width.resolve(basis.width), .height = value.height.resolve(basis.height) };
 }
 
@@ -676,7 +676,7 @@ test "grid item retains placement and contribution caches" {
         7,
         .{ .start = .{ .value = 1 }, .end = .{ .value = 3 } },
         .{ .start = .{ .value = 0 }, .end = .{ .value = 2 } },
-        &.{},
+        &style.Style{},
         style.alignment.AlignItems.start,
         style.alignment.AlignItems.stretch,
         2);

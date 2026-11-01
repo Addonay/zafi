@@ -251,23 +251,23 @@ pub fn compute_flexbox_layout(comptime Tree: type, tree_ref: *Tree, node_id: Nod
     const node_style = TreeApi.get_style(tree_ref, node_id);
 
     // Pull these out earlier to avoid borrowing issues
-    const contain = node_style.contain;
-    const aspect_ratio = node_style.aspect_ratio;
-    const padding = resolve_length_rect(node_style.padding, parent_size.width);
-    const border = resolve_length_rect(node_style.border, parent_size.width);
+    const contain = node_style.get(.contain);
+    const aspect_ratio = node_style.get(.aspect_ratio);
+    const padding = resolve_length_rect(node_style.get(.padding), parent_size.width);
+    const border = resolve_length_rect(node_style.get(.border), parent_size.width);
     const padding_border_sum = padding.sum_axes().add(border.sum_axes());
-    const box_sizing_adjustment = if (node_style.box_sizing == .content_box) padding_border_sum else geometry.SIZE_F32_ZERO;
+    const box_sizing_adjustment = if (node_style.get(.box_sizing) == .content_box) padding_border_sum else geometry.SIZE_F32_ZERO;
 
     const min_size = size_maybe_add(
-        resolve_auto_size(node_style.min_size, parent_size).maybe_apply_aspect_ratio(aspect_ratio),
+        resolve_auto_size(node_style.get(.min_size), parent_size).maybe_apply_aspect_ratio(aspect_ratio),
         box_sizing_adjustment);
     const max_size = size_maybe_add(
-        resolve_auto_size(node_style.max_size, parent_size).maybe_apply_aspect_ratio(aspect_ratio),
+        resolve_auto_size(node_style.get(.max_size), parent_size).maybe_apply_aspect_ratio(aspect_ratio),
         box_sizing_adjustment);
     const clamped_style_size = if (inputs.sizing_mode == .inherent_size)
         math.optional_size_maybe_clamp(
             size_maybe_add(
-                resolve_dimension_size(node_style.size, parent_size).maybe_apply_aspect_ratio(aspect_ratio),
+                resolve_dimension_size(node_style.get(.size), parent_size).maybe_apply_aspect_ratio(aspect_ratio),
                 box_sizing_adjustment),
             min_size,
             max_size)
@@ -411,7 +411,7 @@ tree_ref,
 
         // Re-resolve percentage gaps
         const inner_container_size = constants.inner_container_size.main(constants.dir);
-        const new_gap = node_style.gap.main(constants.dir).resolve_to_option(inner_container_size) orelse 0.0;
+        const new_gap = node_style.get(.gap).main(constants.dir).resolve_to_option(inner_container_size) orelse 0.0;
         constants.gap.set_main(constants.dir, new_gap);
     }
 
@@ -672,7 +672,7 @@ fn collect_oof_candidates(comptime Tree: type, tree_ref: *Tree,
     while (order < child_count) : (order += 1) {
         const child = try TreeApi.child_at(tree_ref, node, order);
         const child_style = TreeApi.get_style(tree_ref, child);
-        const position = child_style.position;
+        const position = child_style.get(.position);
 
         if (child_style.box_generation_mode() == .none) continue;
         // In-flow item: merge the candidates bubbled out of its subtree
@@ -693,8 +693,8 @@ fn collect_oof_candidates(comptime Tree: type, tree_ref: *Tree,
         }
 
         const align_self = resolve_self_relative(
-            resolve_normal_alignment(child_style.align_self orelse constants.align_items),
-            child_style.direction,
+            resolve_normal_alignment(child_style.get(.align_self) orelse constants.align_items),
+            child_style.get(.direction),
             constants.layout_direction,
             constants.is_column);
 
@@ -780,41 +780,41 @@ fn crossEdgeFor(keyword: style.alignment.AlignItemsKeyword, cross_axis_flex_star
 
 /// Compute constants that can be reused during the flexbox algorithm.
 inline fn compute_constants(comptime Tree: type, tree_ref: *Tree,
-    node_style: *const style.Style,
+    node_style: anytype,
     known_dimensions: Size(?f32),
     known_dimensions_are_definite: Size(bool),
     parent_size: Size(?f32),
     available_space: Size(AvailableSpace)) !AlgoConstants {
     _ = tree_ref;
-    const dir = node_style.flex_direction;
+    const dir = node_style.get(.flex_direction);
     const is_row = dir.is_row();
     const is_column = dir.is_column();
-    const flex_wrap = node_style.flex_wrap;
+    const flex_wrap = node_style.get(.flex_wrap);
     const is_wrap = flex_wrap.is_multi_line();
     const is_wrap_reverse = flex_wrap.is_reverse();
     const is_balance = flex_wrap.is_balance();
-    const line_count: ?u16 = if (is_wrap) @max(node_style.flex_line_count, 1) else null;
+    const line_count: ?u16 = if (is_wrap) @max(node_style.get(.flex_line_count), 1) else null;
 
-    const aspect_ratio = node_style.aspect_ratio;
-    const padding = resolve_length_rect(node_style.padding, parent_size.width);
-    const border = resolve_length_rect(node_style.border, parent_size.width);
+    const aspect_ratio = node_style.get(.aspect_ratio);
+    const padding = resolve_length_rect(node_style.get(.padding), parent_size.width);
+    const border = resolve_length_rect(node_style.get(.border), parent_size.width);
     const padding_border_sum = padding.sum_axes().add(border.sum_axes());
-    const box_sizing_adjustment = if (node_style.box_sizing == .content_box) padding_border_sum else geometry.SIZE_F32_ZERO;
+    const box_sizing_adjustment = if (node_style.get(.box_sizing) == .content_box) padding_border_sum else geometry.SIZE_F32_ZERO;
 
-    const align_items = resolve_normal_alignment(node_style.align_items);
-    const align_content = if (node_style.align_content.keyword == .normal) style.alignment.AlignContent.STRETCH else node_style.align_content;
-    const justify_content = if (node_style.justify_content.keyword == .normal) style.alignment.JustifyContent.FLEX_START else node_style.justify_content;
-    const layout_direction = node_style.direction;
+    const align_items = resolve_normal_alignment(node_style.get(.align_items));
+    const align_content = if (node_style.get(.align_content).keyword == .normal) style.alignment.AlignContent.STRETCH else node_style.get(.align_content);
+    const justify_content = if (node_style.get(.justify_content).keyword == .normal) style.alignment.JustifyContent.FLEX_START else node_style.get(.justify_content);
+    const layout_direction = node_style.get(.direction);
 
     // Scrollbar gutters are reserved when the `overflow` property is set to `Overflow::Scroll`.
     // However, the axis are switched (transposed) because a node that scrolls vertically needs
     // *horizontal* space to be reserved for a scrollbar
-    const transposed_overflow = node_style.overflow.transpose();
+    const transposed_overflow = node_style.get(.overflow).transpose();
     const scrollbar_gutter = Point(f32){
-        .x = if (transposed_overflow.x == .scroll) node_style.scrollbar_width else 0.0,
-        .y = if (transposed_overflow.y == .scroll) node_style.scrollbar_width else 0.0,
+        .x = if (transposed_overflow.x == .scroll) node_style.get(.scrollbar_width) else 0.0,
+        .y = if (transposed_overflow.y == .scroll) node_style.get(.scrollbar_width) else 0.0,
     };
-    const is_scroll_container = node_style.overflow.x.is_scroll_container() or node_style.overflow.y.is_scroll_container();
+    const is_scroll_container = node_style.get(.overflow).x.is_scroll_container() or node_style.get(.overflow).y.is_scroll_container();
     var content_box_inset = padding.add(border);
     content_box_inset.bottom += scrollbar_gutter.y;
 
@@ -830,8 +830,8 @@ inline fn compute_constants(comptime Tree: type, tree_ref: *Tree,
     const has_definite_cross_size = known_dimensions_are_definite.cross(dir) and known_dimensions.cross(dir) != null;
     const cross_axis_available_space_is_definite = has_definite_cross_size or available_space.cross(dir).is_definite();
     const gap = Size(f32){
-        .width = node_style.gap.width.resolve(node_inner_size.width orelse 0),
-        .height = node_style.gap.height.resolve(node_inner_size.height orelse 0),
+        .width = node_style.get(.gap).width.resolve(node_inner_size.width orelse 0),
+        .height = node_style.get(.gap).height.resolve(node_inner_size.height orelse 0),
     };
 
     const container_size = geometry.SIZE_F32_ZERO;
@@ -847,10 +847,10 @@ inline fn compute_constants(comptime Tree: type, tree_ref: *Tree,
         .is_balance = is_balance,
         .line_count = line_count,
         .min_size = size_maybe_add(
-            resolve_auto_size(node_style.min_size, parent_size).maybe_apply_aspect_ratio(aspect_ratio),
+            resolve_auto_size(node_style.get(.min_size), parent_size).maybe_apply_aspect_ratio(aspect_ratio),
             box_sizing_adjustment),
         .max_size = size_maybe_add(
-            resolve_auto_size(node_style.max_size, parent_size).maybe_apply_aspect_ratio(aspect_ratio),
+            resolve_auto_size(node_style.get(.max_size), parent_size).maybe_apply_aspect_ratio(aspect_ratio),
             box_sizing_adjustment),
         .border = border,
         .gap = gap,
@@ -925,49 +925,49 @@ inline fn generate_anonymous_flex_items(comptime Tree: type, tree_ref: *Tree, no
             has_hidden_children.* = true;
             continue;
         }
-        if (child_style.position.is_out_of_flow()) continue;
+        if (child_style.get(.position).is_out_of_flow()) continue;
 
-        const aspect_ratio = child_style.aspect_ratio;
-        const padding = resolve_length_rect(child_style.padding, constants.node_inner_size.width);
-        const border = resolve_length_rect(child_style.border, constants.node_inner_size.width);
+        const aspect_ratio = child_style.get(.aspect_ratio);
+        const padding = resolve_length_rect(child_style.get(.padding), constants.node_inner_size.width);
+        const border = resolve_length_rect(child_style.get(.border), constants.node_inner_size.width);
         const pb_sum = padding.sum_axes().add(border.sum_axes());
-        const box_sizing_adjustment = if (child_style.box_sizing == .content_box) pb_sum else geometry.SIZE_F32_ZERO;
+        const box_sizing_adjustment = if (child_style.get(.box_sizing) == .content_box) pb_sum else geometry.SIZE_F32_ZERO;
 
         try items.append(allocator, FlexItem{
             .node = child,
             .order = @intCast(index),
             .size = size_maybe_add(
-                resolve_dimension_size(child_style.size, percent_resolution_size).maybe_apply_aspect_ratio(aspect_ratio),
+                resolve_dimension_size(child_style.get(.size), percent_resolution_size).maybe_apply_aspect_ratio(aspect_ratio),
                 box_sizing_adjustment),
-            .size_style = child_style.size,
+            .size_style = child_style.get(.size),
             .min_size = size_maybe_add(
-                resolve_auto_size(child_style.min_size, percent_resolution_size),
+                resolve_auto_size(child_style.get(.min_size), percent_resolution_size),
                 box_sizing_adjustment),
             .max_size = size_maybe_add(
-                resolve_auto_size(child_style.max_size, percent_resolution_size),
+                resolve_auto_size(child_style.get(.max_size), percent_resolution_size),
                 box_sizing_adjustment),
             .aspect_ratio = aspect_ratio,
 
-            .relative_inset = if (child_style.position == .relative)
+            .relative_inset = if (child_style.get(.position) == .relative)
                 resolve_relative_inset(
-                    resolve_auto_rect_size_to_option(child_style.inset, constants.node_inner_size),
+                    resolve_auto_rect_size_to_option(child_style.get(.inset), constants.node_inner_size),
                     constants)
             else
                 geometry.SIZE_F32_ZERO,
-            .margin = resolve_auto_rect(child_style.margin, constants.node_inner_size.width),
-            .margin_is_auto = auto_rect(child_style.margin),
+            .margin = resolve_auto_rect(child_style.get(.margin), constants.node_inner_size.width),
+            .margin_is_auto = auto_rect(child_style.get(.margin)),
             .padding = padding,
             .border = border,
             .align_self = resolve_self_relative(
-                resolve_normal_alignment(child_style.align_self orelse constants.align_items),
-                child_style.direction,
+                resolve_normal_alignment(child_style.get(.align_self) orelse constants.align_items),
+                child_style.get(.direction),
                 constants.layout_direction,
                 constants.is_column),
-            .overflow = child_style.overflow,
-            .contain = child_style.contain,
-            .scrollbar_width = child_style.scrollbar_width,
-            .flex_grow = child_style.flex_grow,
-            .flex_shrink = child_style.flex_shrink,
+            .overflow = child_style.get(.overflow),
+            .contain = child_style.get(.contain),
+            .scrollbar_width = child_style.get(.scrollbar_width),
+            .flex_grow = child_style.get(.flex_grow),
+            .flex_shrink = child_style.get(.flex_shrink),
             .flex_basis_is_definite = false,
             .flex_basis = 0.0,
             .inner_flex_basis = 0.0,
@@ -1108,7 +1108,7 @@ inline fn determine_flex_base_size(comptime Tree: type, tree_ref: *Tree,
         }
 
         // The item's padding and border were resolved once when the flex items were generated
-        const box_sizing_adjustment = if (child_style.box_sizing == .content_box)
+        const box_sizing_adjustment = if (child_style.get(.box_sizing) == .content_box)
             child.padding.sum_axes().add(child.border.sum_axes()).main(dir)
         else
             0.0;
@@ -1117,7 +1117,7 @@ inline fn determine_flex_base_size(comptime Tree: type, tree_ref: *Tree,
         // content is treated as indefinite here.
         const percent_resolution_main_size =
             if (constants.known_main_size_is_definite) constants.node_inner_size.main(dir) else null;
-        const flex_basis_style = child_style.flex_basis;
+        const flex_basis_style = child_style.get(.flex_basis);
         const resolved_flex_basis = math.maybe_add(
             flex_basis_style.resolve(percent_resolution_main_size),
             box_sizing_adjustment);
@@ -2287,7 +2287,7 @@ inline fn determine_used_cross_size(comptime Tree: type, tree_ref: *Tree,
             const should_stretch = !child.margin_is_auto.cross_start(constants.dir) and
                 !child.margin_is_auto.cross_end(constants.dir) and
                 (cross_is_stretch or
-                    (is_stretch_alignment(child.align_self) and child_style.size.cross(constants.dir).is_auto()));
+                    (is_stretch_alignment(child.align_self) and child_style.get(.size).cross(constants.dir).is_auto()));
             child.target_size.set_cross(
                 constants.dir,
                 if (should_stretch) blk: {
@@ -2295,10 +2295,10 @@ inline fn determine_used_cross_size(comptime Tree: type, tree_ref: *Tree,
                     // using the aspect_ratio (if set). Both Chrome and Firefox agree on this. And reading the spec, it seems like
                     // a reasonable interpretation. Although it seems to me that the spec *should* apply aspect_ratio here.
                     const pb_sum = child.padding.sum_axes().add(child.border.sum_axes());
-                    const box_sizing_adjustment = if (child_style.box_sizing == .content_box) pb_sum else geometry.SIZE_F32_ZERO;
+                    const box_sizing_adjustment = if (child_style.get(.box_sizing) == .content_box) pb_sum else geometry.SIZE_F32_ZERO;
 
                     const max_size_ignoring_aspect_ratio = size_maybe_add(
-                        resolve_auto_size(child_style.max_size, constants.node_inner_size),
+                        resolve_auto_size(child_style.get(.max_size), constants.node_inner_size),
                         box_sizing_adjustment);
 
                     break :blk math.f32_maybe_clamp(

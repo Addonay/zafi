@@ -51,25 +51,21 @@ pub const LengthPercentage = struct {
         return .{ .value = compact_length.CompactLength.calc(pointer) };
     }
 
-    pub fn resolve(self: LengthPercentage, basis: f32) f32 {
-        if (self.value.tag() == .calc) return calc_resolver.resolve(self.value.calc_value(), basis);
+    pub inline fn resolve(self: LengthPercentage, basis: f32) f32 {
         return switch (self.value.tag()) {
             .length => self.value.value(),
             .percent => self.value.value() * basis,
-            // Tree's default calc resolver returns 0; other non-definite
-            // values resolve to zero through `ResolveOrZero`.
-            .calc => 0,
+            .calc => calc_resolver.resolve(self.value.calc_value(), basis),
             else => 0,
         };
     }
 
-    pub fn resolve_to_option(self: LengthPercentage, basis: ?f32) ?f32 {
+    pub inline fn resolve_to_option(self: LengthPercentage, basis: ?f32) ?f32 {
         // Like Taffy, a calc value needs a definite basis.
-        if (self.value.tag() == .calc) return if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null;
         return switch (self.value.tag()) {
             .length => self.value.value(),
             .percent => if (basis) |b| self.value.value() * b else null,
-            .calc => 0,
+            .calc => if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null,
             else => null,
         };
     }
@@ -129,25 +125,23 @@ pub const LengthPercentageAuto = struct {
         return .{ .value = compact_length.CompactLength.calc(pointer) };
     }
 
-    pub fn resolve(self: LengthPercentageAuto, basis: f32) ?f32 {
-        if (self.value.tag() == .calc) return calc_resolver.resolve(self.value.calc_value(), basis);
+    pub inline fn resolve(self: LengthPercentageAuto, basis: f32) ?f32 {
         return switch (self.value.tag()) {
             .auto => null,
             .length => self.value.value(),
             .percent => self.value.value() * basis,
-            .calc => 0,
+            .calc => calc_resolver.resolve(self.value.calc_value(), basis),
             else => 0,
         };
     }
 
-    pub fn resolve_to_option(self: LengthPercentageAuto, basis: ?f32) ?f32 {
+    pub inline fn resolve_to_option(self: LengthPercentageAuto, basis: ?f32) ?f32 {
         // Like Taffy, a calc value needs a definite basis.
-        if (self.value.tag() == .calc) return if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null;
         return switch (self.value.tag()) {
             .auto => null,
             .length => self.value.value(),
             .percent => if (basis) |b| self.value.value() * b else null,
-            .calc => 0,
+            .calc => if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null,
             else => null,
         };
     }
@@ -246,12 +240,11 @@ pub const Dimension = struct {
         return self.value.is_fit_content_calc();
     }
 
-    pub fn resolve(self: Dimension, basis: ?f32) ?f32 {
-        if (self.value.tag() == .calc) return if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null;
+    pub inline fn resolve(self: Dimension, basis: ?f32) ?f32 {
         return switch (self.value.tag()) {
             .length => self.value.value(),
             .percent => if (basis) |b| self.value.value() * b else null,
-            .calc => 0,
+            .calc => if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null,
             else => null,
         };
     }

@@ -28,7 +28,16 @@ const OptionalSize = geometry.Size(?f32);
 /// Compute a leaf's output from a Taffy-style input and a size callback.
 pub fn compute_leaf_layout(
     inputs: layout.LayoutInput,
-    node_style: *const style.Style,
+    node_style: anytype,
+    context: ?*anyopaque,
+    measure_function: ?SizeMeasureFunc,
+) layout.LayoutOutput {
+    return computeLeafLayout(inputs, style.view.of(node_style), context, measure_function);
+}
+
+fn computeLeafLayout(
+    inputs: layout.LayoutInput,
+    node_style: anytype,
     context: ?*anyopaque,
     measure_function: ?SizeMeasureFunc,
 ) layout.LayoutOutput {
@@ -37,11 +46,11 @@ pub fn compute_leaf_layout(
 
     // Both horizontal and vertical percentage padding/borders resolve against
     // the container's inline size (i.e. width), per CSS.
-    const padding = resolveLengthEdges(node_style.padding, parent_size.width);
-    const border = resolveLengthEdges(node_style.border, parent_size.width);
+    const padding = resolveLengthEdges(node_style.get(.padding), parent_size.width);
+    const border = resolveLengthEdges(node_style.get(.border), parent_size.width);
     const padding_border = addRect(padding, border);
     const pb_sum = F32Size{ .width = padding_border.horizontal_axis_sum(), .height = padding_border.vertical_axis_sum() };
-    const box_sizing_adjustment = if (node_style.box_sizing == .content_box) pb_sum else F32Size{ .width = 0, .height = 0 };
+    const box_sizing_adjustment = if (node_style.get(.box_sizing) == .content_box) pb_sum else F32Size{ .width = 0, .height = 0 };
 
     // Resolve preferred/min/max sizes. In ContentSize mode size styles are ignored.
     var node_size: OptionalSize = undefined;
@@ -55,10 +64,10 @@ pub fn compute_leaf_layout(
             node_max_size = .{ .width = null, .height = null };
         },
         .inherent_size => {
-            aspect_ratio = node_style.aspect_ratio;
-            const style_size = addSize(applyAspectRatio(resolveDimensionSize(node_style.size, parent_size), aspect_ratio), box_sizing_adjustment);
-            const style_min_size = addSize(applyAspectRatio(resolveAutoSize(node_style.min_size, parent_size), aspect_ratio), box_sizing_adjustment);
-            const style_max_size = addSize(resolveAutoSize(node_style.max_size, parent_size), box_sizing_adjustment);
+            aspect_ratio = node_style.get(.aspect_ratio);
+            const style_size = addSize(applyAspectRatio(resolveDimensionSize(node_style.get(.size), parent_size), aspect_ratio), box_sizing_adjustment);
+            const style_min_size = addSize(applyAspectRatio(resolveAutoSize(node_style.get(.min_size), parent_size), aspect_ratio), box_sizing_adjustment);
+            const style_max_size = addSize(resolveAutoSize(node_style.get(.max_size), parent_size), box_sizing_adjustment);
             node_size = optionalOr(known_dimensions, style_size);
             node_min_size = style_min_size;
             node_max_size = style_max_size;
@@ -68,18 +77,18 @@ pub fn compute_leaf_layout(
     // Scrollbar gutters reserve transposed space: a vertical scrollbar needs
     // horizontal room, and vice versa.
     const scrollbar_gutter = geometry.Point(f32){
-        .x = if (node_style.overflow.y == .scroll) node_style.scrollbar_width else 0,
-        .y = if (node_style.overflow.x == .scroll) node_style.scrollbar_width else 0,
+        .x = if (node_style.get(.overflow).y == .scroll) node_style.get(.scrollbar_width) else 0,
+        .y = if (node_style.get(.overflow).x == .scroll) node_style.get(.scrollbar_width) else 0,
     };
     var content_box_inset = padding_border;
     content_box_inset.right += scrollbar_gutter.x;
     content_box_inset.bottom += scrollbar_gutter.y;
 
     const has_styles_preventing_being_collapsed_through = !node_style.is_block() or
-        node_style.overflow.x.is_scroll_container() or
-        node_style.overflow.y.is_scroll_container() or
-        node_style.position.is_out_of_flow() or
-        node_style.contain.establishes_independent_formatting_context() or
+        node_style.get(.overflow).x.is_scroll_container() or
+        node_style.get(.overflow).y.is_scroll_container() or
+        node_style.get(.position).is_out_of_flow() or
+        node_style.get(.contain).establishes_independent_formatting_context() or
         padding.top > 0 or
         padding.bottom > 0 or
         border.top > 0 or
@@ -123,8 +132,8 @@ pub fn compute_leaf_layout(
     const maxed = math.optional_size_maybe_max(.{ .width = size.width, .height = size.height }, .{ .width = pb_sum.width, .height = pb_sum.height });
     const maxed_size = F32Size{ .width = maxed.width.?, .height = maxed.height.? };
 
-    const is_scroll_container = node_style.overflow.x.is_scroll_container() or node_style.overflow.y.is_scroll_container();
-    const is_rtl = node_style.direction == .rtl;
+    const is_scroll_container = node_style.get(.overflow).x.is_scroll_container() or node_style.get(.overflow).y.is_scroll_container();
+    const is_rtl = node_style.get(.direction) == .rtl;
     const start_padding = if (is_rtl) padding.right else padding.left;
     const end_padding = if (is_rtl) padding.left else padding.right;
     // Physical coordinates in the client area; RTL content ends at the right edge (Taffy c256056)

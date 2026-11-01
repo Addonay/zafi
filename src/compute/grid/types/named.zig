@@ -220,7 +220,7 @@ pub const NamedLineResolver = struct {
     row_line_name_pairs: std.ArrayListUnmanaged(LineNamePair) = .empty,
 
     /// Create and initialise a `NamedLineResolver` from a style.
-    pub fn init(backing_allocator: std.mem.Allocator, item_style: *const style.Style, column_auto_repetitions: u16, row_auto_repetitions: u16) !NamedLineResolver {
+    pub fn init(backing_allocator: std.mem.Allocator, item_style: anytype, column_auto_repetitions: u16, row_auto_repetitions: u16) !NamedLineResolver {
         var result = NamedLineResolver{ .arena = std.heap.ArenaAllocator.init(backing_allocator) };
         // Any failure below must release the arena: the caller never receives a
         // partially-initialised resolver to `deinit`.
@@ -232,7 +232,7 @@ pub const NamedLineResolver = struct {
         result.area_column_count_value = item_style.grid_template_area_column_count();
         result.area_row_count_value = item_style.grid_template_area_row_count();
         // Areas first: line names ending in -start/-end may extend them.
-        if (item_style.grid_template_areas) |areas| {
+        if (item_style.get(.grid_template_areas)) |areas| {
             for (areas.areas) |area| {
                 try result.areas.put(allocator, area.name, .{
                     .row_start = area.row_start,
@@ -243,8 +243,8 @@ pub const NamedLineResolver = struct {
             }
         }
 
-        try init_axis(&result, allocator, .horizontal, item_style.grid_template_columns, item_style.grid_template_column_names, column_auto_repetitions);
-        try init_axis(&result, allocator, .vertical, item_style.grid_template_rows, item_style.grid_template_row_names, row_auto_repetitions);
+        try init_axis(&result, allocator, .horizontal, item_style.get(.grid_template_columns), item_style.get(.grid_template_column_names), column_auto_repetitions);
+        try init_axis(&result, allocator, .vertical, item_style.get(.grid_template_rows), item_style.get(.grid_template_row_names), row_auto_repetitions);
 
         sort_and_dedup_map(&result.column_lines);
         sort_and_dedup_map(&result.row_lines);
@@ -521,7 +521,7 @@ test "named grid lines resolve positive and negative occurrences" {
 
 test "missing named lines fall back to implicit grid lines" {
     const testing = std.testing;
-    var resolver = try NamedLineResolver.init(testing.allocator, &.{}, 0, 0);
+    var resolver = try NamedLineResolver.init(testing.allocator, &style.Style{}, 0, 0);
     defer resolver.deinit();
     resolver.set_explicit_column_count(10_000);
     // Lines are clamped to the grid limits, as GridLine.into_origin_zero_line does (Taffy 6ba5515)

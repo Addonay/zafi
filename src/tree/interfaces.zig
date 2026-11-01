@@ -207,6 +207,15 @@ pub fn LayoutTree(comptime Self: type) type {
             return tree.scratch_allocator_impl();
         }
 
+        /// Allocator for algorithm temporaries that may outgrow the scratch
+        /// stack's last-in-first-out discipline (freed before the algorithm
+        /// returns): the host's `allocator` field when it has one, otherwise
+        /// its scratch allocator.
+        pub inline fn general_allocator(tree: *Self) std.mem.Allocator {
+            if (comptime @hasField(Self, "allocator")) return tree.allocator;
+            return scratch_allocator(tree);
+        }
+
         /// Called when a top-level layout pass begins (a pass that is not nested
         /// inside another pass). The host resets its scratch allocator here.
         ///
@@ -235,11 +244,30 @@ pub fn LayoutTree(comptime Self: type) type {
         ///
         /// Non-optional, matching Taffy's `get_*_style`, which assumes the id is
         /// live: the algorithms only ever ask about ids they walked to.
-        pub inline fn get_style(tree: *const Self, node_id: NodeId) *const style.Style {
+        ///
+        /// The host may return a pointer to its own style type instead of
+        /// `zafi.Style`: the algorithms then read it through
+        /// `style.view.View(HostStyle)` (see `style/view.zig`), the counterpart
+        /// of Taffy's style traits.
+        pub inline fn get_style(tree: *const Self, node_id: NodeId) StyleRef {
             comptime require_method(Self, "get_style");
-            if (comptime @hasDecl(Self, "get_style")) return tree.get_style(node_id);
-            return tree.get_style_impl(node_id);
+            if (comptime @hasDecl(Self, "get_style")) return style.view.wrap(HostStyle, tree.get_style(node_id));
+            return style.view.wrap(HostStyle, tree.get_style_impl(node_id));
         }
+
+        /// The host's style type: what its `get_style` points to.
+        pub const HostStyle = blk: {
+            const getter = if (@hasDecl(Self, "get_style")) Self.get_style else Self.get_style_impl;
+            const Return = @typeInfo(@TypeOf(getter)).@"fn".return_type.?;
+            const info = @typeInfo(Return);
+            if (info != .pointer or info.pointer.size != .one)
+                @compileError(@typeName(Self) ++ ".get_style must return `*const StyleType`, found " ++ @typeName(Return));
+            break :blk info.pointer.child;
+        };
+
+        /// How the algorithms hold a style: `*const Style`, or a view of the
+        /// host's style type.
+        pub const StyleRef = style.view.Ref(HostStyle);
 
         /// Resolve a `calc()` length against `basis`, or return null when this host
         /// has no expression engine.

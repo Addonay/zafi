@@ -9,7 +9,7 @@ pub const sizing_keyword = @import("sizing_keyword.zig");
 
 /// Resolve a `Rect<LengthPercentage>` against an optional basis. Percentages
 /// against an indefinite basis resolve to zero, matching `ResolveOrZero`.
-pub fn resolve_length_rect(value: geometry.Rect(dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
+pub inline fn resolve_length_rect(value: geometry.Rect(dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
     const resolved_basis = basis orelse 0;
     return .{
         .left = value.left.resolve(resolved_basis),

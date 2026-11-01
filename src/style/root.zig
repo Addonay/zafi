@@ -16,6 +16,7 @@ pub const dimension = @import("dimension.zig");
 pub const flex = @import("flex.zig");
 pub const float = @import("float.zig");
 pub const grid = @import("grid.zig");
+pub const view = @import("view.zig");
 
 pub const Display = enum {
     /// Taffy-compatible serde: PascalCase variant names.
@@ -481,6 +482,13 @@ pub const BlockItemStyle = struct {
 };
 
 pub const Style = struct {
+    /// Read a property. The layout algorithms read every property this way so
+    /// they also run on host style types (see `view.zig`); for `Style` itself it
+    /// is a plain field load.
+    pub inline fn get(self: *const Style, comptime field: view.Field) view.FieldType(field) {
+        return @field(self, @tagName(field));
+    }
+
     /// Mirrors Rust's `dummy: PhantomData<S>` field, which serde emits as
     /// `"dummy": null`; keeping it preserves Taffy's wire field order.
     dummy: void = {},

@@ -410,25 +410,25 @@ pub fn compute_block_layout(comptime Tree: type, tree_ref: *Tree,
     const style_value = TreeApi.get_style(tree_ref, node_id);
 
     // Pull these out earlier to avoid borrowing issues
-    const overflow = style_value.overflow;
+    const overflow = style_value.get(.overflow);
     const is_scroll_container = overflow.x.is_scroll_container() or overflow.y.is_scroll_container();
-    const contain = style_value.contain;
+    const contain = style_value.get(.contain);
     // css-align-3 §5.1.1: a non-`normal` `align-content` makes a block container establish an
     // independent formatting context. Layout and paint containment also establish one.
     const establishes_new_bfc =
-        is_scroll_container or style_value.align_content.keyword != .normal or contain.establishes_independent_formatting_context();
-    const aspect_ratio = style_value.aspect_ratio;
-    const padding = resolveOrZeroRect(style_value.padding, parent_size.width);
-    const border = resolveOrZeroRect(style_value.border, parent_size.width);
+        is_scroll_container or style_value.get(.align_content).keyword != .normal or contain.establishes_independent_formatting_context();
+    const aspect_ratio = style_value.get(.aspect_ratio);
+    const padding = resolveOrZeroRect(style_value.get(.padding), parent_size.width);
+    const border = resolveOrZeroRect(style_value.get(.border), parent_size.width);
     const padding_border_size = padding.add(border).sum_axes();
     const box_sizing_adjustment =
-        if (style_value.box_sizing == .content_box) padding_border_size else geometry.Size(f32){ .width = 0, .height = 0 };
+        if (style_value.get(.box_sizing) == .content_box) padding_border_size else geometry.Size(f32){ .width = 0, .height = 0 };
 
-    const min_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(style_value.min_size, parent_size), aspect_ratio), box_sizing_adjustment);
-    const max_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(style_value.max_size, parent_size), aspect_ratio), box_sizing_adjustment);
+    const min_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(style_value.get(.min_size), parent_size), aspect_ratio), box_sizing_adjustment);
+    const max_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(style_value.get(.max_size), parent_size), aspect_ratio), box_sizing_adjustment);
     const clamped_style_size = if (inputs.sizing_mode == .inherent_size)
         math.optional_size_maybe_clamp(
-            maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveDimensionSize(style_value.size, parent_size), aspect_ratio), box_sizing_adjustment),
+            maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveDimensionSize(style_value.get(.size), parent_size), aspect_ratio), box_sizing_adjustment),
             min_size,
             max_size)
     else
@@ -465,7 +465,7 @@ pub fn compute_block_layout(comptime Tree: type, tree_ref: *Tree,
     if (block_ctx != null and !establishes_new_bfc) {
         output = try compute_inner(Tree, tree_ref, node_id, forwarded_inputs, block_ctx.?);
     } else {
-        var root_bfc = BlockFormattingContext.new(tree_ref.allocator);
+        var root_bfc = BlockFormattingContext.new(LayoutTree(Tree).general_allocator(tree_ref));
         defer root_bfc.deinit();
         var root_ctx = root_bfc.root_block_context();
         output = try compute_inner(Tree, tree_ref, node_id, forwarded_inputs, &root_ctx);
@@ -510,21 +510,21 @@ fn compute_inner(comptime Tree: type, tree_ref: *Tree,
     const vertical_margins_are_collapsible = inputs.vertical_margins_are_collapsible;
 
     const style_value = TreeApi.get_style(tree_ref, node_id);
-    const raw_padding = style_value.padding;
-    const raw_border = style_value.border;
-    const raw_margin = style_value.margin;
-    const aspect_ratio = style_value.aspect_ratio;
+    const raw_padding = style_value.get(.padding);
+    const raw_border = style_value.get(.border);
+    const raw_margin = style_value.get(.margin);
+    const aspect_ratio = style_value.get(.aspect_ratio);
     const padding = resolveOrZeroRect(raw_padding, parent_size.width);
     const border = resolveOrZeroRect(raw_border, parent_size.width);
-    const direction = style_value.direction;
+    const direction = style_value.get(.direction);
 
     // Scrollbar gutters are reserved when the `overflow` property is set to `Overflow::Scroll`.
     // However, the axis are switched (transposed) because a node that scrolls vertically needs
     // *horizontal* space to be reserved for a scrollbar
     const scrollbar_gutter = blk: {
         const offsets = geometry.Point(f32){
-            .x = if (style_value.overflow.y == .scroll) style_value.scrollbar_width else 0,
-            .y = if (style_value.overflow.x == .scroll) style_value.scrollbar_width else 0,
+            .x = if (style_value.get(.overflow).y == .scroll) style_value.get(.scrollbar_width) else 0,
+            .y = if (style_value.get(.overflow).x == .scroll) style_value.get(.scrollbar_width) else 0,
         };
         break :blk switch (direction) {
             .ltr => geometry.Rect(f32){ .top = 0, .left = 0, .right = offsets.x, .bottom = offsets.y },
@@ -539,10 +539,10 @@ fn compute_inner(comptime Tree: type, tree_ref: *Tree,
     block_ctx.apply_content_box_inset(.{ content_box_inset.left, content_box_inset.right });
 
     const box_sizing_adjustment =
-        if (style_value.box_sizing == .content_box) padding_border_size else geometry.Size(f32){ .width = 0, .height = 0 };
-    const size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveDimensionSize(style_value.size, parent_size), aspect_ratio), box_sizing_adjustment);
-    const min_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(style_value.min_size, parent_size), aspect_ratio), box_sizing_adjustment);
-    const max_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(style_value.max_size, parent_size), aspect_ratio), box_sizing_adjustment);
+        if (style_value.get(.box_sizing) == .content_box) padding_border_size else geometry.Size(f32){ .width = 0, .height = 0 };
+    const size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveDimensionSize(style_value.get(.size), parent_size), aspect_ratio), box_sizing_adjustment);
+    const min_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(style_value.get(.min_size), parent_size), aspect_ratio), box_sizing_adjustment);
+    const max_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(style_value.get(.max_size), parent_size), aspect_ratio), box_sizing_adjustment);
 
     // css-sizing-4: a definite size in one axis transfers through `aspect-ratio`
     // to make the other definite.
@@ -559,27 +559,27 @@ fn compute_inner(comptime Tree: type, tree_ref: *Tree,
     };
     const container_content_box_size = maybeSubSize(percentage_basis_dimensions, content_box_inset.sum_axes());
 
-    const overflow = style_value.overflow;
+    const overflow = style_value.get(.overflow);
     const is_scroll_container = overflow.x.is_scroll_container() or overflow.y.is_scroll_container();
-    const establishes_new_bfc = is_scroll_container or style_value.align_content.keyword != .normal or style_value.contain.establishes_independent_formatting_context() or style_value.establishes_formatting_context_from_display();
+    const establishes_new_bfc = is_scroll_container or style_value.get(.align_content).keyword != .normal or style_value.get(.contain).establishes_independent_formatting_context() or style_value.establishes_formatting_context_from_display();
 
     // Determine margin collapsing behaviour
     //
     // Whether a child's margins could collapse through each of this box's block-axis edges: the
     // box does not establish a new BFC and has neither border nor padding on that side.
     const children_margins_adjoin_own_edges = geometry.Line(bool){
-        .start = vertical_margins_are_collapsible.start and !establishes_new_bfc and !style_value.position.is_out_of_flow() and padding.top == 0.0 and border.top == 0.0,
-        .end = vertical_margins_are_collapsible.end and !establishes_new_bfc and !style_value.position.is_out_of_flow() and padding.bottom == 0.0 and border.bottom == 0.0,
+        .start = vertical_margins_are_collapsible.start and !establishes_new_bfc and !style_value.get(.position).is_out_of_flow() and padding.top == 0.0 and border.top == 0.0,
+        .end = vertical_margins_are_collapsible.end and !establishes_new_bfc and !style_value.get(.position).is_out_of_flow() and padding.bottom == 0.0 and border.bottom == 0.0,
     };
     const own_margins_collapse_with_children = geometry.Line(bool){
         .start = children_margins_adjoin_own_edges.start,
         .end = children_margins_adjoin_own_edges.end and size.height == null,
     };
-    const has_styles_preventing_being_collapsed_through = !style_value.is_block() or block_ctx.is_bfc_root() or establishes_new_bfc or style_value.position.is_out_of_flow() or padding.top > 0.0 or padding.bottom > 0.0 or border.top > 0.0 or border.bottom > 0.0;
+    const has_styles_preventing_being_collapsed_through = !style_value.is_block() or block_ctx.is_bfc_root() or establishes_new_bfc or style_value.get(.position).is_out_of_flow() or padding.top > 0.0 or padding.bottom > 0.0 or border.top > 0.0 or border.bottom > 0.0;
 
-    const text_align = style_value.text_align;
-    const align_content = style_value.align_content;
-    const justify_items = style_value.justify_items;
+    const text_align = style_value.get(.text_align);
+    const align_content = style_value.get(.align_content);
+    const justify_items = style_value.get(.justify_items);
 
     // 1. Generate items
     //
@@ -588,7 +588,7 @@ fn compute_inner(comptime Tree: type, tree_ref: *Tree,
     // buffer must outlive the recursive child layout below, hence its declaration here rather
     // than inside `generate_item_list`.
     var item_buffer: [8]BlockItem = undefined;
-    var item_allocator_buffer = std.heap.BufferFirstAllocator.init(std.mem.sliceAsBytes(item_buffer[0..]), tree_ref.allocator);
+    var item_allocator_buffer = std.heap.BufferFirstAllocator.init(std.mem.sliceAsBytes(item_buffer[0..]), LayoutTree(Tree).general_allocator(tree_ref));
     const items_allocator = item_allocator_buffer.allocator();
     var items = try generate_item_list(Tree, tree_ref, node_id, container_content_box_size, items_allocator);
     defer items.list.deinit(items_allocator);
@@ -874,26 +874,26 @@ fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
         }
         const order: u32 = visible_order;
         visible_order += 1;
-        const aspect_ratio = child_style.aspect_ratio;
+        const aspect_ratio = child_style.get(.aspect_ratio);
         // Percentage padding and border resolve against the container's inline size
         // (its width) on all four sides.
-        const padding = resolveOrZeroRect(child_style.padding, node_inner_size.width);
-        const border = resolveOrZeroRect(child_style.border, node_inner_size.width);
+        const padding = resolveOrZeroRect(child_style.get(.padding), node_inner_size.width);
+        const border = resolveOrZeroRect(child_style.get(.border), node_inner_size.width);
         const pb_sum = padding.add(border).sum_axes();
         const box_sizing_adjustment =
-            if (child_style.box_sizing == .content_box) pb_sum else geometry.Size(f32){ .width = 0, .height = 0 };
+            if (child_style.get(.box_sizing) == .content_box) pb_sum else geometry.Size(f32){ .width = 0, .height = 0 };
 
-        const position = child_style.position;
-        const overflow = child_style.overflow;
+        const position = child_style.get(.position);
+        const overflow = child_style.get(.overflow);
 
-        const float_value = child_style.float;
+        const float_value = child_style.get(.float);
         const is_not_floated = float_value == .none;
 
         const is_block = child_style.is_block();
         const is_table = child_style.is_table();
         const is_compressible_replaced = child_style.is_compressible_replaced();
         const is_scroll_container = overflow.x.is_scroll_container() or overflow.y.is_scroll_container();
-        const contain = child_style.contain;
+        const contain = child_style.get(.contain);
 
         const is_in_same_bfc: bool = is_block and
             !is_table and
@@ -903,7 +903,7 @@ fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
             !contain.establishes_independent_formatting_context() and
             !child_style.establishes_formatting_context_from_display() and
             // A non-normal align-content establishes an independent formatting context
-            child_style.align_content.keyword == .normal;
+            child_style.get(.align_content).keyword == .normal;
 
         try item_list.list.append(allocator, .{
             .node_id = child_node_id,
@@ -913,20 +913,20 @@ fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
             .is_in_same_bfc = is_in_same_bfc,
             .is_leaf = child_count_value == 0,
             .float = float_value,
-            .clear = child_style.clear,
-            .size_style = child_style.size,
-            .size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveDimensionSize(child_style.size, node_inner_size), aspect_ratio), box_sizing_adjustment),
-            .min_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(child_style.min_size, node_inner_size), aspect_ratio), box_sizing_adjustment),
-            .max_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(child_style.max_size, node_inner_size), aspect_ratio), box_sizing_adjustment),
+            .clear = child_style.get(.clear),
+            .size_style = child_style.get(.size),
+            .size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveDimensionSize(child_style.get(.size), node_inner_size), aspect_ratio), box_sizing_adjustment),
+            .min_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(child_style.get(.min_size), node_inner_size), aspect_ratio), box_sizing_adjustment),
+            .max_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(child_style.get(.max_size), node_inner_size), aspect_ratio), box_sizing_adjustment),
             .overflow = overflow,
             .contain = contain,
-            .scrollbar_width = child_style.scrollbar_width,
+            .scrollbar_width = child_style.get(.scrollbar_width),
             .position = position,
-            .direction = child_style.direction,
-            .align_self = child_style.align_self,
-            .justify_self = child_style.justify_self,
-            .inset = child_style.inset,
-            .margin = child_style.margin,
+            .direction = child_style.get(.direction),
+            .align_self = child_style.get(.align_self),
+            .justify_self = child_style.get(.justify_self),
+            .inset = child_style.get(.inset),
+            .margin = child_style.get(.margin),
             .padding = padding,
             .border = border,
             .padding_border_sum = pb_sum,
