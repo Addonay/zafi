@@ -15,28 +15,31 @@ pub const ClearState = enum { already_empty, cleared };
 
 pub const CacheKey = struct {
     kd_available_space: u64,
+    /// Both parent-size components as full f32 bits. Taffy borrows the f32
+    /// sign bits here to encode the requested axis, which makes a negative
+    /// parent size (possible when padding exceeds a known size) alias its
+    /// positive counterpart; zafi keeps the axis separately.
     parent_size: u64,
+    axis: AxisBits,
     known_dimensions_are_definite: geometry.Size(bool),
 
     pub fn eql(self: CacheKey, other: CacheKey) bool {
-        return self.kd_available_space == other.kd_available_space and self.parent_size == other.parent_size and self.known_dimensions_are_definite.width == other.known_dimensions_are_definite.width and self.known_dimensions_are_definite.height == other.known_dimensions_are_definite.height;
+        return self.kd_available_space == other.kd_available_space and self.parent_size == other.parent_size and self.axis == other.axis and self.known_dimensions_are_definite.width == other.known_dimensions_are_definite.width and self.known_dimensions_are_definite.height == other.known_dimensions_are_definite.height;
     }
 
-    pub fn parent_size_value(self: CacheKey) u64 {
-        return self.parent_size & ~(@as(u64, 1) << 63 | @as(u64, 1) << 31);
-    }
-    pub fn x_axis_parent_size(self: CacheKey) u64 {
-        return self.parent_size & ((@as(u64, 0xffff_ffff) << 32) & ~(@as(u64, 1) << 63 | @as(u64, 1) << 31));
-    }
-    pub fn requested_axis_bits(self: CacheKey) u64 {
-        return self.parent_size & (@as(u64, 1) << 63 | @as(u64, 1) << 31);
-    }
+    /// Whether a size computed for `self`'s requested axis serves `other`'s.
     pub fn size_is_valid_for(self: CacheKey, other: CacheKey) bool {
-        const both = (@as(u64, 1) << 63) | (@as(u64, 1) << 31);
-        const axis = self.requested_axis_bits();
-        return axis == both or axis == other.requested_axis_bits();
+        return axisServes(self.axis, other.axis);
     }
 };
+
+/// The requested axis of a cached computation: bit 0 horizontal, bit 1 vertical.
+pub const AxisBits = u2;
+const axis_both: AxisBits = 3;
+
+inline fn axisServes(cached: AxisBits, requested: AxisBits) bool {
+    return cached == axis_both or cached == requested;
+}
 
 /// Taffy's `CacheMode`: the layout inputs that affect a node's layout but are
 /// not part of the `CacheKey` (sizing mode and vertical margin
@@ -102,14 +105,14 @@ fn size_mixed_cache_key(known_dimensions: geometry.Size(?f32), available_space: 
 }
 
 pub fn cache_key(input: layout.LayoutInput) CacheKey {
-    const axis_bits: u64 = switch (input.axis) {
-        .horizontal => @as(u64, 1) << 63,
-        .vertical => @as(u64, 1) << 31,
-        .both => (@as(u64, 1) << 63) | (@as(u64, 1) << 31),
-    };
     return .{
         .kd_available_space = size_mixed_cache_key(input.known_dimensions, input.available_space),
-        .parent_size = (size_option_cache_key(input.parent_size) & ~((@as(u64, 1) << 63) | (@as(u64, 1) << 31))) | axis_bits,
+        .parent_size = size_option_cache_key(input.parent_size),
+        .axis = switch (input.axis) {
+            .horizontal => 1,
+            .vertical => 2,
+            .both => axis_both,
+        },
         .known_dimensions_are_definite = .{
             // Taffy normalizes to `is_definite || known_dimensions.is_none()`:
             // an absent known dimension counts as definite.
@@ -119,8 +122,8 @@ pub fn cache_key(input: layout.LayoutInput) CacheKey {
     };
 }
 
-/// The packed key without the definiteness flags, which live in
-/// `Cache.definite` (2 bits per entry) so each key is 16 bytes.
+/// The key without the definiteness and axis flags, which live in
+/// `Cache.flags` (4 bits per entry) so each key is 16 bytes.
 const PackedKey = struct {
     kd_available_space: u64,
     parent_size: u64,
@@ -128,23 +131,15 @@ const PackedKey = struct {
     inline fn from(key: CacheKey) PackedKey {
         return .{ .kd_available_space = key.kd_available_space, .parent_size = key.parent_size };
     }
-    /// The parent size (both axes) without the requested-axis bits.
-    inline fn parent_size_value(self: PackedKey) u64 {
-        return self.parent_size & ~(@as(u64, 1) << 63 | @as(u64, 1) << 31);
-    }
-    inline fn x_axis_parent_size(self: PackedKey) u64 {
-        return self.parent_size & ((@as(u64, 0xffff_ffff) << 32) & ~(@as(u64, 1) << 63 | @as(u64, 1) << 31));
-    }
-    inline fn requested_axis_bits(self: PackedKey) u64 {
-        return self.parent_size & (@as(u64, 1) << 63 | @as(u64, 1) << 31);
-    }
-    /// Whether a result computed for `self`'s requested axis serves `other`'s.
-    inline fn size_is_valid_for(self: PackedKey, other: PackedKey) bool {
-        const both = (@as(u64, 1) << 63) | (@as(u64, 1) << 31);
-        const axis = self.requested_axis_bits();
-        return axis == both or axis == other.requested_axis_bits();
+    inline fn eql(self: PackedKey, other: PackedKey) bool {
+        return self.kd_available_space == other.kd_available_space and self.parent_size == other.parent_size;
     }
 };
+
+/// Per-entry flags: bits 0-1 `known_dimensions_are_definite`, bits 2-3 axis.
+inline fn entryFlags(key: CacheKey) u4 {
+    return @as(u4, definiteBits(key)) | (@as(u4, key.axis) << 2);
+}
 
 inline fn definiteBits(key: CacheKey) u2 {
     return @as(u2, @intFromBool(key.known_dimensions_are_definite.width)) | (@as(u2, @intFromBool(key.known_dimensions_are_definite.height)) << 1);
@@ -201,8 +196,8 @@ pub const Cache = struct {
     final_output: CachedOutput = undefined,
     /// Bit `i < max_entries`: measure entry `i` is valid; bit `final_slot`: the final entry is.
     valid: u16 = 0,
-    /// Two `known_dimensions_are_definite` bits per entry (same indexing as `valid`).
-    definite: u32 = 0,
+    /// Four flag bits per entry (same indexing as `valid`): see `entryFlags`.
+    flags: u64 = 0,
     recently_used_entries: u16 = 0,
     next_measure_entry: u8 = 0,
     /// Taffy's `is_empty` flag: lets `clear` report `already_empty` without
@@ -232,12 +227,12 @@ pub const Cache = struct {
         return self.empty;
     }
 
-    inline fn definiteAt(self: *const Cache, index: usize) u2 {
-        return @truncate(self.definite >> @intCast(index * 2));
+    inline fn flagsAt(self: *const Cache, index: usize) u4 {
+        return @truncate(self.flags >> @intCast(index * 4));
     }
-    inline fn setDefinite(self: *Cache, index: usize, bits: u2) void {
-        const shift: u5 = @intCast(index * 2);
-        self.definite = (self.definite & ~(@as(u32, 3) << shift)) | (@as(u32, bits) << shift);
+    inline fn setFlags(self: *Cache, index: usize, bits: u4) void {
+        const shift: u6 = @intCast(index * 4);
+        self.flags = (self.flags & ~(@as(u64, 0xf) << shift)) | (@as(u64, bits) << shift);
     }
     inline fn isValid(self: *const Cache, index: usize) bool {
         return self.valid & (@as(u16, 1) << @intCast(index)) != 0;
@@ -248,22 +243,23 @@ pub const Cache = struct {
         if (!self.mode.eql(CacheMode.from(input))) return null;
         const full = cache_key(input);
         const key = PackedKey.from(full);
+        const flags = entryFlags(full);
         const definite = definiteBits(full);
         switch (input.run_mode) {
             .perform_layout => if (self.isValid(final_slot) and
-                self.final_key.kd_available_space == key.kd_available_space and
-                self.final_key.parent_size == key.parent_size and
-                self.definiteAt(final_slot) == definite)
+                self.final_key.eql(key) and
+                self.flagsAt(final_slot) == flags)
             {
                 return self.final_output.expand();
             },
             .compute_size => for (0..max_entries) |index| {
                 if (!self.isValid(index)) continue;
-                const cached = self.measure_keys[index];
-                if (cached.kd_available_space == key.kd_available_space and
-                    self.definiteAt(index) == definite and
-                    cached.parent_size_value() == key.parent_size_value() and
-                    cached.size_is_valid_for(key))
+                const entry = self.flagsAt(index);
+                // The full parent size must match (Taffy compares only its
+                // width, which reuses sizes that depend on the parent's height).
+                if (self.measure_keys[index].eql(key) and
+                    @as(u2, @truncate(entry)) == definite and
+                    axisServes(@truncate(entry >> 2), full.axis))
                 {
                     self.recently_used_entries |= @as(u16, 1) << @intCast(index);
                     return layout.LayoutOutput.from_outer_size(self.measure_sizes[index]);
@@ -284,13 +280,13 @@ pub const Cache = struct {
         }
         const full = cache_key(input);
         const key = PackedKey.from(full);
-        const definite = definiteBits(full);
+        const flags = entryFlags(full);
         switch (input.run_mode) {
             .perform_layout => {
                 self.empty = false;
                 self.final_key = key;
                 self.final_output = CachedOutput.from(output);
-                self.setDefinite(final_slot, definite);
+                self.setFlags(final_slot, flags);
                 self.valid |= @as(u16, 1) << final_slot;
             },
             .compute_size => {
@@ -300,9 +296,8 @@ pub const Cache = struct {
                 self.empty = false;
                 for (0..max_entries) |index| {
                     if (self.isValid(index) and
-                        self.measure_keys[index].kd_available_space == key.kd_available_space and
-                        self.measure_keys[index].parent_size == key.parent_size and
-                        self.definiteAt(index) == definite)
+                        self.measure_keys[index].eql(key) and
+                        self.flagsAt(index) == flags)
                     {
                         self.measure_sizes[index] = output.size;
                         self.recently_used_entries |= @as(u16, 1) << @intCast(index);
@@ -316,7 +311,7 @@ pub const Cache = struct {
                 const slot: usize = self.next_measure_entry;
                 self.measure_keys[slot] = key;
                 self.measure_sizes[slot] = output.size;
-                self.setDefinite(slot, definite);
+                self.setFlags(slot, flags);
                 self.valid |= @as(u16, 1) << @intCast(slot);
                 self.recently_used_entries |= @as(u16, 1) << @intCast(slot);
                 self.next_measure_entry = (self.next_measure_entry + 1) % @as(u8, max_entries);
@@ -379,4 +374,30 @@ test "cache keys distinguish intrinsic space and requested axes" {
     metadata.top_margin = layout.CollapsibleMarginSet.from_margin(3);
     cache.store(base, metadata);
     try testing.expectEqual(@as(f32, 11), cache.get(base).?.size.width);
+}
+
+test "negative and positive parent sizes do not share a cache entry" {
+    const testing = std.testing;
+    // Taffy encodes the requested axis in the parent size's f32 sign bits, so
+    // a parent width of -50 and 50 produced the same key.
+    var input = layout.LayoutInput{
+        .run_mode = .compute_size,
+        .sizing_mode = .inherent_size,
+        .axis = .both,
+        .known_dimensions = .{ .width = null, .height = null },
+        .known_dimensions_are_definite = .{ .width = true, .height = true },
+        .parent_size = .{ .width = 50, .height = 40 },
+        .available_space = .{ .width = .{ .definite = 50 }, .height = .max_content },
+        .vertical_margins_are_collapsible = .{ .start = false, .end = false },
+    };
+    var cache = Cache{};
+    cache.store(input, layout.LayoutOutput.from_outer_size(.{ .width = 25, .height = 10 }));
+    input.parent_size.width = -50;
+    try testing.expect(cache.get(input) == null);
+    input.run_mode = .perform_layout;
+    input.parent_size.width = 50;
+    cache.store(input, layout.LayoutOutput.from_outer_size(.{ .width = 25, .height = 10 }));
+    input.parent_size.height = -40;
+    try testing.expect(cache.get(input) == null);
+    try testing.expect(@sizeOf(Cache) <= 336);
 }
