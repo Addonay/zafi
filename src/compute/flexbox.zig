@@ -2072,7 +2072,19 @@ inline fn determine_hypothetical_cross_size(comptime Tree: type, tree_ref: *Tree
             .exact => {},
         };
 
-        const child_inner_cross = child_cross orelse blk: {
+        // An auto cross size of an item with a preferred aspect ratio is
+        // transferred from its used main size (Taffy #804).
+        const ratio_cross: ?f32 = if (child_cross == null and child.size_style.cross(constants.dir).is_auto())
+            if (child.aspect_ratio) |ratio|
+                (if (constants.is_row) child.target_size.width / ratio else child.target_size.height * ratio)
+            else
+                null
+        else
+            null;
+
+        const child_inner_cross = child_cross orelse if (ratio_cross) |cross|
+            @max(math.f32_maybe_clamp(cross, transferred_min_cross, transferred_max_cross), padding_border_sum)
+        else blk: {
             const input = layout.LayoutInput{
                 .run_mode = .compute_size,
                 .sizing_mode = .content_size,
