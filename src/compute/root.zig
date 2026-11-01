@@ -91,14 +91,19 @@ fn cachedDispatch(comptime Tree: type, tree_ref: *Tree,
 pub fn leaf_layout_with_measure(
     node_id: NodeId,
     input: layout.LayoutInput,
-    node_style: *const style.Style,
+    node_style: anytype,
     context: ?*anyopaque,
     measure: ?interfaces.MeasureFunc,
 ) ComputeError!layout.LayoutOutput {
-    if (measure) |callback| {
-        return callback(context, input, node_id, node_style);
+    const style_ref = style.view.of(node_style);
+    if (comptime @TypeOf(style_ref) == *const style.Style) {
+        if (measure) |callback| return callback(context, input, node_id, style_ref);
+    } else {
+        // `MeasureFunc` receives a `zafi.Style`; hosts with their own style
+        // type measure through `compute_leaf_layout`'s size callback instead.
+        std.debug.assert(measure == null);
     }
-    return leaf.compute_leaf_layout(input, node_style, null, null);
+    return leaf.compute_leaf_layout(input, style_ref, null, null);
 }
 
 /// Dispatch by `Style.display`, matching `(display, has_children)` in Taffy.
@@ -121,20 +126,24 @@ pub fn compute_child_layout_with_block_ctx(comptime Tree: type, tree_ref: *Tree,
     }
 
     const node_style = TreeApi.get_style(tree_ref, node_id);
-    if (node_style.display == .none) return compute_hidden_layout(Tree, tree_ref, node_id);
+    if (node_style.get(.display) == .none) return compute_hidden_layout(Tree, tree_ref, node_id);
 
     // Detailed algorithm output describes the node's *completed* layout. A full
     // pass which does not produce a grid result must drop any previous grid
     // detail rather than leave consumers reading obsolete track data.
-    if (input.run_mode == .perform_layout and node_style.display != .grid) {
+    if (input.run_mode == .perform_layout and node_style.get(.display) != .grid) {
         try TreeApi.clear_detailed_layout_info(tree_ref, node_id);
     }
 
     if (try TreeApi.child_count(tree_ref, node_id) == 0) {
+        // A leaf positions nothing: drop the hoisted list of a container that
+        // has lost its children, or rounding would follow it to removed boxes
+        // (Taffy has the same gap).
+        if (input.run_mode == .perform_layout) try TreeApi.clear_hoisted_children(tree_ref, node_id);
         return TreeApi.compute_leaf_layout(tree_ref, node_id, input);
     }
 
-    var output = switch (node_style.display) {
+    var output = switch (node_style.get(.display)) {
         .flex => flexbox.compute_flexbox_layout(Tree, tree_ref, node_id, input),
         .grid => grid.compute_grid_layout(Tree, tree_ref, node_id, input),
         // `flow_root` establishes its own formatting context, so it never inherits one.
@@ -185,8 +194,8 @@ pub fn compute_root_layout(comptime Tree: type, tree_ref: *Tree, root: NodeId, a
     defer calc_scope.restore(previous_calc);
 
     const root_style = TreeApi.get_style(tree_ref, root);
-    const direction = root_style.direction;
-    const position = root_style.position;
+    const direction = root_style.get(.direction);
+    const position = root_style.get(.position);
 
     const icb_size = geometry.Size(?f32){
         .width = available_space.width.into_option(),
@@ -235,7 +244,7 @@ pub fn compute_root_layout(comptime Tree: type, tree_ref: *Tree, root: NodeId, a
     // `position: fixed` boxes and for `position: absolute` boxes with no
     // positioned ancestor.
     if (candidates.items.len != 0) {
-        const overflow = TreeApi.get_style(tree_ref, root).overflow;
+        const overflow = TreeApi.get_style(tree_ref, root).get(.overflow);
 
         // The initial containing block has the dimensions of the viewport (the
         // available_space space) and is anchored at the canvas origin. In an axis where
@@ -306,7 +315,7 @@ fn compute_in_flow_root_layout(comptime Tree: type, tree_ref: *Tree,
 
     // The available space passed to the root excludes the root's margins
     const root_available_space = blk: {
-        const m = common.resolve_rect_or_zero(root_style.margin, available_space.width.into_option());
+        const m = common.resolve_rect_or_zero(root_style.get(.margin), available_space.width.into_option());
         break :blk geometry.Size(AvailableSpace){
             .width = math.available_maybe_max(math.available_maybe_sub(available_space.width, m.left + m.right), 0),
             .height = math.available_maybe_max(math.available_maybe_sub(available_space.height, m.top + m.bottom), 0),
@@ -317,15 +326,15 @@ fn compute_in_flow_root_layout(comptime Tree: type, tree_ref: *Tree,
     // dimensions before dispatching, exactly like Taffy.
     if (root_style.is_block()) {
         const parent_size = geometry.Size(?f32){ .width = available_space.width.into_option(), .height = available_space.height.into_option() };
-        const aspect_ratio = root_style.aspect_ratio;
-        const padding = common.resolve_length_rect(root_style.padding, parent_size.width);
-        const border = common.resolve_length_rect(root_style.border, parent_size.width);
+        const aspect_ratio = root_style.get(.aspect_ratio);
+        const padding = common.resolve_length_rect(root_style.get(.padding), parent_size.width);
+        const border = common.resolve_length_rect(root_style.get(.border), parent_size.width);
         const padding_border_size = geometry.Size(f32){ .width = padding.left + padding.right + border.left + border.right, .height = padding.top + padding.bottom + border.top + border.bottom };
-        const box_sizing_adjustment = if (root_style.box_sizing == .content_box) padding_border_size else geometry.Size(f32){ .width = 0, .height = 0 };
+        const box_sizing_adjustment = if (root_style.get(.box_sizing) == .content_box) padding_border_size else geometry.Size(f32){ .width = 0, .height = 0 };
 
-        const min_size = addSize(applyAspectRatio(resolveAutoSize(root_style.min_size, parent_size), aspect_ratio), box_sizing_adjustment);
-        const max_size = addSize(resolveAutoSize(root_style.max_size, parent_size), box_sizing_adjustment);
-        const clamped_style_size = clampSize(addSize(applyAspectRatio(resolveDimensionSize(root_style.size, parent_size), aspect_ratio), box_sizing_adjustment), min_size, max_size);
+        const min_size = addSize(applyAspectRatio(resolveAutoSize(root_style.get(.min_size), parent_size), aspect_ratio), box_sizing_adjustment);
+        const max_size = addSize(resolveAutoSize(root_style.get(.max_size), parent_size), box_sizing_adjustment);
+        const clamped_style_size = clampSize(addSize(applyAspectRatio(resolveDimensionSize(root_style.get(.size), parent_size), aspect_ratio), box_sizing_adjustment), min_size, max_size);
         const min_max_definite_size = geometry.Size(?f32){
             .width = if (min_size.width) |min| if (max_size.width) |max| if (max <= min) min else null else null else null,
             .height = if (min_size.height) |min| if (max_size.height) |max| if (max <= min) min else null else null else null,
@@ -355,14 +364,14 @@ fn compute_in_flow_root_layout(comptime Tree: type, tree_ref: *Tree,
 
     const style_ref = TreeApi.get_style(tree_ref, root);
     const available_width = available_space.width.into_option();
-    const padding = common.resolve_length_rect(style_ref.padding, available_width);
-    const border = common.resolve_length_rect(style_ref.border, available_width);
-    const margin = common.resolve_rect_or_zero(style_ref.margin, available_width);
+    const padding = common.resolve_length_rect(style_ref.get(.padding), available_width);
+    const border = common.resolve_length_rect(style_ref.get(.border), available_width);
+    const margin = common.resolve_rect_or_zero(style_ref.get(.margin), available_width);
     const scrollbar_size = geometry.Size(f32){
-        .width = if (style_ref.overflow.y == .scroll) style_ref.scrollbar_width else 0,
-        .height = if (style_ref.overflow.x == .scroll) style_ref.scrollbar_width else 0,
+        .width = if (style_ref.get(.overflow).y == .scroll) style_ref.get(.scrollbar_width) else 0,
+        .height = if (style_ref.get(.overflow).x == .scroll) style_ref.get(.scrollbar_width) else 0,
     };
-    const is_rtl = style_ref.direction.is_rtl();
+    const is_rtl = style_ref.get(.direction).is_rtl();
 
     // The root's margin box is placed at the origin of the initial containing block
     var location = geometry.Point(f32){
@@ -374,12 +383,12 @@ fn compute_in_flow_root_layout(comptime Tree: type, tree_ref: *Tree,
     };
 
     // A relatively positioned root is offset by its insets, resolved against the initial containing block
-    if (style_ref.position == .relative) {
+    if (style_ref.get(.position) == .relative) {
         const icb = icbFor(available_space);
-        const left = style_ref.inset.left.resolve_to_option(icb.width);
-        const right = style_ref.inset.right.resolve_to_option(icb.width);
-        const top = style_ref.inset.top.resolve_to_option(icb.height);
-        const bottom = style_ref.inset.bottom.resolve_to_option(icb.height);
+        const left = style_ref.get(.inset).left.resolve_to_option(icb.width);
+        const right = style_ref.get(.inset).right.resolve_to_option(icb.width);
+        const top = style_ref.get(.inset).top.resolve_to_option(icb.height);
+        const bottom = style_ref.get(.inset).bottom.resolve_to_option(icb.height);
         location.x += if (is_rtl)
             (if (right) |value| -value else left orelse 0)
         else
@@ -409,6 +418,11 @@ fn icbFor(available_space: geometry.Size(AvailableSpace)) geometry.Size(?f32) {
 pub fn compute_hidden_layout(comptime Tree: type, tree_ref: *Tree, node_id: NodeId) ComputeError!layout.LayoutOutput {
     const TreeApi = LayoutTree(Tree);
     try TreeApi.cache_clear(tree_ref, node_id);
+    // A hidden box contains no positioned boxes. Without this, a node that
+    // becomes `display: none` keeps the hoisted list of its last visible
+    // layout, and rounding follows it to boxes that may since have been
+    // removed (Taffy has the same gap).
+    try TreeApi.clear_hoisted_children(tree_ref, node_id);
     try TreeApi.set_unrounded_layout(tree_ref, node_id, .with_order(0));
     try TreeApi.set_final_layout(tree_ref, node_id, .with_order(0));
     for (try TreeApi.child_ids(tree_ref, node_id)) |child_id| {
@@ -485,11 +499,11 @@ pub fn round_layout_inner(comptime Tree: type, tree_ref: *Tree, node_id: NodeId,
     }
 }
 
-fn resolveDimensionSize(value: geometry.Size(style.dimension.Dimension), parent: geometry.Size(?f32)) geometry.Size(?f32) {
+inline fn resolveDimensionSize(value: geometry.Size(style.dimension.Dimension), parent: geometry.Size(?f32)) geometry.Size(?f32) {
     return .{ .width = value.width.resolve(parent.width), .height = value.height.resolve(parent.height) };
 }
 
-fn resolveAutoSize(value: geometry.Size(style.dimension.LengthPercentageAuto), parent: geometry.Size(?f32)) geometry.Size(?f32) {
+inline fn resolveAutoSize(value: geometry.Size(style.dimension.LengthPercentageAuto), parent: geometry.Size(?f32)) geometry.Size(?f32) {
     return .{ .width = value.width.resolve_to_option(parent.width), .height = value.height.resolve_to_option(parent.height) };
 }
 

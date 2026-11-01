@@ -1,6 +1,7 @@
 //! Direct port of Taffy's `style/float.rs`.
 
 const std = @import("std");
+const css = @import("../util/css.zig");
 pub const FloatParseError = error{InvalidFloatValue};
 
 const serde_support = @import("../serde_support.zig");
@@ -13,12 +14,13 @@ pub const Float = enum {
     right,
     none,
 
+    /// Taffy's keyword parser: one ident, ASCII case-insensitive.
     pub fn from_str(input: []const u8) FloatParseError!Float {
-        const value = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(value, "left")) return .left;
-        if (std.ascii.eqlIgnoreCase(value, "right")) return .right;
-        if (std.ascii.eqlIgnoreCase(value, "none")) return .none;
-        return error.InvalidFloatValue;
+        return css.keyword_enum(Float, input, &.{
+            .{ "left", .left },
+            .{ "right", .right },
+            .{ "none", .none },
+        }) catch error.InvalidFloatValue;
     }
 };
 
@@ -31,13 +33,14 @@ pub const Clear = enum {
     both,
     none,
 
+    /// Taffy's keyword parser: one ident, ASCII case-insensitive.
     pub fn from_str(input: []const u8) FloatParseError!Clear {
-        const value = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(value, "left")) return .left;
-        if (std.ascii.eqlIgnoreCase(value, "right")) return .right;
-        if (std.ascii.eqlIgnoreCase(value, "both")) return .both;
-        if (std.ascii.eqlIgnoreCase(value, "none")) return .none;
-        return error.InvalidFloatValue;
+        return css.keyword_enum(Clear, input, &.{
+            .{ "left", .left },
+            .{ "right", .right },
+            .{ "both", .both },
+            .{ "none", .none },
+        }) catch error.InvalidFloatValue;
     }
 };
 pub const FloatDirection = enum { left, right };

@@ -115,6 +115,15 @@ pub const CompactLength = struct {
     pub inline fn has_calc(self: CompactLength) bool {
         return self.tagBits() & NON_POINTER_BIT == 0;
     }
+    /// Whether any value in `values` (a tuple of `CompactLength`s) is `calc()`.
+    /// Branch-free: a calc value is the only kind with the non-pointer tag bit
+    /// clear, so AND the raw words and test that bit once.
+    pub inline fn any_calc(values: anytype) bool {
+        var all: u64 = ~@as(u64, 0);
+        inline for (values) |v| all &= v.bits;
+        return @as(u8, @truncate(all >> 56)) & NON_POINTER_BIT == 0;
+    }
+
     pub inline fn is_length_or_percentage(self: CompactLength) bool {
         return self.tagBits() & (NON_POINTER_BIT | KEYWORD_BIT) == NON_POINTER_BIT;
     }
@@ -170,7 +179,62 @@ pub const CompactLength = struct {
         if (!self.has_calc()) return null;
         return @ptrFromInt(self.bits & payload_mask);
     }
-    pub fn resolved_percentage_size(self: CompactLength, parent_size: f32) ?f32 {
+    /// Taffy's `MaybeResolve<Option<f32>>`: a length resolves as-is; a percentage
+    /// or `calc()` needs a definite basis; anything else is indefinite.
+    pub inline fn maybe_resolve(self: CompactLength, basis: ?f32) ?f32 {
+        return self.maybe_resolve_with(basis, true);
+    }
+
+    /// `maybe_resolve`, specialised on whether the value can be `calc()`.
+    ///
+    /// With `with_calc == false` a calc value is treated as indefinite, so that
+    /// variant is only for callers that know there is no calc value (see
+    /// `GridItem.has_calc`).
+    ///
+    /// Performance: this runs in the innermost layout loops. Every case merges
+    /// into scalars (`out`, `ok`) and the optional is built once at the end,
+    /// and the calc case is a cold out-of-line call. Returning a `?f32` from
+    /// each switch arm instead makes LLVM merge the arms through a stack slot
+    /// (two narrow stores then one wide reload: a store-forwarding stall) as
+    /// soon as one arm holds a call.
+    pub inline fn maybe_resolve_with(self: CompactLength, basis: ?f32, comptime with_calc: bool) ?f32 {
+        // Merge on scalars and build the optional once (see `some_if`).
+        const t = self.tag();
+        var ok = t == .length or (t == .percent and basis != null);
+        var out = if (t == .percent) self.value() * (basis orelse 0) else self.value();
+        if (with_calc and t == .calc) {
+            if (basis) |b| {
+                out = resolve_calc(self, b);
+                ok = true;
+            }
+        }
+        return some_if(ok, out);
+    }
+
+    /// `if (ok) value else null`, written so the optional never comes from a
+    /// pointer select against a `null` constant (which LLVM cannot scalarise,
+    /// leaving narrow stores followed by a wide reload in hot loops).
+    inline fn some_if(ok: bool, value_: f32) ?f32 {
+        var result: ?f32 = value_;
+        if (!ok) result = null;
+        return result;
+    }
+
+    /// Resolve against a definite `basis`: lengths, percentages and (when
+    /// `with_calc`) calc values resolve; any other tag yields `fallback`.
+    pub inline fn resolve_or_with(self: CompactLength, basis: f32, fallback: f32, comptime with_calc: bool) f32 {
+        const t = self.tag();
+        var out = if (t == .length) self.value() else if (t == .percent) self.value() * basis else fallback;
+        if (with_calc and t == .calc) out = resolve_calc(self, basis);
+        return out;
+    }
+
+    fn resolve_calc(self: CompactLength, basis: f32) f32 {
+        @branchHint(.cold);
+        return @import("calc.zig").resolve(self.calc_value(), basis);
+    }
+
+    pub inline fn resolved_percentage_size(self: CompactLength, parent_size: f32) ?f32 {
         return switch (self.tag()) {
             .percent => self.value() * parent_size,
             .calc => @import("calc.zig").resolve(self.calc_value(), parent_size),
@@ -459,4 +523,40 @@ test "compact length tags and serialized bits match Taffy wire values" {
     try testing.expectEqual(@as(u64, 150323855360), CompactLength.content().serialized());
     try testing.expectEqual(CompactLength.content(), from_serialized(@as(u64, 150323855360)));
     try testing.expectEqual(CompactLength.percent(0.5), from_serialized(CompactLength.percent(0.5).serialized()));
+}
+
+test "maybe_resolve_with / resolve_or_with / any_calc" {
+    const testing = std.testing;
+    const C = CompactLength;
+    const handle: *const anyopaque = @ptrFromInt(64);
+    // Lengths resolve without a basis; percentages need one; other tags are indefinite.
+    inline for (.{ true, false }) |with_calc| {
+        try testing.expectEqual(@as(?f32, 7), C.length(7).maybe_resolve_with(null, with_calc));
+        try testing.expectEqual(@as(?f32, 50), C.percent(0.5).maybe_resolve_with(100, with_calc));
+        try testing.expectEqual(@as(?f32, null), C.percent(0.5).maybe_resolve_with(null, with_calc));
+        try testing.expectEqual(@as(?f32, null), C.auto().maybe_resolve_with(100, with_calc));
+        try testing.expectEqual(@as(f32, 7), C.length(7).resolve_or_with(100, -1, with_calc));
+        try testing.expectEqual(@as(f32, 25), C.percent(0.25).resolve_or_with(100, -1, with_calc));
+        try testing.expectEqual(@as(f32, -1), C.auto().resolve_or_with(100, -1, with_calc));
+    }
+    // Calc: resolves through the active resolver (0 without one) given a basis.
+    try testing.expectEqual(@as(?f32, 0), C.calc(handle).maybe_resolve_with(100, true));
+    try testing.expectEqual(@as(?f32, null), C.calc(handle).maybe_resolve_with(null, true));
+    try testing.expectEqual(@as(f32, 0), C.calc(handle).resolve_or_with(100, -1, true));
+    const Double = struct {
+        fn f(_: *const anyopaque, _: *const anyopaque, basis: f32) f32 {
+            return basis * 2;
+        }
+    };
+    const calc_mod = @import("calc.zig");
+    const previous = calc_mod.current;
+    defer calc_mod.current = previous;
+    calc_mod.current = .{ .ctx = handle, .func = Double.f };
+    try testing.expectEqual(@as(?f32, 30), C.calc(handle).maybe_resolve_with(15, true));
+    try testing.expectEqual(@as(f32, 30), C.calc(handle).resolve_or_with(15, -1, true));
+
+    try testing.expect(!C.any_calc(.{ C.length(1), C.percent(0.5), C.auto(), C.fr(1), C.min_content() }));
+    try testing.expect(C.any_calc(.{ C.length(1), C.calc(handle), C.auto() }));
+    try testing.expect(C.any_calc(.{C.calc(handle)}));
+    try testing.expect(!C.any_calc(.{}));
 }

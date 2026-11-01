@@ -1,0 +1,16 @@
+[package]
+name = "zafi-parse-oracle"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Differential oracle for zafi's CSS value parsers (`from_str`). Reads
+# `corpus.txt` (`Type<TAB>input` per line) and prints, for each line,
+# `Type<TAB>input<TAB>result`, where result is Taffy's serde JSON for the
+# parsed value or `ERR`. Regenerate the expected output with:
+#   cargo run --quiet --release --manifest-path tools/parse_oracle/Cargo.toml < tools/parse_oracle/corpus.txt > tools/parse_oracle/expected.txt
+# and check zafi against it with `cd tools && zig build parse-parity`.
+[dependencies]
+taffy = { path = "../../.references/taffy", features = ["serde", "parse"] }
+serde_json = "1"
+serde = "1"

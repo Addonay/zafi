@@ -6,7 +6,6 @@
 //! the same measure APIs used by Taffy's `LayoutPartialTreeExt`.
 
 const std = @import("std");
-const calc_resolver = @import("../../../style/calc.zig");
 const geometry = @import("../../../geometry.zig");
 const style = @import("../../../style/root.zig");
 const AvailableSpace = @import("../../../style/available_space.zig").AvailableSpace;
@@ -92,6 +91,10 @@ pub const GridItem = struct {
     baseline: ?f32 = null,
     /// Shim for baseline alignment that acts like an extra top margin
     baseline_shim: f32 = 0,
+    /// Whether any of the item's box lengths above (size, min/max size, padding,
+    /// border, margin) is a `calc()` value. The hot sizing methods are
+    /// specialised on it so calc-free items run calc-free code.
+    has_calc: bool = false,
 
     /// The item's definite row-start and row-end as indexes into the GridTrackVec
     row_indexes: geometry.Line(u16),
@@ -131,7 +134,7 @@ pub const GridItem = struct {
         node: NodeId,
         col_span: geometry.Line(OriginZeroLine),
         row_span: geometry.Line(OriginZeroLine),
-        item_style: *const style.Style,
+        item_style: anytype,
         parent_align_items: style.alignment.AlignItems,
         parent_justify_items: style.alignment.AlignItems,
         source_order: u16) GridItem {
@@ -142,17 +145,18 @@ pub const GridItem = struct {
             .column = col_span,
             .is_compressible_replaced = item_style.is_compressible_replaced(),
             .is_replaced = item_style.is_replaced(),
-            .overflow = item_style.overflow,
-            .box_sizing = item_style.box_sizing,
-            .size = item_style.size,
-            .min_size = item_style.min_size,
-            .max_size = item_style.max_size,
-            .aspect_ratio = item_style.aspect_ratio,
-            .padding = item_style.padding,
-            .border = item_style.border,
-            .margin = item_style.margin,
-            .align_self = item_style.align_self orelse parent_align_items,
-            .justify_self = item_style.justify_self orelse parent_justify_items,
+            .overflow = item_style.get(.overflow),
+            .box_sizing = item_style.get(.box_sizing),
+            .size = item_style.get(.size),
+            .min_size = item_style.get(.min_size),
+            .max_size = item_style.get(.max_size),
+            .aspect_ratio = item_style.get(.aspect_ratio),
+            .padding = item_style.get(.padding),
+            .border = item_style.get(.border),
+            .margin = item_style.get(.margin),
+            .align_self = item_style.get(.align_self) orelse parent_align_items,
+            .justify_self = item_style.get(.justify_self) orelse parent_justify_items,
+            .has_calc = box_lengths_have_calc(item_style),
             .row_indexes = .{ .start = 0, .end = 0 }, // Properly initialised later
             .column_indexes = .{ .start = 0, .end = 0 }, // Properly initialised later
         };
@@ -249,18 +253,26 @@ pub const GridItem = struct {
     /// applying stretch alignment so percentage sizes further down the tree_ref
     /// resolve properly.
     fn known_dimensions(self: *const GridItem, comptime Tree: type, tree_ref: *Tree, area_size: geometry.Size(?f32)) geometry.Size(?f32) {
-        const margins = self.margins_axis_sums_with_baseline_shims(Tree, area_size.width, tree_ref);
+        return if (self.has_calc)
+            self.known_dimensions_impl(Tree, tree_ref, area_size, true)
+        else
+            self.known_dimensions_impl(Tree, tree_ref, area_size, false);
+    }
+
+    fn known_dimensions_impl(self: *const GridItem, comptime Tree: type, tree_ref: *Tree, area_size: geometry.Size(?f32), comptime calc: bool) geometry.Size(?f32) {
+        _ = tree_ref;
+        const margins = self.margins_axis_sums_with(area_size.width, calc);
 
         const aspect_ratio = self.aspect_ratio;
-        const padding = resolve_rect_length_percentage_or_zero(Tree, self.padding, area_size.width, tree_ref);
-        const border = resolve_rect_length_percentage_or_zero(Tree, self.border, area_size.width, tree_ref);
+        const padding = resolve_rect_length_percentage_or_zero(self.padding, area_size.width, calc);
+        const border = resolve_rect_length_percentage_or_zero(self.border, area_size.width, calc);
         const padding_border_size = padding.add(border).sum_axes();
         const box_sizing_adjustment = if (self.box_sizing == .content_box) padding_border_size else geometry.F32Size{ .width = 0, .height = 0 };
         const inherent_size = maybe_add_size(
-            geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_dimension_size(self.size, area_size), aspect_ratio),
+            geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_dimension_size(self.size, area_size, calc), aspect_ratio),
             box_sizing_adjustment);
         const raw_min_size = maybe_add_size(
-            geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(self.min_size, area_size), aspect_ratio),
+            geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(self.min_size, area_size, calc), aspect_ratio),
             box_sizing_adjustment);
         // The size of the item is floored by its padding and border
         const min_size = geometry.Size(?f32){
@@ -268,7 +280,7 @@ pub const GridItem = struct {
             .height = @max(raw_min_size.height orelse padding_border_size.height, padding_border_size.height),
         };
         const max_size = maybe_add_size(
-            geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(self.max_size, area_size), aspect_ratio),
+            geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(self.max_size, area_size, calc), aspect_ratio),
             box_sizing_adjustment);
 
         const grid_area_minus_item_margins_size = maybe_max_size(
@@ -381,12 +393,18 @@ pub const GridItem = struct {
 
     /// Compute the item's resolved margins for size contributions. Horizontal percentage
     /// margins always resolve to zero if the container size is indefinite.
-    pub fn margins_axis_sums_with_baseline_shims(self: *const GridItem, comptime Tree: type, inner_node_width: ?f32, tree_ref: *Tree) geometry.F32Size {
-        const left = self.margin.left.resolve(0) orelse 0;
-        const right = self.margin.right.resolve(0) orelse 0;
-        const top = if (inner_node_width) |basis| (self.margin.top.resolve(basis) orelse 0) else (self.margin.top.resolve(0) orelse 0);
-        const bottom = if (inner_node_width) |basis| (self.margin.bottom.resolve(basis) orelse 0) else (self.margin.bottom.resolve(0) orelse 0);
+    pub inline fn margins_axis_sums_with_baseline_shims(self: *const GridItem, comptime Tree: type, inner_node_width: ?f32, tree_ref: *Tree) geometry.F32Size {
         _ = tree_ref;
+        return if (self.has_calc) self.margins_axis_sums_with(inner_node_width, true) else self.margins_axis_sums_with(inner_node_width, false);
+    }
+
+    inline fn margins_axis_sums_with(self: *const GridItem, inner_node_width: ?f32, comptime calc: bool) geometry.F32Size {
+        // `auto` margins resolve to zero here.
+        const left = self.margin.left.value.resolve_or_with(0, 0, calc);
+        const right = self.margin.right.value.resolve_or_with(0, 0, calc);
+        const vertical_basis = inner_node_width orelse 0;
+        const top = self.margin.top.value.resolve_or_with(vertical_basis, 0, calc);
+        const bottom = self.margin.bottom.value.resolve_or_with(vertical_basis, 0, calc);
         return .{
             .width = left + right,
             .height = top + bottom + self.baseline_shim,
@@ -502,12 +520,25 @@ pub const GridItem = struct {
         axis_tracks: []const GridTrack,
         grid_area_size_value: geometry.Size(?f32),
         inner_node_size: geometry.Size(?f32)) f32 {
-        const padding = resolve_rect_length_percentage_or_zero(Tree, self.padding, grid_area_size_value.width, tree_ref);
-        const border = resolve_rect_length_percentage_or_zero(Tree, self.border, grid_area_size_value.width, tree_ref);
+        return if (self.has_calc)
+            self.minimum_contribution_impl(Tree, tree_ref, axis, axis_tracks, grid_area_size_value, inner_node_size, true)
+        else
+            self.minimum_contribution_impl(Tree, tree_ref, axis, axis_tracks, grid_area_size_value, inner_node_size, false);
+    }
+
+    fn minimum_contribution_impl(self: *GridItem, comptime Tree: type,
+        tree_ref: *Tree,
+        axis: geometry.AbstractAxis,
+        axis_tracks: []const GridTrack,
+        grid_area_size_value: geometry.Size(?f32),
+        inner_node_size: geometry.Size(?f32),
+        comptime calc: bool) f32 {
+        const padding = resolve_rect_length_percentage_or_zero(self.padding, grid_area_size_value.width, calc);
+        const border = resolve_rect_length_percentage_or_zero(self.border, grid_area_size_value.width, calc);
         const padding_border_size = padding.add(border).sum_axes();
         const box_sizing_adjustment = if (self.box_sizing == .content_box) padding_border_size else geometry.F32Size{ .width = 0, .height = 0 };
         const resolved_size = maybe_add_size(
-            geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_dimension_size(self.size, grid_area_size_value), self.aspect_ratio),
+            geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_dimension_size(self.size, grid_area_size_value, calc), self.aspect_ratio),
             box_sizing_adjustment);
 
         // A definite preferred size is the minimum contribution, clamped by the
@@ -520,8 +551,8 @@ pub const GridItem = struct {
             const basis = grid_area_size_value.get(axis);
             const max_size_basis: ?f32 = if (self.is_replaced) (basis orelse 0) else basis;
             const adjustment = box_sizing_adjustment.get(axis);
-            const min_value = math.option_maybe_add(resolve_lpa(min_style, basis), adjustment);
-            const max_value = math.option_maybe_add(resolve_lpa(max_style, max_size_basis), adjustment);
+            const min_value = math.option_maybe_add(resolve_lpa(min_style, basis, calc), adjustment);
+            const max_value = math.option_maybe_add(resolve_lpa(max_style, max_size_basis, calc), adjustment);
             return math.f32_maybe_clamp(size, min_value, max_value);
         }
 
@@ -535,7 +566,7 @@ pub const GridItem = struct {
         // Cyclic percentage minimum sizes resolve against zero (4142c9d).
         const zero_basis_area = geometry.Size(?f32){ .width = grid_area_size_value.width orelse 0, .height = grid_area_size_value.height orelse 0 };
         const resolved_min = maybe_add_size(
-            geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(self.min_size, zero_basis_area), self.aspect_ratio),
+            geometry.optional_f32_size_maybe_apply_aspect_ratio(resolve_lpa_size(self.min_size, zero_basis_area, calc), self.aspect_ratio),
             box_sizing_adjustment);
         if (resolved_min.get(axis)) |value| return value;
         if (self.overflow.get(axis).maybe_into_automatic_min_size()) |value| return value;
@@ -574,7 +605,7 @@ pub const GridItem = struct {
         // Clamp by the sum of the spanned tracks' fixed max sizing functions, minus
         // the item's margins but floored at its padding + border (654d6d7).
         const limit = self.spanned_fixed_track_limit(axis, axis_tracks, inner_node_size.get(axis));
-        const margins = self.margins_axis_sums_with_baseline_shims(Tree, grid_area_size_value.width, tree_ref);
+        const margins = self.margins_axis_sums_with(grid_area_size_value.width, calc);
         return math.f32_maybe_min(minimum, if (limit) |l| @max(l - margins.get(axis), padding_border_size.get(axis)) else null);
     }
 
@@ -601,35 +632,45 @@ fn align_is_stretch(alignment_value: style.alignment.AlignItems, is_replaced: bo
     };
 }
 
-fn resolve_dimension_size(value: geometry.Size(style.dimension.Dimension), basis: geometry.Size(?f32)) geometry.Size(?f32) {
-    return .{ .width = value.width.resolve(basis.width), .height = value.height.resolve(basis.height) };
+inline fn resolve_dimension_size(value: geometry.Size(style.dimension.Dimension), basis: geometry.Size(?f32), comptime calc: bool) geometry.Size(?f32) {
+    return .{ .width = value.width.value.maybe_resolve_with(basis.width, calc), .height = value.height.value.maybe_resolve_with(basis.height, calc) };
 }
 
-fn resolve_lpa(value: style.dimension.LengthPercentageAuto, basis: ?f32) ?f32 {
-    // Taffy `MaybeResolve<Option<f32>> for LengthPercentageAuto`: lengths always
-    // resolve, percentages require a definite basis, auto resolves to null.
-    return switch (value.value.tag()) {
-        .auto => null,
-        .length => value.value.value(),
-        .percent => if (basis) |b| b * value.value.value() else null,
-        .calc => if (basis) |b| calc_resolver.resolve(value.value.calc_value(), b) else null,
-        else => null,
-    };
+/// Taffy `MaybeResolve<Option<f32>> for LengthPercentageAuto`: lengths always
+/// resolve, percentages (and calc) require a definite basis, auto resolves to null.
+inline fn resolve_lpa(value: style.dimension.LengthPercentageAuto, basis: ?f32, comptime calc: bool) ?f32 {
+    return value.value.maybe_resolve_with(basis, calc);
 }
 
-fn resolve_lpa_size(value: geometry.Size(style.dimension.LengthPercentageAuto), basis: geometry.Size(?f32)) geometry.Size(?f32) {
-    return .{ .width = resolve_lpa(value.width, basis.width), .height = resolve_lpa(value.height, basis.height) };
+inline fn resolve_lpa_size(value: geometry.Size(style.dimension.LengthPercentageAuto), basis: geometry.Size(?f32), comptime calc: bool) geometry.Size(?f32) {
+    return .{ .width = resolve_lpa(value.width, basis.width, calc), .height = resolve_lpa(value.height, basis.height, calc) };
 }
 
-fn resolve_rect_length_percentage_or_zero(comptime Tree: type, value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32, tree_ref: *Tree) geometry.Rect(f32) {
-    _ = tree_ref;
+inline fn resolve_rect_length_percentage_or_zero(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32, comptime calc: bool) geometry.Rect(f32) {
     const resolved_basis = basis orelse 0;
     return .{
-        .left = value.left.resolve(resolved_basis),
-        .right = value.right.resolve(resolved_basis),
-        .top = value.top.resolve(resolved_basis),
-        .bottom = value.bottom.resolve(resolved_basis),
+        .left = value.left.value.resolve_or_with(resolved_basis, 0, calc),
+        .right = value.right.value.resolve_or_with(resolved_basis, 0, calc),
+        .top = value.top.value.resolve_or_with(resolved_basis, 0, calc),
+        .bottom = value.bottom.value.resolve_or_with(resolved_basis, 0, calc),
     };
+}
+
+/// Whether any box length the hot sizing methods resolve is a `calc()` value.
+fn box_lengths_have_calc(item_style: anytype) bool {
+    const size = item_style.get(.size);
+    const min_size = item_style.get(.min_size);
+    const max_size = item_style.get(.max_size);
+    const padding = item_style.get(.padding);
+    const border = item_style.get(.border);
+    const margin = item_style.get(.margin);
+    return style.compact_length.CompactLength.any_calc(.{
+        size.width.value,     size.height.value,     min_size.width.value, min_size.height.value,
+        max_size.width.value, max_size.height.value, padding.left.value,   padding.right.value,
+        padding.top.value,    padding.bottom.value,  border.left.value,    border.right.value,
+        border.top.value,     border.bottom.value,   margin.left.value,    margin.right.value,
+        margin.top.value,     margin.bottom.value,
+    });
 }
 
 fn maybe_add_size(value: geometry.Size(?f32), add: geometry.F32Size) geometry.Size(?f32) {
@@ -676,7 +717,7 @@ test "grid item retains placement and contribution caches" {
         7,
         .{ .start = .{ .value = 1 }, .end = .{ .value = 3 } },
         .{ .start = .{ .value = 0 }, .end = .{ .value = 2 } },
-        &.{},
+        &style.Style{},
         style.alignment.AlignItems.start,
         style.alignment.AlignItems.stretch,
         2);

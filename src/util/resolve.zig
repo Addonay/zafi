@@ -2,12 +2,11 @@
 
 const AvailableSpace = @import("../style/available_space.zig").AvailableSpace;
 const dimension = @import("../style/dimension.zig");
-const calc = @import("../style/calc.zig");
 
 pub const MaybeResolve = struct {};
 pub const ResolveOrZero = struct {};
 
-pub fn maybe_resolve(value: anytype, context: ?f32) ?f32 {
+pub inline fn maybe_resolve(value: anytype, context: ?f32) ?f32 {
     return switch (@TypeOf(value)) {
         dimension.LengthPercentage => maybe_resolve_length(value, context),
         dimension.LengthPercentageAuto => maybe_resolve_auto(value, context),
@@ -16,40 +15,40 @@ pub fn maybe_resolve(value: anytype, context: ?f32) ?f32 {
     };
 }
 
-pub fn resolve_or_zero(value: anytype, context: ?f32) f32 {
+pub inline fn resolve_or_zero(value: anytype, context: ?f32) f32 {
     return maybe_resolve(value, context) orelse 0;
 }
 
-pub fn resolve(value: dimension.LengthPercentage, basis: f32) f32 {
+pub inline fn resolve(value: dimension.LengthPercentage, basis: f32) f32 {
     return value.resolve(basis);
 }
 
-pub fn resolve_length(value: dimension.LengthPercentage, _: ?f32) ?f32 {
+pub inline fn resolve_length(value: dimension.LengthPercentage, _: ?f32) ?f32 {
     return switch (value.value.tag()) {
         .length => value.value.value(),
         else => null,
     };
 }
 
-pub fn resolve_percent(value: dimension.LengthPercentage, context: ?f32) ?f32 {
+pub inline fn resolve_percent(value: dimension.LengthPercentage, context: ?f32) ?f32 {
     return switch (value.value.tag()) {
         .percent => if (context) |basis| value.value.value() * basis else null,
         else => null,
     };
 }
 
-pub fn maybe_resolve_percent(value: dimension.LengthPercentage, context: ?f32) ?f32 {
+pub inline fn maybe_resolve_percent(value: dimension.LengthPercentage, context: ?f32) ?f32 {
     return resolve_percent(value, context);
 }
-pub fn resolve_or_zero_percent(value: dimension.LengthPercentage, context: ?f32) f32 {
+pub inline fn resolve_or_zero_percent(value: dimension.LengthPercentage, context: ?f32) f32 {
     return resolve_percent(value, context) orelse 0;
 }
 
-pub fn resolve_auto(value: dimension.LengthPercentageAuto, basis: f32) ?f32 {
+pub inline fn resolve_auto(value: dimension.LengthPercentageAuto, basis: f32) ?f32 {
     return value.resolve(basis);
 }
 
-pub fn resolve_dimension(value: dimension.Dimension, basis: ?f32) ?f32 {
+pub inline fn resolve_dimension(value: dimension.Dimension, basis: ?f32) ?f32 {
     return value.resolve(basis);
 }
 
@@ -61,44 +60,29 @@ pub fn available_or(value: AvailableSpace, fallback: f32) f32 {
 // need a definite context (calc goes through the host resolver bound for the
 // layout pass, see `style/calc.zig`); everything else is indefinite.
 
-pub fn maybe_resolve_length(value: dimension.LengthPercentage, context: ?f32) ?f32 {
-    return switch (value.value.tag()) {
-        .length => value.value.value(),
-        .percent => if (context) |basis| value.value.value() * basis else null,
-        .calc => if (context) |basis| calc.resolve(value.value.calc_value(), basis) else null,
-        else => null,
-    };
+pub inline fn maybe_resolve_length(value: dimension.LengthPercentage, context: ?f32) ?f32 {
+    return value.value.maybe_resolve(context);
 }
 
-pub fn maybe_resolve_auto(value: dimension.LengthPercentageAuto, context: ?f32) ?f32 {
-    return switch (value.value.tag()) {
-        .length => value.value.value(),
-        .percent => if (context) |basis| value.value.value() * basis else null,
-        .calc => if (context) |basis| calc.resolve(value.value.calc_value(), basis) else null,
-        else => null,
-    };
+pub inline fn maybe_resolve_auto(value: dimension.LengthPercentageAuto, context: ?f32) ?f32 {
+    return value.value.maybe_resolve(context);
 }
 
-pub fn maybe_resolve_dimension(value: dimension.Dimension, context: ?f32) ?f32 {
-    return switch (value.value.tag()) {
-        .length => value.value.value(),
-        .percent => if (context) |basis| value.value.value() * basis else null,
-        .calc => if (context) |basis| calc.resolve(value.value.calc_value(), basis) else null,
-        else => null,
-    };
+pub inline fn maybe_resolve_dimension(value: dimension.Dimension, context: ?f32) ?f32 {
+    return value.value.maybe_resolve(context);
 }
 
-pub fn resolve_or_zero_length(value: dimension.LengthPercentage, context: ?f32) f32 {
+pub inline fn resolve_or_zero_length(value: dimension.LengthPercentage, context: ?f32) f32 {
     return maybe_resolve_length(value, context) orelse 0;
 }
-pub fn resolve_or_zero_auto(value: dimension.LengthPercentageAuto, context: ?f32) f32 {
+pub inline fn resolve_or_zero_auto(value: dimension.LengthPercentageAuto, context: ?f32) f32 {
     return maybe_resolve_auto(value, context) orelse 0;
 }
-pub fn resolve_or_zero_dimension(value: dimension.Dimension, context: ?f32) f32 {
+pub inline fn resolve_or_zero_dimension(value: dimension.Dimension, context: ?f32) f32 {
     return maybe_resolve_dimension(value, context) orelse 0;
 }
 
-pub fn resolve_rect_or_zero(value: anytype, context: ?f32, comptime T: type) @import("../geometry.zig").Rect(T) {
+pub inline fn resolve_rect_or_zero(value: anytype, context: ?f32, comptime T: type) @import("../geometry.zig").Rect(T) {
     return .{
         .left = resolve_or_zero_value(value.left, context),
         .right = resolve_or_zero_value(value.right, context),
@@ -107,7 +91,7 @@ pub fn resolve_rect_or_zero(value: anytype, context: ?f32, comptime T: type) @im
     };
 }
 
-fn resolve_or_zero_value(value: anytype, context: ?f32) f32 {
+inline fn resolve_or_zero_value(value: anytype, context: ?f32) f32 {
     return switch (@TypeOf(value)) {
         dimension.LengthPercentage => resolve_or_zero_length(value, context),
         dimension.LengthPercentageAuto => resolve_or_zero_auto(value, context),

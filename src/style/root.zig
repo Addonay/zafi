@@ -2,6 +2,7 @@
 
 const geometry = @import("../geometry.zig");
 const std = @import("std");
+const css = @import("../util/css.zig");
 
 const serde_support = @import("../serde_support.zig");
 const serde_options = serde_support.pascal_options;
@@ -16,6 +17,9 @@ pub const dimension = @import("dimension.zig");
 pub const flex = @import("flex.zig");
 pub const float = @import("float.zig");
 pub const grid = @import("grid.zig");
+pub const view = @import("view.zig");
+pub const stored = @import("stored.zig");
+pub const StoredStyle = stored.StoredStyle;
 
 pub const Display = enum {
     /// Taffy-compatible serde: PascalCase variant names.
@@ -27,14 +31,15 @@ pub const Display = enum {
     flow_root,
     none,
 
+    /// Taffy's keyword parser: one ident, ASCII case-insensitive.
     pub fn from_str(input: []const u8) error{InvalidDisplay}!Display {
-        const source = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(source, "none")) return .none;
-        if (std.ascii.eqlIgnoreCase(source, "flex")) return .flex;
-        if (std.ascii.eqlIgnoreCase(source, "grid")) return .grid;
-        if (std.ascii.eqlIgnoreCase(source, "block")) return .block;
-        if (std.ascii.eqlIgnoreCase(source, "flow-root")) return .flow_root;
-        return error.InvalidDisplay;
+        return css.keyword_enum(Display, input, &.{
+            .{ "none", .none },
+            .{ "flex", .flex },
+            .{ "grid", .grid },
+            .{ "block", .block },
+            .{ "flow-root", .flow_root },
+        }) catch error.InvalidDisplay;
     }
 };
 pub const BoxGenerationMode = enum { normal, none };
@@ -74,14 +79,15 @@ pub const Position = enum {
     /// out-of-flow descendants.
     sticky,
 
+    /// Taffy's keyword parser: one ident, ASCII case-insensitive.
     pub fn from_str(input: []const u8) error{InvalidPosition}!Position {
-        const source = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(source, "static")) return .static;
-        if (std.ascii.eqlIgnoreCase(source, "relative")) return .relative;
-        if (std.ascii.eqlIgnoreCase(source, "absolute")) return .absolute;
-        if (std.ascii.eqlIgnoreCase(source, "fixed")) return .fixed;
-        if (std.ascii.eqlIgnoreCase(source, "sticky")) return .sticky;
-        return error.InvalidPosition;
+        return css.keyword_enum(Position, input, &.{
+            .{ "static", .static },
+            .{ "relative", .relative },
+            .{ "absolute", .absolute },
+            .{ "fixed", .fixed },
+            .{ "sticky", .sticky },
+        }) catch error.InvalidPosition;
     }
 
     /// Whether this position takes the item out of normal flow.
@@ -136,11 +142,12 @@ pub const BoxSizing = enum {
     border_box,
     content_box,
 
+    /// Taffy's keyword parser: one ident, ASCII case-insensitive.
     pub fn from_str(input: []const u8) error{InvalidBoxSizing}!BoxSizing {
-        const source = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(source, "border-box")) return .border_box;
-        if (std.ascii.eqlIgnoreCase(source, "content-box")) return .content_box;
-        return error.InvalidBoxSizing;
+        return css.keyword_enum(BoxSizing, input, &.{
+            .{ "border-box", .border_box },
+            .{ "content-box", .content_box },
+        }) catch error.InvalidBoxSizing;
     }
 };
 pub const Overflow = enum {
@@ -152,13 +159,14 @@ pub const Overflow = enum {
     hidden,
     scroll,
 
+    /// Taffy's keyword parser: one ident, ASCII case-insensitive.
     pub fn from_str(input: []const u8) error{InvalidOverflow}!Overflow {
-        const source = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(source, "visible")) return .visible;
-        if (std.ascii.eqlIgnoreCase(source, "hidden")) return .hidden;
-        if (std.ascii.eqlIgnoreCase(source, "clip")) return .clip;
-        if (std.ascii.eqlIgnoreCase(source, "scroll")) return .scroll;
-        return error.InvalidOverflow;
+        return css.keyword_enum(Overflow, input, &.{
+            .{ "visible", .visible },
+            .{ "hidden", .hidden },
+            .{ "clip", .clip },
+            .{ "scroll", .scroll },
+        }) catch error.InvalidOverflow;
     }
 
     pub fn is_scroll_container(self: Overflow) bool {
@@ -180,11 +188,12 @@ pub const Direction = enum {
         return self == .rtl;
     }
 
+    /// Taffy's keyword parser: one ident, ASCII case-insensitive.
     pub fn from_str(input: []const u8) error{InvalidDirection}!Direction {
-        const source = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(source, "ltr")) return .ltr;
-        if (std.ascii.eqlIgnoreCase(source, "rtl")) return .rtl;
-        return error.InvalidDirection;
+        return css.keyword_enum(Direction, input, &.{
+            .{ "ltr", .ltr },
+            .{ "rtl", .rtl },
+        }) catch error.InvalidDirection;
     }
 };
 pub const Contain = packed struct(u8) {
@@ -202,38 +211,36 @@ pub const Contain = packed struct(u8) {
     pub const PAINT: Contain = .{ .paint = true };
     pub const CONTENT: Contain = .{ .layout = true, .paint = true };
 
+    /// Taffy's `FromCss for Contain`: `none`, `content`, or any set of
+    /// `layout`, `paint` and `style` (ignored), each at most once.
     pub fn from_str(input: []const u8) error{InvalidContain}!Contain {
-        var result = Contain.NONE;
-        var seen: u8 = 0;
-        var token_count: usize = 0;
-        var saw_content = false;
-        var tokens = std.mem.tokenizeAny(u8, std.mem.trim(u8, input, " \t\r\n"), " \t\r\n");
-        while (tokens.next()) |token| {
-            token_count += 1;
-            if (std.ascii.eqlIgnoreCase(token, "none")) {
-                if (token_count != 1 or tokens.next() != null) return error.InvalidContain;
-                return result;
-            } else if (std.ascii.eqlIgnoreCase(token, "content")) {
-                if (saw_content) return error.InvalidContain;
-                result = Contain.CONTENT;
-                saw_content = true;
-                seen |= 1;
-            } else if (std.ascii.eqlIgnoreCase(token, "layout")) {
-                if ((seen & 1) != 0) return error.InvalidContain;
-                result.layout = true;
-                seen |= 1;
-            } else if (std.ascii.eqlIgnoreCase(token, "paint")) {
-                if ((seen & 2) != 0) return error.InvalidContain;
-                result.paint = true;
-                seen |= 2;
-            } else if (std.ascii.eqlIgnoreCase(token, "style")) {
-                if ((seen & 4) != 0) return error.InvalidContain;
-                seen |= 4;
-            } else return error.InvalidContain;
-        }
-        if (token_count == 0) return error.InvalidContain;
-        if (saw_content and token_count > 1) return error.InvalidContain;
-        return result;
+        const S = struct {
+            fn parse(_: void, p: *css.Parser) css.Error!Contain {
+                const style_bit: u8 = 1 << 6;
+                var flags = Contain.NONE;
+                var seen: u8 = 0;
+                while (true) {
+                    const ident = try p.expect_ident();
+                    const flag: Contain, const seen_bit: u8 = if (std.ascii.eqlIgnoreCase(ident, "none") or std.ascii.eqlIgnoreCase(ident, "content")) {
+                        if (seen != 0 or !p.is_exhausted()) return error.InvalidCss;
+                        return if (std.ascii.eqlIgnoreCase(ident, "content")) Contain.CONTENT else Contain.NONE;
+                    } else if (std.ascii.eqlIgnoreCase(ident, "layout"))
+                        .{ Contain.LAYOUT, 1 }
+                    else if (std.ascii.eqlIgnoreCase(ident, "paint"))
+                        .{ Contain.PAINT, 2 }
+                    else if (std.ascii.eqlIgnoreCase(ident, "style"))
+                        .{ Contain.NONE, style_bit }
+                    else
+                        return error.InvalidCss;
+                    if (seen & seen_bit != 0) return error.InvalidCss;
+                    seen |= seen_bit;
+                    flags.layout = flags.layout or flag.layout;
+                    flags.paint = flags.paint or flag.paint;
+                    if (p.is_exhausted()) return flags;
+                }
+            }
+        };
+        return css.parse_str_entirely(input, Contain, {}, S.parse) catch error.InvalidContain;
     }
 
     pub fn suppresses_baseline(self: Contain) bool {
@@ -481,6 +488,13 @@ pub const BlockItemStyle = struct {
 };
 
 pub const Style = struct {
+    /// Read a property. The layout algorithms read every property this way so
+    /// they also run on host style types (see `view.zig`); for `Style` itself it
+    /// is a plain field load.
+    pub inline fn get(self: *const Style, comptime field: view.Field) view.FieldType(field) {
+        return @field(self, @tagName(field));
+    }
+
     /// Mirrors Rust's `dummy: PhantomData<S>` field, which serde emits as
     /// `"dummy": null`; keeping it preserves Taffy's wire field order.
     dummy: void = {},
@@ -876,4 +890,6 @@ test {
     _ = @import("flex.zig");
     _ = @import("float.zig");
     _ = @import("grid.zig");
+    _ = @import("stored.zig");
+    _ = @import("view.zig");
 }

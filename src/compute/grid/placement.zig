@@ -81,12 +81,13 @@ pub fn place_grid_items(
     // Resolve every child's placement and style pointer once. The three
     // placement passes below are pure with respect to occupancy, and the
     // literal port re-resolved (a map lookup plus a ~700-byte style copy) per
-    // child per pass. Node pointers are stable in the paged node store.
+    // child per pass. Style pointers are stable for the pass: layout never
+    // creates nodes.
     const child_count = in_flow_children.len;
     // Every child produces exactly one grid item; reserving once avoids the
     // ArrayList doubling copies of the 424-byte GridItem struct.
     try items.ensureTotalCapacity(allocator, child_count);
-    const styles = try allocator.alloc(*const style.Style, child_count);
+    const styles = try allocator.alloc(TreeApi.StyleRef, child_count);
     defer allocator.free(styles);
     for (in_flow_children, 0..) |entry, child_index| {
         const child_id = entry.node;
@@ -178,12 +179,12 @@ pub fn place_grid_items(
 
 pub fn resolve_child_placement(
     named_line_resolver: *const NamedLineResolver,
-    child_style: *const style.Style,
+    child_style: anytype,
     explicit_col_count: u16,
     explicit_row_count: u16,
 ) AxisPlacement {
-    const resolved_h = named_line_resolver.resolve_column_names(child_style.grid_column);
-    const resolved_v = named_line_resolver.resolve_row_names(child_style.grid_row);
+    const resolved_h = named_line_resolver.resolve_column_names(child_style.get(.grid_column));
+    const resolved_v = named_line_resolver.resolve_row_names(child_style.get(.grid_row));
     return .{
         .horizontal = .{
             .start = grid.into_origin_zero_placement(resolved_h.start, explicit_col_count),
@@ -355,7 +356,7 @@ fn record_grid_placement(
     allocator: std.mem.Allocator,
     node: NodeId,
     source_order: u16,
-    item_style: *const style.Style,
+    item_style: anytype,
     parent_align_items: style.alignment.AlignItems,
     parent_justify_items: style.alignment.AlignItems,
     primary_axis: geometry.AbsoluteAxis,

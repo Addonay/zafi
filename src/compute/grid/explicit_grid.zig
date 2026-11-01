@@ -49,12 +49,12 @@ fn track_definite_value(sizing_function: grid.TrackSizingFunction, parent_size: 
 
 /// Compute the number of rows and columns in the explicit grid
 pub fn compute_explicit_grid_size_in_axis(
-    item_style: *const style.Style,
+    item_style: anytype,
     auto_fit_container_size: ?f32,
     auto_fit_strategy: AutoRepeatStrategy,
     axis: geometry.AbsoluteAxis,
 ) ExplicitGridSize {
-    const template: []const grid.GridTemplateComponent = if (axis == .horizontal) item_style.grid_template_columns else item_style.grid_template_rows;
+    const template: []const grid.GridTemplateComponent = if (axis == .horizontal) item_style.get(.grid_template_columns) else item_style.get(.grid_template_rows);
 
     // If template contains no tracks, then there are trivially zero explicit tracks
     if (template.len == 0) return .{};
@@ -145,7 +145,7 @@ pub fn compute_explicit_grid_size_in_axis(
                 },
             }
         }
-        const gap_size = (if (axis == .horizontal) item_style.gap.width else item_style.gap.height).resolve(inner_container_size);
+        const gap_size = (if (axis == .horizontal) item_style.get(.gap).width else item_style.get(.gap).height).resolve(inner_container_size);
 
         // Compute the amount of space that a single repetition of the repeated track list takes
         var per_repetition_track_used_space: f32 = 0;
@@ -209,15 +209,15 @@ pub fn initialize_grid_tracks(
     tracks: *std.ArrayList(GridTrack),
     allocator: std.mem.Allocator,
     counts: TrackCounts,
-    item_style: *const style.Style,
+    item_style: anytype,
     axis: geometry.AbsoluteAxis,
     auto_repetition_count: u16,
     track_has_items_context: ?*const anyopaque,
     track_has_items: TrackHasItemsFn,
 ) !void {
-    const track_template: []const grid.GridTemplateComponent = if (axis == .horizontal) item_style.grid_template_columns else item_style.grid_template_rows;
-    const auto_tracks: []const grid.TrackSizingFunction = if (axis == .horizontal) item_style.grid_auto_columns else item_style.grid_auto_rows;
-    const gap = if (axis == .horizontal) item_style.gap.width else item_style.gap.height;
+    const track_template: []const grid.GridTemplateComponent = if (axis == .horizontal) item_style.get(.grid_template_columns) else item_style.get(.grid_template_rows);
+    const auto_tracks: []const grid.TrackSizingFunction = if (axis == .horizontal) item_style.get(.grid_auto_columns) else item_style.get(.grid_auto_rows);
+    const gap = if (axis == .horizontal) item_style.get(.gap).width else item_style.get(.gap).height;
 
     tracks.clearRetainingCapacity();
     try tracks.append(allocator, GridTrack.gutter(gap));

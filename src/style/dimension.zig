@@ -4,19 +4,22 @@ const AvailableSpace = @import("available_space.zig").AvailableSpace;
 const calc_resolver = @import("calc.zig");
 const compact_length = @import("compact_length.zig");
 const std = @import("std");
+const css = @import("../util/css.zig");
+
+/// Adapt a type's `from_css(*css.Parser)` to the `(context, parser)` shape
+/// `css.parse_str_entirely` takes.
+pub fn from_css_ctx(comptime T: type) fn (void, *css.Parser) css.Error!T {
+    return struct {
+        fn parse(_: void, p: *css.Parser) css.Error!T {
+            return T.from_css(p);
+        }
+    }.parse;
+}
 
 const serde_support = @import("../serde_support.zig");
 const serde_serialize = serde_support.serialize;
 const serde_deserialize = serde_support.deserialize;
 pub const DimensionParseError = error{ InvalidDimension, InvalidNumber };
-
-fn parse_numeric(input: []const u8) DimensionParseError!f32 {
-    return std.fmt.parseFloat(f32, input) catch error.InvalidNumber;
-}
-
-fn trim_dimension_input(input: []const u8) []const u8 {
-    return std.mem.trim(u8, input, " \t\r\n");
-}
 
 pub const LengthPercentage = struct {
     /// Taffy-compatible serde: u64 wire bits with wrapper-specific tag validation.
@@ -32,11 +35,16 @@ pub const LengthPercentage = struct {
         return .{ .value = compact_length.compact_length_from_percent(value) };
     }
 
+    /// Taffy's `FromCss for LengthPercentage`: `<n>px` or `<n>%`.
+    pub fn from_css(p: *css.Parser) css.Error!LengthPercentage {
+        return switch (try p.next()) {
+            .percentage => |pc| percent(pc.unit_value),
+            .dimension => |d| if (std.mem.eql(u8, d.unit, "px")) length(d.value) else error.InvalidCss,
+            else => error.InvalidCss,
+        };
+    }
     pub fn from_str(input: []const u8) DimensionParseError!LengthPercentage {
-        const source = trim_dimension_input(input);
-        if (std.mem.endsWith(u8, source, "%")) return LengthPercentage.percent((parse_numeric(source[0 .. source.len - 1]) catch return error.InvalidNumber) / 100.0);
-        if (std.mem.endsWith(u8, source, "px")) return LengthPercentage.length(parse_numeric(source[0 .. source.len - 2]) catch return error.InvalidNumber);
-        return error.InvalidDimension;
+        return css.parse_str_entirely(input, LengthPercentage, {}, from_css_ctx(LengthPercentage)) catch error.InvalidDimension;
     }
 
     pub fn length(value: f32) LengthPercentage {
@@ -51,27 +59,13 @@ pub const LengthPercentage = struct {
         return .{ .value = compact_length.CompactLength.calc(pointer) };
     }
 
-    pub fn resolve(self: LengthPercentage, basis: f32) f32 {
-        if (self.value.tag() == .calc) return calc_resolver.resolve(self.value.calc_value(), basis);
-        return switch (self.value.tag()) {
-            .length => self.value.value(),
-            .percent => self.value.value() * basis,
-            // Tree's default calc resolver returns 0; other non-definite
-            // values resolve to zero through `ResolveOrZero`.
-            .calc => 0,
-            else => 0,
-        };
+    pub inline fn resolve(self: LengthPercentage, basis: f32) f32 {
+        return self.value.resolve_or_with(basis, 0, true);
     }
 
-    pub fn resolve_to_option(self: LengthPercentage, basis: ?f32) ?f32 {
+    pub inline fn resolve_to_option(self: LengthPercentage, basis: ?f32) ?f32 {
         // Like Taffy, a calc value needs a definite basis.
-        if (self.value.tag() == .calc) return if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null;
-        return switch (self.value.tag()) {
-            .length => self.value.value(),
-            .percent => if (basis) |b| self.value.value() * b else null,
-            .calc => 0,
-            else => null,
-        };
+        return self.value.maybe_resolve(basis);
     }
 
     pub fn zero() LengthPercentage {
@@ -105,12 +99,17 @@ pub const LengthPercentageAuto = struct {
         return .{ .value = compact_length.compact_length_from_percent(value) };
     }
 
+    /// Taffy's `FromCss for LengthPercentageAuto`: `<n>px`, `<n>%` or `auto`.
+    pub fn from_css(p: *css.Parser) css.Error!LengthPercentageAuto {
+        return switch (try p.next()) {
+            .percentage => |pc| percent(pc.unit_value),
+            .dimension => |d| if (std.mem.eql(u8, d.unit, "px")) length(d.value) else error.InvalidCss,
+            .ident => |ident| if (std.mem.eql(u8, ident, "auto")) auto() else error.InvalidCss,
+            else => error.InvalidCss,
+        };
+    }
     pub fn from_str(input: []const u8) DimensionParseError!LengthPercentageAuto {
-        const source = trim_dimension_input(input);
-        if (std.ascii.eqlIgnoreCase(source, "auto")) return .auto();
-        if (std.mem.endsWith(u8, source, "%")) return LengthPercentageAuto.percent((parse_numeric(source[0 .. source.len - 1]) catch return error.InvalidNumber) / 100.0);
-        if (std.mem.endsWith(u8, source, "px")) return .length(parse_numeric(source[0 .. source.len - 2]) catch return error.InvalidNumber);
-        return error.InvalidDimension;
+        return css.parse_str_entirely(input, LengthPercentageAuto, {}, from_css_ctx(LengthPercentageAuto)) catch error.InvalidDimension;
     }
 
     pub fn auto() LengthPercentageAuto {
@@ -129,27 +128,14 @@ pub const LengthPercentageAuto = struct {
         return .{ .value = compact_length.CompactLength.calc(pointer) };
     }
 
-    pub fn resolve(self: LengthPercentageAuto, basis: f32) ?f32 {
-        if (self.value.tag() == .calc) return calc_resolver.resolve(self.value.calc_value(), basis);
-        return switch (self.value.tag()) {
-            .auto => null,
-            .length => self.value.value(),
-            .percent => self.value.value() * basis,
-            .calc => 0,
-            else => 0,
-        };
+    pub inline fn resolve(self: LengthPercentageAuto, basis: f32) ?f32 {
+        if (self.value.tag() == .auto) return null;
+        return self.value.resolve_or_with(basis, 0, true);
     }
 
-    pub fn resolve_to_option(self: LengthPercentageAuto, basis: ?f32) ?f32 {
-        // Like Taffy, a calc value needs a definite basis.
-        if (self.value.tag() == .calc) return if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null;
-        return switch (self.value.tag()) {
-            .auto => null,
-            .length => self.value.value(),
-            .percent => if (basis) |b| self.value.value() * b else null,
-            .calc => 0,
-            else => null,
-        };
+    pub inline fn resolve_to_option(self: LengthPercentageAuto, basis: ?f32) ?f32 {
+        // Like Taffy, a calc value needs a definite basis; auto is indefinite.
+        return self.value.maybe_resolve(basis);
     }
 
     pub fn zero() LengthPercentageAuto {
@@ -198,22 +184,37 @@ pub const Dimension = struct {
         return .{ .value = compact_length.compact_length_from_percent(value) };
     }
 
+    /// Taffy's `FromCss for Dimension`: a length or percentage, a sizing
+    /// keyword, or `fit-content(<length-percentage>)`. Keywords and units are
+    /// case-sensitive, as in Taffy.
+    pub fn from_css(p: *css.Parser) css.Error!Dimension {
+        return switch (try p.next()) {
+            .percentage => |pc| percent(pc.unit_value),
+            .dimension => |d| if (std.mem.eql(u8, d.unit, "px")) length(d.value) else error.InvalidCss,
+            .ident => |ident| keyword: {
+                const table = [_]struct { []const u8, Dimension }{
+                    .{ "auto", .auto },             .{ "min-content", .min_content }, .{ "max-content", .max_content },
+                    .{ "fit-content", .fit_content }, .{ "stretch", .stretch },       .{ "content", .content },
+                };
+                for (table) |entry| if (std.mem.eql(u8, ident, entry[0])) break :keyword entry[1];
+                break :keyword error.InvalidCss;
+            },
+            .function => |name| if (std.mem.eql(u8, name, "fit-content"))
+                p.parse_nested_block(Dimension, {}, fit_content_arg)
+            else
+                error.InvalidCss,
+            else => error.InvalidCss,
+        };
+    }
+    fn fit_content_arg(_: void, p: *css.Parser) css.Error!Dimension {
+        return switch (try p.next()) {
+            .percentage => |pc| fit_content_percent(pc.unit_value),
+            .dimension => |d| if (std.mem.eql(u8, d.unit, "px")) fit_content_px(d.value) else error.InvalidCss,
+            else => error.InvalidCss,
+        };
+    }
     pub fn from_str(input: []const u8) DimensionParseError!Dimension {
-        const source = trim_dimension_input(input);
-        if (std.ascii.eqlIgnoreCase(source, "auto")) return .auto;
-        if (std.ascii.eqlIgnoreCase(source, "min-content")) return .min_content;
-        if (std.ascii.eqlIgnoreCase(source, "max-content")) return .max_content;
-        if (std.ascii.eqlIgnoreCase(source, "fit-content")) return .fit_content;
-        if (std.ascii.eqlIgnoreCase(source, "stretch")) return .stretch;
-        if (std.ascii.eqlIgnoreCase(source, "content")) return .content;
-        if (std.mem.endsWith(u8, source, "%")) return .percent((parse_numeric(source[0 .. source.len - 1]) catch return error.InvalidNumber) / 100.0);
-        if (std.mem.endsWith(u8, source, "px")) return .length(parse_numeric(source[0 .. source.len - 2]) catch return error.InvalidNumber);
-        if (std.mem.startsWith(u8, source, "fit-content(") and std.mem.endsWith(u8, source, ")")) {
-            const inner = source[12 .. source.len - 1];
-            if (std.mem.endsWith(u8, inner, "%")) return .fit_content_percent((parse_numeric(inner[0 .. inner.len - 1]) catch return error.InvalidNumber) / 100.0);
-            if (std.mem.endsWith(u8, inner, "px")) return .fit_content_length(parse_numeric(inner[0 .. inner.len - 2]) catch return error.InvalidNumber);
-        }
-        return error.InvalidDimension;
+        return css.parse_str_entirely(input, Dimension, {}, from_css_ctx(Dimension)) catch error.InvalidDimension;
     }
     pub fn calc(value: *const anyopaque) Dimension {
         return .{ .value = compact_length.CompactLength.calc(value) };
@@ -246,17 +247,11 @@ pub const Dimension = struct {
         return self.value.is_fit_content_calc();
     }
 
-    pub fn resolve(self: Dimension, basis: ?f32) ?f32 {
-        if (self.value.tag() == .calc) return if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null;
-        return switch (self.value.tag()) {
-            .length => self.value.value(),
-            .percent => if (basis) |b| self.value.value() * b else null,
-            .calc => 0,
-            else => null,
-        };
+    pub inline fn resolve(self: Dimension, basis: ?f32) ?f32 {
+        return self.value.maybe_resolve(basis);
     }
 
-    pub fn resolve_to_option(self: Dimension, basis: ?f32) ?f32 {
+    pub inline fn resolve_to_option(self: Dimension, basis: ?f32) ?f32 {
         return self.resolve(basis);
     }
 
@@ -342,7 +337,7 @@ pub fn dimension_value(value: Dimension) compact_length.CompactLength {
     return value.value;
 }
 
-pub fn clamp_resolved_size(value: f32, minimum: LengthPercentageAuto, maximum: LengthPercentageAuto, basis: f32) f32 {
+pub inline fn clamp_resolved_size(value: f32, minimum: LengthPercentageAuto, maximum: LengthPercentageAuto, basis: f32) f32 {
     const min_value = minimum.resolve(basis) orelse 0;
     // An auto max is unbounded (infinity), never the value itself: using
     // the value here would swallow the min clamp whenever max is unset.
