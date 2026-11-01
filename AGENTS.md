@@ -54,6 +54,7 @@ for the Taffy pin.
 | #22 | Fix: stale layouts from cached block children sharing a float context (Taffy has this bug too) |
 | #23 | Release prep 0.3.0 (**v0.3.0 is released**: main + tag + GitHub release) |
 | #24 | `calc()` resolves through the host resolver (see below). Merged to dev. |
+| #25 | 0.4.0: custom style types, Taffy-parity CSS parsing, faster than Taffy with less memory, review/fuzz fixes. **Released to main as 0.4.0** (`686112d`). |
 
 ## Getting a fresh checkout running
 
@@ -222,25 +223,24 @@ See README "Performance".
   (the fresh-tree gap is glibc trim/page-fault cost on teardown); memory 0.79×.
 - Both sides use glibc malloc through a counting allocator (peak live bytes).
 
-## Remaining roadmap to 0.4.0
+## Release status: 0.4.0
 
-1. ~~Fix the #24 perf regression~~ DONE; ~~README for custom style types~~
-   DONE. PR `claude/festive-ptolemy-vdv58m` into dev (needs the owner's go).
-2. ~~CSS parsing completeness~~ DONE. `src/util/css.zig` is a small port of
-   the `cssparser` subset Taffy uses (exact numeric arithmetic, blocks,
-   try-parse rewind); every `from_str` is a port of Taffy's `FromCss` on top
-   of it. Parity check: `tools/parse_oracle` (Rust, Taffy `parse`+`serde`)
-   produced `expected.txt` from `corpus.txt` (`gen_corpus.py`, 17k cases);
-   `zig build parse-parity` diffs zafi against it and also runs every case
-   under a failing allocator (OOM must surface as `OutOfMemory`, no leaks).
-   Regenerate expected.txt only when the Taffy pin changes. Known deviation:
-   CSS escapes (`\`) are not decoded.
-3. ~~More perf~~ DONE (above). Remaining ideas: relayout_grid (0.95x) is
-   the closest; layout cache (328 B/node) is the biggest per-node item left.
-4. Review: the owner dropped the Codex requirement; a Claude review subagent
-   is used instead.
-5. Bump to 0.4.0 and run `tools/release.sh 0.4.0`; push main and the tag; ask
-   the owner before `gh release create`.
+- `main` = `686112d` ("zafi 0.4.0: release from dev@bfc7327"), pushed.
+- Tag `v0.4.0`: the cloud session that made the release could not push tags
+  (its git proxy refused). If it is missing on GitHub, create it on
+  `686112d`: `git tag -a v0.4.0 686112d -m "zafi 0.4.0" && git push origin v0.4.0`,
+  then `gh release create v0.4.0` (the owner approved publishing 0.4.0).
+
+## Next ideas
+
+- Speed: relayout_grid is the closest to Taffy (~0.97x); per node, the layout
+  cache (328 B) is the biggest item left.
+- Memory: flex_wrap and mixed sit at ~1.0x Taffy (slot growth slack plus
+  layout scratch on small trees).
+- Known, shared with Taffy: the cache key keeps the requested axis in the f32
+  sign bits of the parent size, so a negative parent size aliases its
+  positive counterpart.
+- CSS escapes (`\`) are not decoded by `util/css.zig`.
 
 ## Architecture notes worth knowing
 
