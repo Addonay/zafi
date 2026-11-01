@@ -55,6 +55,7 @@ for the Taffy pin.
 | #23 | Release prep 0.3.0 (**v0.3.0 is released**: main + tag + GitHub release) |
 | #24 | `calc()` resolves through the host resolver (see below). Merged to dev. |
 | #25 | 0.4.0: custom style types, Taffy-parity CSS parsing, faster than Taffy with less memory, review/fuzz fixes. **Released to main as 0.4.0** (`686112d`). |
+| #27 | Cache-key sign-bit fix + 11 Taffy issues zafi shared (see "Taffy issue triage"). Released as **0.4.1**. |
 
 ## Getting a fresh checkout running
 
@@ -223,13 +224,15 @@ See README "Performance".
   (the fresh-tree gap is glibc trim/page-fault cost on teardown); memory 0.79×.
 - Both sides use glibc malloc through a counting allocator (peak live bytes).
 
-## Release status: 0.4.0
+## Release status: 0.4.0 / 0.4.1
 
 - `main` = `686112d` ("zafi 0.4.0: release from dev@bfc7327"), pushed.
 - Tag `v0.4.0`: the cloud session that made the release could not push tags
   (its git proxy refused). If it is missing on GitHub, create it on
   `686112d`: `git tag -a v0.4.0 686112d -m "zafi 0.4.0" && git push origin v0.4.0`,
   then `gh release create v0.4.0` (the owner approved publishing 0.4.0).
+- 0.4.1 was released to `main` by the same kind of session; its tag is
+  likewise pushed by the owner (see the release commit on `main`).
 
 ## Taffy issue triage (Nov 2026, after 0.4.0)
 
