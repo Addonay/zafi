@@ -19,6 +19,26 @@ pub fn build(b: *std.Build) void {
     audit.setCwd(repo_root);
     audit_step.dependOn(&audit.step);
 
+    // CSS parser parity against Taffy (expected output from tools/parse_oracle).
+    const serde_zafi_dep = b.dependency("zafi", .{ .target = target, .optimize = optimize, .serde = true });
+    const parse_parity_exe = b.addExecutable(.{
+        .name = "parse_parity",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("parse_parity/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zafi", .module = serde_zafi_dep.module("zafi") },
+                .{ .name = "serde", .module = serde_zafi_dep.builder.dependency("serde", .{}).module("serde") },
+            },
+        }),
+    });
+    const parse_parity_run = b.addRunArtifact(parse_parity_exe);
+    parse_parity_run.setCwd(repo_root);
+    parse_parity_run.addPassthruArgs();
+    const parse_parity_step = b.step("parse-parity", "Check zafi's CSS parsers against Taffy's (tools/parse_oracle)");
+    parse_parity_step.dependOn(&parse_parity_run.step);
+
     // Differential verification: same scenarios on Rust Taffy and zafi.
     const parity_step = b.step("parity", "Run the Rust-vs-Zig differential parity harness");
     const parity = b.addSystemCommand(&.{ "python3", "tools/parity/run.py" });

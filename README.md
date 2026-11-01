@@ -174,6 +174,25 @@ Custom `LayoutTree` hosts implement `calc(tree, handle, basis) ?f32` instead.
 Like Taffy, a calc value with no definite basis is treated as indefinite (e.g.
 `auto` for sizes), and with no resolver it evaluates to 0.
 
+## Parsing CSS values
+
+Style values parse from CSS text with the same grammar as Taffy's `parse`
+feature (a port of its `cssparser`-based parsers, checked against Taffy on a
+17k-case corpus):
+
+```zig
+const width = try zafi.Dimension.from_str("fit-content(50%)");
+const align = try zafi.AlignItems.from_str("safe center");
+const row = try zafi.GridPlacement.from_str("span 2 header"); // names borrow the input
+
+// Track lists allocate; the caller owns the result.
+const columns = try zafi.style.grid.GridTemplateComponents.from_str(allocator, "[a] repeat(2, minmax(10px, 1fr)) [b] auto");
+defer columns.deinit(allocator);
+```
+
+Nothing is allocated behind your back: only the track-list parsers take an
+allocator, and an allocation failure is reported as `error.OutOfMemory`.
+
 ## JSON (optional)
 
 Taffy-compatible `serde` JSON for `Style` and friends is behind a build option;

@@ -1,14 +1,24 @@
 //! Direct port of Taffy's `style/available_space.rs`.
 
 const std = @import("std");
+const css = @import("../util/css.zig");
 const geometry = @import("../geometry.zig");
 
 pub const AvailableSpace = union(enum) {
+    /// Taffy-compatible serde: external tagging, PascalCase variant names.
+    pub const serde = .{
+        .rename = .{
+            .definite = "Definite",
+            .min_content = "MinContent",
+            .max_content = "MaxContent",
+        },
+    };
+
     definite: f32,
     min_content,
     max_content,
 
-    pub fn from_str(input: []const u8) !AvailableSpace {
+    pub fn from_str(input: []const u8) error{InvalidAvailableSpace}!AvailableSpace {
         return from_css(input);
     }
 
@@ -84,14 +94,25 @@ pub fn from(value: anytype) AvailableSpace {
     return .{ .definite = @floatCast(value) };
 }
 
-pub fn from_css(input: []const u8) !AvailableSpace {
-    const source = std.mem.trim(u8, input, " \t\r\n");
-    if (std.ascii.eqlIgnoreCase(source, "min-content")) return .min_content;
-    if (std.ascii.eqlIgnoreCase(source, "max-content")) return .max_content;
-    if (std.mem.endsWith(u8, source, "px")) {
-        return .{ .definite = std.fmt.parseFloat(f32, source[0 .. source.len - 2]) catch return error.InvalidAvailableSpace };
-    }
-    return .{ .definite = std.fmt.parseFloat(f32, source) catch return error.InvalidAvailableSpace };
+/// Taffy's `FromCss for AvailableSpace`: a non-negative number or dimension
+/// (any unit), `min-content` or `max-content`.
+pub fn from_css(input: []const u8) error{InvalidAvailableSpace}!AvailableSpace {
+    const S = struct {
+        fn parse(_: void, p: *css.Parser) css.Error!AvailableSpace {
+            return switch (try p.next()) {
+                .number => |n| if (n.value >= 0) .{ .definite = n.value } else error.InvalidCss,
+                .dimension => |d| if (d.value >= 0) .{ .definite = d.value } else error.InvalidCss,
+                .ident => |ident| if (std.mem.eql(u8, ident, "max-content"))
+                    .max_content
+                else if (std.mem.eql(u8, ident, "min-content"))
+                    .min_content
+                else
+                    error.InvalidCss,
+                else => error.InvalidCss,
+            };
+        }
+    };
+    return css.parse_str_entirely(input, AvailableSpace, {}, S.parse) catch error.InvalidAvailableSpace;
 }
 
 pub fn into_options(value: geometry.Size(AvailableSpace)) geometry.Size(?f32) {

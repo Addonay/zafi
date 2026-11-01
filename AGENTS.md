@@ -81,8 +81,10 @@ cd tools && zig build fixtures      # full Taffy XML corpus; expect 6652/6652
 1. `zig build test`
 2. `zig build test -Dserde=true`
 3. `cd tools && zig build fixtures` → **6652/6652** at `c6421c1`
-4. `zig build test -Doptimize=ReleaseSafe` is a good extra check.
-5. No benchmark regression (see "Benchmarking" below).
+4. `cd tools && zig build parse-parity` → **0 mismatches, 0 memory failures**
+   (CSS parsers vs Taffy; see below).
+5. `zig build test -Doptimize=ReleaseSafe` is a good extra check.
+6. No benchmark regression (see "Benchmarking" below).
 
 ## The current goal (owner's words)
 
@@ -203,13 +205,15 @@ same-binary runs vary 30%; always run an A/A control.
 
 1. ~~Fix the #24 perf regression~~ DONE; ~~README for custom style types~~
    DONE. PR `claude/festive-ptolemy-vdv58m` into dev (needs the owner's go).
-2. CSS parsing completeness: IN PROGRESS. Plan: a differential oracle
-   (`tools/parse_oracle`, Rust, Taffy `parse`+`serde`) prints Taffy's serde
-   JSON (or ERR) for a corpus of `(type, input)`; a Zig checker does the same
-   through zafi's `from_str` + serde and diffs. Known gaps: no `from_str` for
-   `GridPlacement`, `RepetitionCount`, `GridAutoTracks` (zafi's accepts line
-   names; Taffy's does not); the template parsers map OOM to
-   `InvalidGridSyntax` and leak partial allocations on error.
+2. ~~CSS parsing completeness~~ DONE. `src/util/css.zig` is a small port of
+   the `cssparser` subset Taffy uses (exact numeric arithmetic, blocks,
+   try-parse rewind); every `from_str` is a port of Taffy's `FromCss` on top
+   of it. Parity check: `tools/parse_oracle` (Rust, Taffy `parse`+`serde`)
+   produced `expected.txt` from `corpus.txt` (`gen_corpus.py`, 17k cases);
+   `zig build parse-parity` diffs zafi against it and also runs every case
+   under a failing allocator (OOM must surface as `OutOfMemory`, no leaks).
+   Regenerate expected.txt only when the Taffy pin changes. Known deviation:
+   CSS escapes (`\`) are not decoded.
 3. More perf: fresh-tree glibc trimming behaviour, flex (~+4% instructions
    vs 0.3.0), `relayout_grid_50x50` vs Taffy.
 4. Codex adversarial review (two runs max, in the background):

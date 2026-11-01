@@ -1,6 +1,7 @@
 //! Direct port of Taffy's `style/alignment.rs` value vocabulary.
 
 const std = @import("std");
+const css = @import("../util/css.zig");
 
 const serde_support = @import("../serde_support.zig");
 const serde_serialize = serde_support.serialize;
@@ -186,36 +187,65 @@ pub fn reversed(keyword: AlignContentKeyword) AlignContentKeyword {
     return keyword.reversed();
 }
 
-fn parse_align_items(input: []const u8) AlignmentParseError!AlignItems {
-    var tokens = std.mem.tokenizeAny(u8, std.mem.trim(u8, input, " \t\r\n"), " \t");
-    const first = tokens.next() orelse return error.InvalidAlignment;
-    const second = tokens.next();
-    if (tokens.next() != null) return error.InvalidAlignment;
-    const safety: ?AlignmentSafety = if (std.ascii.eqlIgnoreCase(first, "safe")) .safe else if (std.ascii.eqlIgnoreCase(first, "unsafe")) .unsafe else null;
-    const keyword_token = if (safety != null) second orelse return error.InvalidAlignment else if (second != null) return error.InvalidAlignment else first;
-    if (std.ascii.eqlIgnoreCase(keyword_token, "normal")) {
-        if (safety != null) return error.InvalidSafetyCombination;
-        return AlignItems.NORMAL;
+/// Look `name` up in `table` (ASCII case-insensitive).
+fn lookup(comptime K: type, name: []const u8, comptime table: []const struct { []const u8, K }) ?K {
+    inline for (table) |entry| {
+        if (std.ascii.eqlIgnoreCase(name, entry[0])) return entry[1];
     }
-    const keyword: AlignItemsKeyword = if (std.ascii.eqlIgnoreCase(keyword_token, "start")) .start else if (std.ascii.eqlIgnoreCase(keyword_token, "end")) .end else if (std.ascii.eqlIgnoreCase(keyword_token, "flex-start")) .flex_start else if (std.ascii.eqlIgnoreCase(keyword_token, "flex-end")) .flex_end else if (std.ascii.eqlIgnoreCase(keyword_token, "self-start")) .self_start else if (std.ascii.eqlIgnoreCase(keyword_token, "self-end")) .self_end else if (std.ascii.eqlIgnoreCase(keyword_token, "center")) .center else if (std.ascii.eqlIgnoreCase(keyword_token, "baseline")) .baseline else if (std.ascii.eqlIgnoreCase(keyword_token, "stretch")) .stretch else return error.InvalidAlignment;
-    if (safety != null and (keyword == .baseline or keyword == .stretch)) return error.InvalidSafetyCombination;
-    return .{ .keyword = keyword, .safety = safety orelse .default };
+    return null;
+}
+
+const items_positions = [_]struct { []const u8, AlignItemsKeyword }{
+    .{ "start", .start },           .{ "end", .end },           .{ "flex-start", .flex_start },
+    .{ "flex-end", .flex_end },     .{ "self-start", .self_start }, .{ "self-end", .self_end },
+    .{ "center", .center },
+};
+const items_keywords = items_positions ++ [_]struct { []const u8, AlignItemsKeyword }{
+    .{ "normal", .normal }, .{ "baseline", .baseline }, .{ "stretch", .stretch },
+};
+const content_positions = [_]struct { []const u8, AlignContentKeyword }{
+    .{ "start", .start }, .{ "end", .end }, .{ "flex-start", .flex_start }, .{ "flex-end", .flex_end }, .{ "center", .center },
+};
+const content_keywords = content_positions ++ [_]struct { []const u8, AlignContentKeyword }{
+    .{ "normal", .normal },               .{ "stretch", .stretch },           .{ "space-between", .space_between },
+    .{ "space-evenly", .space_evenly },   .{ "space-around", .space_around },
+};
+
+/// Taffy's `FromCss for AlignItems`/`AlignContent`: a keyword, or `safe` /
+/// `unsafe` followed by a position keyword.
+fn parse_alignment(comptime A: type, comptime K: type, comptime positions: anytype, comptime keywords: anytype, input: []const u8) AlignmentParseError!A {
+    const S = struct {
+        fn parse(combo: *bool, p: *css.Parser) css.Error!A {
+            const first = try p.expect_ident();
+            const safety: ?AlignmentSafety = if (std.ascii.eqlIgnoreCase(first, "safe"))
+                .safe
+            else if (std.ascii.eqlIgnoreCase(first, "unsafe"))
+                .unsafe
+            else
+                null;
+            if (safety) |s| {
+                const pos = try p.expect_ident();
+                const keyword = lookup(K, pos, &positions) orelse {
+                    // A known keyword that cannot take a safety modifier.
+                    combo.* = lookup(K, pos, &keywords) != null;
+                    return error.InvalidCss;
+                };
+                return .{ .keyword = keyword, .safety = s };
+            }
+            return .{ .keyword = lookup(K, first, &keywords) orelse return error.InvalidCss, .safety = .default };
+        }
+    };
+    var combo = false;
+    return css.parse_str_entirely(input, A, &combo, S.parse) catch
+        if (combo) error.InvalidSafetyCombination else error.InvalidAlignment;
+}
+
+fn parse_align_items(input: []const u8) AlignmentParseError!AlignItems {
+    return parse_alignment(AlignItems, AlignItemsKeyword, items_positions, items_keywords, input);
 }
 
 fn parse_align_content(input: []const u8) AlignmentParseError!AlignContent {
-    var tokens = std.mem.tokenizeAny(u8, std.mem.trim(u8, input, " \t\r\n"), " \t");
-    const first = tokens.next() orelse return error.InvalidAlignment;
-    const second = tokens.next();
-    if (tokens.next() != null) return error.InvalidAlignment;
-    const safety: ?AlignmentSafety = if (std.ascii.eqlIgnoreCase(first, "safe")) .safe else if (std.ascii.eqlIgnoreCase(first, "unsafe")) .unsafe else null;
-    const keyword_token = if (safety != null) second orelse return error.InvalidAlignment else if (second != null) return error.InvalidAlignment else first;
-    if (std.ascii.eqlIgnoreCase(keyword_token, "normal")) {
-        if (safety != null) return error.InvalidSafetyCombination;
-        return AlignContent.NORMAL;
-    }
-    const keyword: AlignContentKeyword = if (std.ascii.eqlIgnoreCase(keyword_token, "start")) .start else if (std.ascii.eqlIgnoreCase(keyword_token, "end")) .end else if (std.ascii.eqlIgnoreCase(keyword_token, "flex-start")) .flex_start else if (std.ascii.eqlIgnoreCase(keyword_token, "flex-end")) .flex_end else if (std.ascii.eqlIgnoreCase(keyword_token, "center")) .center else if (std.ascii.eqlIgnoreCase(keyword_token, "stretch")) .stretch else if (std.ascii.eqlIgnoreCase(keyword_token, "space-between")) .space_between else if (std.ascii.eqlIgnoreCase(keyword_token, "space-evenly")) .space_evenly else if (std.ascii.eqlIgnoreCase(keyword_token, "space-around")) .space_around else return error.InvalidAlignment;
-    if (safety != null and (keyword == .stretch or keyword == .space_between or keyword == .space_evenly or keyword == .space_around)) return error.InvalidSafetyCombination;
-    return .{ .keyword = keyword, .safety = safety orelse .default };
+    return parse_alignment(AlignContent, AlignContentKeyword, content_positions, content_keywords, input);
 }
 
 test "alignment carries safety independently from the keyword" {

@@ -10,23 +10,13 @@ const dimension = @import("dimension.zig");
 const calc_resolver = @import("calc.zig");
 const compact_length = @import("compact_length.zig");
 const std = @import("std");
+const css = @import("../util/css.zig");
 
 const serde_support = @import("../serde_support.zig");
 const serde_options = serde_support.pascal_options;
 const serde_serialize = serde_support.serialize;
 const serde_deserialize = serde_support.deserialize;
 pub const GridStyleParseError = error{ InvalidGridValue, InvalidGridNumber, InvalidGridSyntax };
-
-fn parse_grid_number(input: []const u8) GridStyleParseError!f32 {
-    return std.fmt.parseFloat(f32, std.mem.trim(u8, input, " \t\r\n")) catch error.InvalidGridNumber;
-}
-
-fn parse_grid_length_percentage(input: []const u8) GridStyleParseError!dimension.LengthPercentage {
-    const value = std.mem.trim(u8, input, " \t\r\n");
-    if (std.mem.endsWith(u8, value, "%")) return dimension.LengthPercentage.percent((try parse_grid_number(value[0 .. value.len - 1])) / 100);
-    if (std.mem.endsWith(u8, value, "px")) return dimension.LengthPercentage.length(try parse_grid_number(value[0 .. value.len - 2]));
-    return error.InvalidGridValue;
-}
 
 pub const GridTemplateArea = struct {
     name: []const u8,
@@ -151,13 +141,33 @@ pub const GridAutoFlow = enum {
     row_dense,
     column_dense,
 
-    pub fn from_str(input: []const u8) !GridAutoFlow {
-        const value = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(value, "row")) return .row;
-        if (std.ascii.eqlIgnoreCase(value, "column")) return .column;
-        if (std.ascii.eqlIgnoreCase(value, "row dense")) return .row_dense;
-        if (std.ascii.eqlIgnoreCase(value, "column dense")) return .column_dense;
-        return error.InvalidGridAutoFlow;
+    /// Taffy's `FromCss for GridAutoFlow`: up to two of `row` / `column` /
+    /// `dense` (case-sensitive; `dense` alone means `row dense`).
+    pub fn from_css(p: *css.Parser) css.Error!GridAutoFlow {
+        var axis: ?enum { row, column } = null;
+        var dense = false;
+        for (0..2) |_| {
+            const saved = p.state();
+            const ident = p.expect_ident() catch {
+                p.reset(saved);
+                break;
+            };
+            if (std.mem.eql(u8, ident, "row")) {
+                axis = .row;
+            } else if (std.mem.eql(u8, ident, "column")) {
+                axis = .column;
+            } else if (std.mem.eql(u8, ident, "dense")) {
+                dense = true;
+            } else return error.InvalidCss;
+        }
+        if (axis == null and !dense) return error.InvalidCss;
+        return switch (axis orelse .row) {
+            .row => if (dense) .row_dense else .row,
+            .column => if (dense) .column_dense else .column,
+        };
+    }
+    pub fn from_str(input: []const u8) error{InvalidGridAutoFlow}!GridAutoFlow {
+        return css.parse_str_entirely(input, GridAutoFlow, {}, dimension.from_css_ctx(GridAutoFlow)) catch error.InvalidGridAutoFlow;
     }
 };
 
@@ -225,6 +235,46 @@ pub const GridPlacement = union(enum) {
     named_line: NamedLine,
     span: u16,
     named_span: NamedSpan,
+
+    /// Taffy's `FromCss for GridPlacement`: `auto`, or any order of an
+    /// optional `span`, a non-zero integer and a line name. Names borrow from
+    /// the input. Numbers saturate to the i16 / u16 range.
+    pub fn from_css(p: *css.Parser) css.Error!GridPlacement {
+        var span = false;
+        var number: ?i32 = null;
+        var ident: ?[]const u8 = null;
+        while (!p.is_exhausted()) {
+            switch (try p.next()) {
+                .ident => |name| if (std.mem.eql(u8, name, "auto")) {
+                    if (span or number != null or ident != null) return error.InvalidCss;
+                    try p.expect_exhausted();
+                    return .auto;
+                } else if (std.mem.eql(u8, name, "span")) {
+                    if (span) return error.InvalidCss;
+                    span = true;
+                } else {
+                    if (ident != null) return error.InvalidCss;
+                    ident = name;
+                },
+                .number => |n| {
+                    const value = n.int_value orelse return error.InvalidCss;
+                    if (value == 0 or number != null) return error.InvalidCss;
+                    number = value;
+                },
+                else => return error.InvalidCss,
+            }
+        }
+        if (span) {
+            const count: u16 = if (number) |n| saturating_u16(n) else 0;
+            return if (ident) |name| .{ .named_span = .{ .name = name, .count = count } } else .{ .span = count };
+        }
+        if (ident) |name| return .{ .named_line = .{ .name = name, .index = if (number) |n| saturating_i16(n) else 0 } };
+        return .{ .line = saturating_i16(number orelse return error.InvalidCss) };
+    }
+    /// `name` slices in the result borrow from `input`.
+    pub fn from_str(input: []const u8) error{InvalidGridPlacement}!GridPlacement {
+        return css.parse_str_entirely(input, GridPlacement, {}, dimension.from_css_ctx(GridPlacement)) catch error.InvalidGridPlacement;
+    }
 
     pub fn from_line_index(index: i16) GridPlacement {
         // Zero is preserved at the style boundary. Taffy treats it as auto
@@ -322,45 +372,9 @@ pub fn saturating_u16(value: i32) u16 {
     return @intCast(@max(@as(i32, 0), @min(@as(i32, 65535), value)));
 }
 
-pub fn grid_placement_from_str(input: []const u8) !GridPlacement {
-    // Port of Taffy's `FromCss for GridPlacement`: tokens may appear in any
-    // order, with at most one each of `span`, an integer, and an identifier.
-    var span = false;
-    var number: ?i32 = null;
-    var ident: ?[]const u8 = null;
-
-    var tokens = std.mem.tokenizeAny(u8, std.mem.trim(u8, input, " \t\r\n"), " \t\r\n");
-    while (tokens.next()) |token| {
-        if (std.ascii.eqlIgnoreCase(token, "auto")) {
-            if (span or number != null or ident != null) return error.InvalidGridPlacement;
-            if (tokens.next() != null) return error.InvalidGridPlacement;
-            return .auto;
-        } else if (std.ascii.eqlIgnoreCase(token, "span")) {
-            if (span) return error.InvalidGridPlacement;
-            span = true;
-        } else if (std.fmt.parseInt(i32, token, 10)) |value| {
-            if (value == 0 or number != null) return error.InvalidGridPlacement;
-            number = value;
-        } else |_| {
-            if (ident != null) return error.InvalidGridPlacement;
-            ident = token;
-        }
-    }
-
-    if (span) {
-        if (number) |value| {
-            if (ident) |name| return .{ .named_span = .{ .name = name, .count = saturating_u16(value) } };
-            return .{ .span = saturating_u16(value) };
-        }
-        if (ident) |name| return .{ .named_span = .{ .name = name, .count = 0 } };
-        return .{ .span = 0 };
-    }
-    if (number) |value| {
-        if (ident) |name| return .{ .named_line = .{ .name = name, .index = saturating_i16(value) } };
-        return .{ .line = saturating_i16(value) };
-    }
-    if (ident) |name| return .{ .named_line = .{ .name = name, .index = 0 } };
-    return error.InvalidGridPlacement;
+/// See `GridPlacement.from_str`.
+pub fn grid_placement_from_str(input: []const u8) error{InvalidGridPlacement}!GridPlacement {
+    return GridPlacement.from_str(input);
 }
 
 pub fn into_origin_zero_placement_ignoring_named(value: GridPlacement, explicit_track_count: u16) OriginZeroGridPlacement {
@@ -549,13 +563,24 @@ pub const MinTrackSizingFunction = struct {
             else => .auto,
         };
     }
+    /// Taffy's `FromCss for MinTrackSizingFunction`.
+    pub fn from_css(p: *css.Parser) css.Error!MinTrackSizingFunction {
+        return switch (try p.next()) {
+            .percentage => |pc| percent(pc.unit_value),
+            .dimension => |d| if (std.mem.eql(u8, d.unit, "px")) length(d.value) else error.InvalidCss,
+            .ident => |ident| if (std.mem.eql(u8, ident, "auto"))
+                .auto
+            else if (std.mem.eql(u8, ident, "min-content"))
+                .min_content
+            else if (std.mem.eql(u8, ident, "max-content"))
+                .max_content
+            else
+                error.InvalidCss,
+            else => error.InvalidCss,
+        };
+    }
     pub fn from_str(input: []const u8) GridStyleParseError!MinTrackSizingFunction {
-        const value = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(value, "auto")) return .auto;
-        if (std.ascii.eqlIgnoreCase(value, "min-content")) return .min_content;
-        if (std.ascii.eqlIgnoreCase(value, "max-content")) return .max_content;
-        const length_percentage = try parse_grid_length_percentage(value);
-        return .{ .value = length_percentage.value };
+        return css.parse_str_entirely(input, MinTrackSizingFunction, {}, dimension.from_css_ctx(MinTrackSizingFunction)) catch error.InvalidGridValue;
     }
     pub fn is_intrinsic(self: MinTrackSizingFunction) bool {
         return self.value.tag() == .auto or self.value.tag() == .min_content or self.value.tag() == .max_content;
@@ -705,23 +730,40 @@ pub const MaxTrackSizingFunction = struct {
     pub fn from_min(value: MinTrackSizingFunction) MaxTrackSizingFunction {
         return .{ .value = value.value };
     }
+    /// Taffy's `FromCss for MaxTrackSizingFunction`.
+    pub fn from_css(p: *css.Parser) css.Error!MaxTrackSizingFunction {
+        return switch (try p.next()) {
+            .percentage => |pc| percent(pc.unit_value),
+            .dimension => |d| if (std.mem.eql(u8, d.unit, "px"))
+                length(d.value)
+            else if (std.mem.eql(u8, d.unit, "fr") and !std.math.signbit(d.value))
+                fr(d.value)
+            else
+                error.InvalidCss,
+            .ident => |ident| if (std.mem.eql(u8, ident, "auto"))
+                .auto
+            else if (std.mem.eql(u8, ident, "min-content"))
+                .min_content
+            else if (std.mem.eql(u8, ident, "max-content"))
+                .max_content
+            else
+                error.InvalidCss,
+            .function => |name| if (std.mem.eql(u8, name, "fit-content"))
+                p.parse_nested_block(MaxTrackSizingFunction, {}, fit_content_arg)
+            else
+                error.InvalidCss,
+            else => error.InvalidCss,
+        };
+    }
+    fn fit_content_arg(_: void, p: *css.Parser) css.Error!MaxTrackSizingFunction {
+        return switch (try p.next()) {
+            .percentage => |pc| fit_content_percent(pc.unit_value),
+            .dimension => |d| if (std.mem.eql(u8, d.unit, "px")) fit_content_length(d.value) else error.InvalidCss,
+            else => error.InvalidCss,
+        };
+    }
     pub fn from_str(input: []const u8) GridStyleParseError!MaxTrackSizingFunction {
-        const value = std.mem.trim(u8, input, " \t\r\n");
-        if (std.ascii.eqlIgnoreCase(value, "auto")) return .auto;
-        if (std.ascii.eqlIgnoreCase(value, "min-content")) return .min_content;
-        if (std.ascii.eqlIgnoreCase(value, "max-content")) return .max_content;
-        if (std.mem.endsWith(u8, value, "fr")) {
-            const fraction = try parse_grid_number(value[0 .. value.len - 2]);
-            if (fraction < 0) return error.InvalidGridValue;
-            return fr(fraction);
-        }
-        if (std.mem.startsWith(u8, value, "fit-content(") and std.mem.endsWith(u8, value, ")")) {
-            const inner = value[12 .. value.len - 1];
-            const length_percentage = try parse_grid_length_percentage(inner);
-            return fit_content(length_percentage);
-        }
-        const length_percentage = try parse_grid_length_percentage(value);
-        return .{ .value = length_percentage.value };
+        return css.parse_str_entirely(input, MaxTrackSizingFunction, {}, dimension.from_css_ctx(MaxTrackSizingFunction)) catch error.InvalidGridValue;
     }
     pub fn is_intrinsic(self: MaxTrackSizingFunction) bool {
         return self.value.tag() == .auto or self.value.tag() == .min_content or self.value.tag() == .max_content or self.is_fit_content();
@@ -860,17 +902,26 @@ pub const TrackSizingFunction = struct {
         return .{ .min = MinTrackSizingFunction.from_max(maximum), .max = maximum };
     }
 
-    pub fn from_str(input: []const u8) GridStyleParseError!TrackSizingFunction {
-        const value = std.mem.trim(u8, input, " \t\r\n");
-        if (std.mem.startsWith(u8, value, "minmax(") and std.mem.endsWith(u8, value, ")")) {
-            const inner = value[7 .. value.len - 1];
-            const comma = std.mem.indexOfScalar(u8, inner, ',') orelse return error.InvalidGridSyntax;
-            const minimum = try MinTrackSizingFunction.from_str(inner[0..comma]);
-            const maximum = try MaxTrackSizingFunction.from_str(inner[comma + 1 ..]);
-            return .{ .min = minimum, .max = maximum };
-        }
-        const maximum = try MaxTrackSizingFunction.from_str(value);
+    /// Taffy's `FromCss for TrackSizingFunction`: `minmax(<min>, <max>)` or a
+    /// max track sizing function (whose min is derived from it).
+    pub fn from_css(p: *css.Parser) css.Error!TrackSizingFunction {
+        const saved = p.state();
+        if (minmax(p)) |value| return value else |_| p.reset(saved);
+        const maximum = try MaxTrackSizingFunction.from_css(p);
         return .{ .min = MinTrackSizingFunction.from_max(maximum), .max = maximum };
+    }
+    fn minmax(p: *css.Parser) css.Error!TrackSizingFunction {
+        try p.expect_function_matching("minmax");
+        return p.parse_nested_block(TrackSizingFunction, {}, minmax_args);
+    }
+    fn minmax_args(_: void, p: *css.Parser) css.Error!TrackSizingFunction {
+        const minimum = try MinTrackSizingFunction.from_css(p);
+        try p.expect_comma();
+        const maximum = try MaxTrackSizingFunction.from_css(p);
+        return .{ .min = minimum, .max = maximum };
+    }
+    pub fn from_str(input: []const u8) GridStyleParseError!TrackSizingFunction {
+        return css.parse_str_entirely(input, TrackSizingFunction, {}, dimension.from_css_ctx(TrackSizingFunction)) catch error.InvalidGridValue;
     }
 };
 
@@ -888,6 +939,24 @@ pub const RepetitionCount = union(enum) {
             .auto_fill = "AutoFill",
         },
     };
+
+    /// Taffy's `FromCss for RepetitionCount`: a positive integer (saturated
+    /// to u16), `auto-fit` or `auto-fill` (case-sensitive).
+    pub fn from_css(p: *css.Parser) css.Error!RepetitionCount {
+        return switch (try p.next()) {
+            .number => |n| if (n.int_value) |v| (if (v > 0) .{ .count = saturating_u16(v) } else error.InvalidCss) else error.InvalidCss,
+            .ident => |ident| if (std.mem.eql(u8, ident, "auto-fit"))
+                .auto_fit
+            else if (std.mem.eql(u8, ident, "auto-fill"))
+                .auto_fill
+            else
+                error.InvalidCss,
+            else => error.InvalidCss,
+        };
+    }
+    pub fn from_str(input: []const u8) InvalidStringRepetitionValue!RepetitionCount {
+        return css.parse_str_entirely(input, RepetitionCount, {}, dimension.from_css_ctx(RepetitionCount)) catch error.InvalidRepetitionValue;
+    }
 };
 
 pub const InvalidStringRepetitionValue = error{InvalidRepetitionValue};
@@ -953,6 +1022,24 @@ pub const GenericGridTemplateComponent = union(enum) {
 
     single: TrackSizingFunction,
     repeat: GridTemplateRepetition,
+
+    pub fn from_css(allocator: std.mem.Allocator, p: *css.Parser) (css.Error || std.mem.Allocator.Error)!GenericGridTemplateComponent {
+        return grid_template_component_from_css(allocator, p);
+    }
+    /// See `grid_template_component_from_str`.
+    pub fn from_str(allocator: std.mem.Allocator, input: []const u8) GridParseError!GenericGridTemplateComponent {
+        return grid_template_component_from_str(allocator, input);
+    }
+    /// Free what a parser allocated for this component.
+    pub fn deinit(self: GenericGridTemplateComponent, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .single => {},
+            .repeat => |repetition| {
+                allocator.free(repetition.tracks);
+                free_line_names(allocator, repetition.line_names);
+            },
+        }
+    }
 };
 
 pub fn grid_template_component_is_auto_repetition(value: GridTemplateComponent) bool {
@@ -961,58 +1048,116 @@ pub fn grid_template_component_is_auto_repetition(value: GridTemplateComponent) 
 
 pub const GridTemplateComponent = GenericGridTemplateComponent;
 
-fn skip_css_space(input: []const u8, index: *usize) void {
-    while (index.* < input.len and (input[index.*] == ' ' or input[index.*] == '\t' or input[index.*] == '\r' or input[index.*] == '\n')) : (index.* += 1) {}
+pub const GridParseError = GridStyleParseError || std.mem.Allocator.Error;
+
+fn css_error(err: (css.Error || std.mem.Allocator.Error)) GridParseError {
+    return if (err == error.OutOfMemory) error.OutOfMemory else error.InvalidGridSyntax;
 }
 
-fn next_css_component(input: []const u8, index: *usize) ?[]const u8 {
-    skip_css_space(input, index);
-    if (index.* >= input.len) return null;
-    const start = index.*;
-    var depth: usize = 0;
-    while (index.* < input.len) : (index.* += 1) {
-        switch (input[index.*]) {
-            '(' => depth += 1,
-            ')' => {
-                if (depth > 0) depth -= 1;
-            },
-            ' ', '\t', '\r', '\n' => if (depth == 0) break,
-            else => {},
+fn free_line_names(allocator: std.mem.Allocator, line_names: []const GridTemplateLineNames) void {
+    for (line_names) |names| allocator.free(names);
+    allocator.free(line_names);
+}
+
+/// `[name ...]` (Taffy's `try_parse_line_names`): rewinds and yields no names
+/// when the next token is not a bracket block of idents.
+fn try_parse_line_names(allocator: std.mem.Allocator, p: *css.Parser) std.mem.Allocator.Error!GridTemplateLineNames {
+    const saved = p.state();
+    const S = struct {
+        fn names(a: std.mem.Allocator, q: *css.Parser) (css.Error || std.mem.Allocator.Error)!GridTemplateLineNames {
+            var list = std.ArrayList([]const u8).empty;
+            errdefer list.deinit(a);
+            while (!q.is_exhausted()) try list.append(a, try q.expect_ident());
+            return list.toOwnedSlice(a);
         }
+    };
+    p.expect_square_bracket_block() catch {
+        p.reset(saved);
+        return &.{};
+    };
+    return p.parse_nested_block(GridTemplateLineNames, allocator, S.names) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        p.reset(saved);
+        return &.{};
+    };
+}
+
+/// A track list with positional line-name groups (Taffy's
+/// `FromCss for GridTemplateTracks<S, Track>`): group `i` names line `i`, and
+/// a group is recorded (empty if absent) before every track and at the end.
+fn TrackList(comptime Track: type) type {
+    return struct {
+        tracks: []const Track,
+        line_names: []const GridTemplateLineNames,
+
+        fn parse(allocator: std.mem.Allocator, p: *css.Parser) (css.Error || std.mem.Allocator.Error)!@This() {
+            var tracks = std.ArrayList(Track).empty;
+            var names = std.ArrayList(GridTemplateLineNames).empty;
+            errdefer {
+                for (tracks.items) |track| deinit_track(Track, allocator, track);
+                tracks.deinit(allocator);
+                for (names.items) |group| allocator.free(group);
+                names.deinit(allocator);
+            }
+            try names.ensureUnusedCapacity(allocator, 1);
+            names.appendAssumeCapacity(try try_parse_line_names(allocator, p));
+            while (!p.is_exhausted()) {
+                try tracks.ensureUnusedCapacity(allocator, 1);
+                try names.ensureUnusedCapacity(allocator, 1);
+                tracks.appendAssumeCapacity(try parse_track(Track, allocator, p));
+                names.appendAssumeCapacity(try try_parse_line_names(allocator, p));
+            }
+            if (tracks.items.len == 0) return error.InvalidCss;
+            const owned_tracks = try tracks.toOwnedSlice(allocator);
+            errdefer allocator.free(owned_tracks);
+            return .{ .tracks = owned_tracks, .line_names = try names.toOwnedSlice(allocator) };
+        }
+    };
+}
+
+fn parse_track(comptime Track: type, allocator: std.mem.Allocator, p: *css.Parser) (css.Error || std.mem.Allocator.Error)!Track {
+    return if (Track == TrackSizingFunction) TrackSizingFunction.from_css(p) else GridTemplateComponent.from_css(allocator, p);
+}
+
+fn deinit_track(comptime Track: type, allocator: std.mem.Allocator, track: Track) void {
+    if (Track == GridTemplateComponent) track.deinit(allocator);
+}
+
+/// Taffy's `FromCss for GridTemplateComponent`: `repeat(<count>, <tracks>)`
+/// (the name is ASCII case-insensitive) or a single track sizing function.
+pub fn grid_template_component_from_css(allocator: std.mem.Allocator, p: *css.Parser) (css.Error || std.mem.Allocator.Error)!GridTemplateComponent {
+    const saved = p.state();
+    const S = struct {
+        fn repeat(a: std.mem.Allocator, q: *css.Parser) (css.Error || std.mem.Allocator.Error)!GridTemplateComponent {
+            const count = try RepetitionCount.from_css(q);
+            try q.expect_comma();
+            const list = try TrackList(TrackSizingFunction).parse(a, q);
+            return .{ .repeat = .{ .count = count, .tracks = list.tracks, .line_names = list.line_names } };
+        }
+    };
+    if (p.expect_function_matching("repeat")) {
+        if (p.parse_nested_block(GridTemplateComponent, allocator, S.repeat)) |value| {
+            return value;
+        } else |err| if (err == error.OutOfMemory) return error.OutOfMemory;
+    } else |_| {}
+    p.reset(saved);
+    return .{ .single = try TrackSizingFunction.from_css(p) };
+}
+
+/// Parse one `grid-template-*` component. The result is owned by the caller
+/// (free it with `GridTemplateComponent.deinit`); line names borrow `input`.
+pub fn grid_template_component_from_str(allocator: std.mem.Allocator, input: []const u8) GridParseError!GridTemplateComponent {
+    var p = css.Parser.init(input);
+    const value = grid_template_component_from_css(allocator, &p) catch |err| return css_error(err);
+    if (!p.is_exhausted()) {
+        value.deinit(allocator);
+        return error.InvalidGridSyntax;
     }
-    return input[start..index.*];
+    return value;
 }
 
-fn parse_line_name_group(allocator: std.mem.Allocator, input: []const u8, index: *usize) GridStyleParseError!GridTemplateLineNames {
-    if (index.* >= input.len or input[index.*] != '[') return error.InvalidGridSyntax;
-    const start = index.* + 1;
-    var end = start;
-    while (end < input.len and input[end] != ']') : (end += 1) {}
-    if (end >= input.len) return error.InvalidGridSyntax;
-    var names = std.ArrayList([]const u8).empty;
-    defer names.deinit(allocator);
-    var tokens = std.mem.tokenizeAny(u8, input[start..end], " \t\r\n");
-    while (tokens.next()) |name| names.append(allocator, name) catch return error.InvalidGridSyntax;
-    const owned = allocator.alloc([]const u8, names.items.len) catch return error.InvalidGridSyntax;
-    @memcpy(owned, names.items);
-    index.* = end + 1;
-    return owned;
-}
-
-/// Parse one `grid-template-*` component. Allocations (repeat track lists,
-/// line names) come from `allocator` and are owned by the caller.
-pub fn grid_template_component_from_str(allocator: std.mem.Allocator, input: []const u8) GridStyleParseError!GridTemplateComponent {
-    const value = std.mem.trim(u8, input, " \t\r\n");
-    if (std.mem.startsWith(u8, value, "repeat(") and std.mem.endsWith(u8, value, ")")) {
-        const inner = value[7 .. value.len - 1];
-        const comma = std.mem.indexOfScalar(u8, inner, ',') orelse return error.InvalidGridSyntax;
-        const count = repetition_count_from_str(std.mem.trim(u8, inner[0..comma], " \t\r\n")) catch return error.InvalidGridValue;
-        const parsed = try GridTemplateTracks.from_str(allocator, inner[comma + 1 ..]);
-        return .{ .repeat = .{ .count = count, .tracks = parsed.tracks, .line_names = parsed.line_names } };
-    }
-    return .{ .single = try TrackSizingFunction.from_str(value) };
-}
-
+/// A track list without `repeat()` (Taffy's
+/// `GridTemplateTracks<S, TrackSizingFunction>`).
 pub const GridTemplateTracks = struct {
     tracks: []const TrackSizingFunction = &.{},
     line_names: []const GridTemplateLineNames = &.{},
@@ -1021,40 +1166,22 @@ pub const GridTemplateTracks = struct {
         return self.tracks.len == 0;
     }
 
-    /// The returned slices are allocated from `allocator` and owned by the caller.
-    pub fn from_str(allocator: std.mem.Allocator, input: []const u8) GridStyleParseError!GridTemplateTracks {
-        var tracks = std.ArrayList(TrackSizingFunction).empty;
-        defer tracks.deinit(allocator);
-        var line_names = std.ArrayList(GridTemplateLineNames).empty;
-        defer line_names.deinit(allocator);
-        line_names.append(allocator, &.{}) catch return error.InvalidGridSyntax;
-        var index: usize = 0;
-        while (true) {
-            skip_css_space(input, &index);
-            if (index < input.len and input[index] == '[') {
-                const parsed_names = try parse_line_name_group(allocator, input, &index);
-                line_names.items[line_names.items.len - 1] = parsed_names;
-                skip_css_space(input, &index);
-            }
-            if (index >= input.len) break;
-            const token = next_css_component(input, &index) orelse return error.InvalidGridSyntax;
-            const track = try TrackSizingFunction.from_str(token);
-            tracks.append(allocator, track) catch return error.InvalidGridSyntax;
-            line_names.append(allocator, &.{}) catch return error.InvalidGridSyntax;
-        }
-        if (tracks.items.len == 0) return error.InvalidGridSyntax;
-        const owned = allocator.alloc(TrackSizingFunction, tracks.items.len) catch return error.InvalidGridSyntax;
-        @memcpy(owned, tracks.items);
-        const owned_names = allocator.alloc(GridTemplateLineNames, line_names.items.len) catch return error.InvalidGridSyntax;
-        @memcpy(owned_names, line_names.items);
-        return .{ .tracks = owned, .line_names = owned_names };
+    /// The result is owned by the caller (free it with `deinit`); line names
+    /// borrow `input`.
+    pub fn from_str(allocator: std.mem.Allocator, input: []const u8) GridParseError!GridTemplateTracks {
+        const list = css.parse_str_entirely(input, TrackList(TrackSizingFunction), allocator, TrackList(TrackSizingFunction).parse) catch |err| return css_error(err);
+        return .{ .tracks = list.tracks, .line_names = list.line_names };
+    }
+
+    pub fn deinit(self: GridTemplateTracks, allocator: std.mem.Allocator) void {
+        allocator.free(self.tracks);
+        free_line_names(allocator, self.line_names);
     }
 };
 
 /// Component-valued template track list, mirroring Taffy's
-/// `GridTemplateTracks<S, GridTemplateComponent<S>>`. Unlike
-/// `GridTemplateTracks`, entries may be `repeat(...)` repetitions and line
-/// names may be attached inside repetitions.
+/// `GridTemplateTracks<S, GridTemplateComponent<S>>`: entries may be
+/// `repeat(...)` repetitions, which carry their own line names.
 pub const GridTemplateComponents = struct {
     tracks: []const GridTemplateComponent = &.{},
     line_names: []const GridTemplateLineNames = &.{},
@@ -1063,40 +1190,35 @@ pub const GridTemplateComponents = struct {
         return self.tracks.len == 0;
     }
 
-    /// The returned slices are allocated from `allocator` and owned by the caller.
-    pub fn from_str(allocator: std.mem.Allocator, input: []const u8) GridStyleParseError!GridTemplateComponents {
-        var tracks = std.ArrayList(GridTemplateComponent).empty;
-        defer tracks.deinit(allocator);
-        var line_names = std.ArrayList(GridTemplateLineNames).empty;
-        defer line_names.deinit(allocator);
-        line_names.append(allocator, &.{}) catch return error.InvalidGridSyntax;
-        var index: usize = 0;
-        while (true) {
-            skip_css_space(input, &index);
-            if (index < input.len and input[index] == '[') {
-                const parsed_names = try parse_line_name_group(allocator, input, &index);
-                line_names.items[line_names.items.len - 1] = parsed_names;
-                skip_css_space(input, &index);
-            }
-            if (index >= input.len) break;
-            const token = next_css_component(input, &index) orelse return error.InvalidGridSyntax;
-            const track = try grid_template_component_from_str(allocator, token);
-            tracks.append(allocator, track) catch return error.InvalidGridSyntax;
-            line_names.append(allocator, &.{}) catch return error.InvalidGridSyntax;
-        }
-        if (tracks.items.len == 0) return error.InvalidGridSyntax;
-        const owned = allocator.alloc(GridTemplateComponent, tracks.items.len) catch return error.InvalidGridSyntax;
-        @memcpy(owned, tracks.items);
-        const owned_names = allocator.alloc(GridTemplateLineNames, line_names.items.len) catch return error.InvalidGridSyntax;
-        @memcpy(owned_names, line_names.items);
-        return .{ .tracks = owned, .line_names = owned_names };
+    /// The result is owned by the caller (free it with `deinit`); line names
+    /// borrow `input`.
+    pub fn from_str(allocator: std.mem.Allocator, input: []const u8) GridParseError!GridTemplateComponents {
+        const list = css.parse_str_entirely(input, TrackList(GridTemplateComponent), allocator, TrackList(GridTemplateComponent).parse) catch |err| return css_error(err);
+        return .{ .tracks = list.tracks, .line_names = list.line_names };
+    }
+
+    pub fn deinit(self: GridTemplateComponents, allocator: std.mem.Allocator) void {
+        for (self.tracks) |track| track.deinit(allocator);
+        allocator.free(self.tracks);
+        free_line_names(allocator, self.line_names);
     }
 };
 
 pub const GridAutoTracks = []const TrackSizingFunction;
 
-pub fn grid_auto_tracks_from_str(allocator: std.mem.Allocator, input: []const u8) GridStyleParseError![]const TrackSizingFunction {
-    return (try GridTemplateTracks.from_str(allocator, input)).tracks;
+/// Taffy's `FromCss for GridAutoTracks`: one or more track sizing functions
+/// (no line names, no `repeat()`). The slice is owned by the caller.
+pub fn grid_auto_tracks_from_str(allocator: std.mem.Allocator, input: []const u8) GridParseError![]const TrackSizingFunction {
+    const S = struct {
+        fn parse(a: std.mem.Allocator, p: *css.Parser) (css.Error || std.mem.Allocator.Error)![]const TrackSizingFunction {
+            var tracks = std.ArrayList(TrackSizingFunction).empty;
+            errdefer tracks.deinit(a);
+            while (!p.is_exhausted()) try tracks.append(a, try TrackSizingFunction.from_css(p));
+            if (tracks.items.len == 0) return error.InvalidCss;
+            return tracks.toOwnedSlice(a);
+        }
+    };
+    return css.parse_str_entirely(input, []const TrackSizingFunction, allocator, S.parse) catch |err| css_error(err);
 }
 
 pub fn is_auto_repetition(value: GridTemplateComponent) bool {
