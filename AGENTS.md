@@ -231,15 +231,25 @@ See README "Performance".
   `686112d`: `git tag -a v0.4.0 686112d -m "zafi 0.4.0" && git push origin v0.4.0`,
   then `gh release create v0.4.0` (the owner approved publishing 0.4.0).
 
+## Taffy issue triage (Nov 2026, after 0.4.0)
+
+Every bug-shaped open issue on DioxusLabs/taffy was reproduced against zafi
+(regression tests `taffy#…` / `triage …` in `src/tree/tree.zig`).
+- Fixed in zafi (Taffy still has them): #954, #884, #847, #804, #1299
+  (cases 2-5; case 1 with #1296), #1296, #1295, #1240, #1239, #1238; plus
+  the cache key's negative-parent-size aliasing (axis bits moved out of the
+  f32 sign bits).
+- Already fine in zafi: #1357, #1354, #1211, #1100, #950, #923, #830, #803,
+  #733, #231 (NaN/inf never crash), #1299 case 6.
+- False positive: #732 (browsers overflow the same way). Feature request:
+  #1306 (baselines in size-only cache entries).
+
 ## Next ideas
 
 - Speed: relayout_grid is the closest to Taffy (~0.97x); per node, the layout
   cache (328 B) is the biggest item left.
 - Memory: flex_wrap and mixed sit at ~1.0x Taffy (slot growth slack plus
   layout scratch on small trees).
-- Known, shared with Taffy: the cache key keeps the requested axis in the f32
-  sign bits of the parent size, so a negative parent size aliases its
-  positive counterpart.
 - CSS escapes (`\`) are not decoded by `util/css.zig`.
 
 ## Architecture notes worth knowing
