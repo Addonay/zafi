@@ -10,7 +10,6 @@
 //!   - Alignment & final item placement
 
 const std = @import("std");
-const calc_resolver = @import("../../style/calc.zig");
 const calc_scope = @import("../common/calc_scope.zig");
 const geometry = @import("../../geometry.zig");
 const style = @import("../../style/root.zig");
@@ -1188,7 +1187,7 @@ fn map_definite_value(value: AvailableSpace, subtract: f32) AvailableSpace {
     };
 }
 
-fn resolve_rect_or_zero_length_percentage(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
+inline fn resolve_rect_or_zero_length_percentage(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
     const resolved_basis = basis orelse 0;
     return .{
         .left = value.left.resolve(resolved_basis),
@@ -1202,23 +1201,17 @@ fn add_rects(a: geometry.Rect(f32), b: geometry.Rect(f32)) geometry.Rect(f32) {
     return .{ .left = a.left + b.left, .right = a.right + b.right, .top = a.top + b.top, .bottom = a.bottom + b.bottom };
 }
 
-fn resolve_dimension_size(value: geometry.Size(style.dimension.Dimension), basis: geometry.Size(?f32)) geometry.Size(?f32) {
+inline fn resolve_dimension_size(value: geometry.Size(style.dimension.Dimension), basis: geometry.Size(?f32)) geometry.Size(?f32) {
     return .{ .width = value.width.resolve(basis.width), .height = value.height.resolve(basis.height) };
 }
 
-fn resolve_lpa(value: style.dimension.LengthPercentageAuto, basis: ?f32) ?f32 {
+inline fn resolve_lpa(value: style.dimension.LengthPercentageAuto, basis: ?f32) ?f32 {
     // Taffy `MaybeResolve<Option<f32>> for LengthPercentageAuto`: lengths always
     // resolve, percentages require a definite basis, auto resolves to null.
-    return switch (value.value.tag()) {
-        .auto => null,
-        .length => value.value.value(),
-        .percent => if (basis) |b| b * value.value.value() else null,
-        .calc => if (basis) |b| calc_resolver.resolve(value.value.calc_value(), b) else null,
-        else => null,
-    };
+    return value.value.maybe_resolve(basis);
 }
 
-fn resolve_lpa_size(value: geometry.Size(style.dimension.LengthPercentageAuto), basis: geometry.Size(?f32)) geometry.Size(?f32) {
+inline fn resolve_lpa_size(value: geometry.Size(style.dimension.LengthPercentageAuto), basis: geometry.Size(?f32)) geometry.Size(?f32) {
     return .{ .width = resolve_lpa(value.width, basis.width), .height = resolve_lpa(value.height, basis.height) };
 }
 

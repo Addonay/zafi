@@ -490,11 +490,11 @@ pub fn round_layout_inner(comptime Tree: type, tree_ref: *Tree, node_id: NodeId,
     }
 }
 
-fn resolveDimensionSize(value: geometry.Size(style.dimension.Dimension), parent: geometry.Size(?f32)) geometry.Size(?f32) {
+inline fn resolveDimensionSize(value: geometry.Size(style.dimension.Dimension), parent: geometry.Size(?f32)) geometry.Size(?f32) {
     return .{ .width = value.width.resolve(parent.width), .height = value.height.resolve(parent.height) };
 }
 
-fn resolveAutoSize(value: geometry.Size(style.dimension.LengthPercentageAuto), parent: geometry.Size(?f32)) geometry.Size(?f32) {
+inline fn resolveAutoSize(value: geometry.Size(style.dimension.LengthPercentageAuto), parent: geometry.Size(?f32)) geometry.Size(?f32) {
     return .{ .width = value.width.resolve_to_option(parent.width), .height = value.height.resolve_to_option(parent.height) };
 }
 

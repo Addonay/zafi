@@ -595,15 +595,9 @@ pub const MinTrackSizingFunction = struct {
         return self.value.uses_percentage();
     }
 
-    pub fn definite_value(self: MinTrackSizingFunction, parent_size: ?f32) ?f32 {
-        return switch (self.value.tag()) {
-            .length => self.value.value(),
-            .percent => if (parent_size) |basis| basis * self.value.value() else null,
-            // Tree's default calc resolver returns 0 and still requires a
-            // definite parent size to be considered definite.
-            .calc => if (parent_size) |size| calc_resolver.resolve(self.value.calc_value(), size) else null,
-            else => null,
-        };
+    pub inline fn definite_value(self: MinTrackSizingFunction, parent_size: ?f32) ?f32 {
+        // length, percentage (definite basis) or calc (definite basis); else null.
+        return self.value.maybe_resolve(parent_size);
     }
 
     pub fn into_raw(self: MinTrackSizingFunction) compact_length.CompactLength {
@@ -612,7 +606,7 @@ pub const MinTrackSizingFunction = struct {
     pub fn has_definite_value(self: MinTrackSizingFunction, parent_size: ?f32) bool {
         return self.definite_value(parent_size) != null;
     }
-    pub fn resolved_percentage_size(self: MinTrackSizingFunction, parent_size: f32) ?f32 {
+    pub inline fn resolved_percentage_size(self: MinTrackSizingFunction, parent_size: f32) ?f32 {
         return self.value.resolved_percentage_size(parent_size);
     }
     pub fn expand(self: MinTrackSizingFunction) ExpandedMinTrackSizingFunction {
@@ -758,13 +752,9 @@ pub const MaxTrackSizingFunction = struct {
         return self.value.uses_percentage();
     }
 
-    pub fn definite_value(self: MaxTrackSizingFunction, parent_size: ?f32) ?f32 {
-        return switch (self.value.tag()) {
-            .length => self.value.value(),
-            .percent => if (parent_size) |basis| basis * self.value.value() else null,
-            .calc => if (parent_size) |size| calc_resolver.resolve(self.value.calc_value(), size) else null,
-            else => null,
-        };
+    pub inline fn definite_value(self: MaxTrackSizingFunction, parent_size: ?f32) ?f32 {
+        // length, percentage (definite basis) or calc (definite basis); else null.
+        return self.value.maybe_resolve(parent_size);
     }
 
     pub fn definite_limit(self: MaxTrackSizingFunction, parent_size: ?f32) ?f32 {
@@ -777,7 +767,7 @@ pub const MaxTrackSizingFunction = struct {
     pub fn has_definite_value(self: MaxTrackSizingFunction, parent_size: ?f32) bool {
         return self.definite_value(parent_size) != null;
     }
-    pub fn resolved_percentage_size(self: MaxTrackSizingFunction, parent_size: f32) ?f32 {
+    pub inline fn resolved_percentage_size(self: MaxTrackSizingFunction, parent_size: f32) ?f32 {
         return self.value.resolved_percentage_size(parent_size);
     }
     pub fn calc(value: *const anyopaque) MaxTrackSizingFunction {

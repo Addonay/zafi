@@ -7,7 +7,6 @@
 //! divide-and-conquer optimization) is ported rather than approximated.
 
 const std = @import("std");
-const calc_resolver = @import("../style/calc.zig");
 const calc_scope = @import("common/calc_scope.zig");
 const geometry = @import("../geometry.zig");
 const style = @import("../style/root.zig");
@@ -3301,33 +3300,17 @@ const balance = struct {
 /// percentages. Keeping the Taffy semantics local avoids depending on the
 /// shared-file fix.)
 inline fn resolve_length_value(value: LengthPercentage, basis: ?f32) ?f32 {
-    return switch (value.value.tag()) {
-        .length => value.value.value(),
-        .percent => if (basis) |resolved_basis| value.value.value() * resolved_basis else null,
-        .calc => if (basis) |resolved_basis| calc_resolver.resolve(value.value.calc_value(), resolved_basis) else null,
-        else => null,
-    };
+    return value.value.maybe_resolve(basis);
 }
 
 /// `LengthPercentageAuto::maybe_resolve` (see above).
 inline fn resolve_auto_value(value: LengthPercentageAuto, basis: ?f32) ?f32 {
-    return switch (value.value.tag()) {
-        .auto => null,
-        .length => value.value.value(),
-        .percent => if (basis) |resolved_basis| value.value.value() * resolved_basis else null,
-        .calc => if (basis) |resolved_basis| calc_resolver.resolve(value.value.calc_value(), resolved_basis) else null,
-        else => null,
-    };
+    return value.value.maybe_resolve(basis);
 }
 
 /// `Dimension::maybe_resolve` (see above). Sizing keywords stay `None`.
 inline fn resolve_dimension_value(value: Dimension, basis: ?f32) ?f32 {
-    return switch (value.value.tag()) {
-        .length => value.value.value(),
-        .percent => if (basis) |resolved_basis| value.value.value() * resolved_basis else null,
-        .calc => if (basis) |resolved_basis| calc_resolver.resolve(value.value.calc_value(), resolved_basis) else null,
-        else => null,
-    };
+    return value.value.maybe_resolve(basis);
 }
 
 /// `AlignItems` value equality for the `BASELINE` constant (keyword + safety).

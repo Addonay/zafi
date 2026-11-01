@@ -5,7 +5,6 @@
 //! formulas so it can be compared against the Rust implementation section by section.
 
 const std = @import("std");
-const calc_resolver = @import("../style/calc.zig");
 const calc_scope = @import("common/calc_scope.zig");
 
 const geometry = @import("../geometry.zig");
@@ -1651,13 +1650,8 @@ fn asMeasureResolution(resolution: ?sizing_keyword.SizingKeywordResolution) ?@im
 
 /// `LengthPercentage::maybe_resolve`: lengths resolve even against an indefinite
 /// basis; percentages require a definite basis.
-fn resolveLengthPercentage(value: style.dimension.LengthPercentage, basis: ?f32) ?f32 {
-    return switch (value.value.tag()) {
-        .length => value.value.value(),
-        .percent => if (basis) |b| value.value.value() * b else null,
-        .calc => if (basis) |b| calc_resolver.resolve(value.value.calc_value(), b) else null,
-        else => null,
-    };
+inline fn resolveLengthPercentage(value: style.dimension.LengthPercentage, basis: ?f32) ?f32 {
+    return value.value.maybe_resolve(basis);
 }
 
 /// `LengthPercentageAuto::maybe_resolve`: `auto` stays `None`, lengths resolve
@@ -1685,14 +1679,8 @@ fn resolve_relative_offset(item: *const BlockItem, parent_size: geometry.Size(?f
     };
 }
 
-fn resolveLengthPercentageAuto(value: style.dimension.LengthPercentageAuto, basis: ?f32) ?f32 {
-    return switch (value.value.tag()) {
-        .auto => null,
-        .length => value.value.value(),
-        .percent => if (basis) |b| value.value.value() * b else null,
-        .calc => if (basis) |b| calc_resolver.resolve(value.value.calc_value(), b) else null,
-        else => null,
-    };
+inline fn resolveLengthPercentageAuto(value: style.dimension.LengthPercentageAuto, basis: ?f32) ?f32 {
+    return value.value.maybe_resolve(basis);
 }
 
 /// Whether every side of a length-percentage rect is the zero length. The common
@@ -1707,7 +1695,7 @@ fn isZeroAutoRect(value: geometry.Rect(style.dimension.LengthPercentageAuto)) bo
     return value.left.value.is_zero() and value.right.value.is_zero() and value.top.value.is_zero() and value.bottom.value.is_zero();
 }
 
-fn resolveOrZeroRect(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
+inline fn resolveOrZeroRect(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
     if (isZeroLengthRect(value)) return RECT_ZERO;
     return .{
         .left = resolveLengthPercentage(value.left, basis) orelse 0,
@@ -1717,7 +1705,7 @@ fn resolveOrZeroRect(value: geometry.Rect(style.dimension.LengthPercentage), bas
     };
 }
 
-fn resolveAutoOrZeroRect(value: geometry.Rect(style.dimension.LengthPercentageAuto), basis: ?f32) geometry.Rect(f32) {
+inline fn resolveAutoOrZeroRect(value: geometry.Rect(style.dimension.LengthPercentageAuto), basis: ?f32) geometry.Rect(f32) {
     if (isZeroAutoRect(value)) return RECT_ZERO;
     return .{
         .left = resolveLengthPercentageAuto(value.left, basis) orelse 0,
@@ -1727,7 +1715,7 @@ fn resolveAutoOrZeroRect(value: geometry.Rect(style.dimension.LengthPercentageAu
     };
 }
 
-fn resolveAutoRect(value: geometry.Rect(style.dimension.LengthPercentageAuto), basis: ?f32) geometry.Rect(?f32) {
+inline fn resolveAutoRect(value: geometry.Rect(style.dimension.LengthPercentageAuto), basis: ?f32) geometry.Rect(?f32) {
     if (isZeroAutoRect(value)) return .{ .left = 0, .right = 0, .top = 0, .bottom = 0 };
     return .{
         .left = resolveLengthPercentageAuto(value.left, basis),
@@ -1737,12 +1725,12 @@ fn resolveAutoRect(value: geometry.Rect(style.dimension.LengthPercentageAuto), b
     };
 }
 
-fn resolveDimensionSize(value: geometry.Size(style.dimension.Dimension), parent: geometry.Size(?f32)) geometry.Size(?f32) {
+inline fn resolveDimensionSize(value: geometry.Size(style.dimension.Dimension), parent: geometry.Size(?f32)) geometry.Size(?f32) {
     if (value.width.is_auto() and value.height.is_auto()) return SIZE_NONE;
     return .{ .width = value.width.resolve(parent.width), .height = value.height.resolve(parent.height) };
 }
 
-fn resolveAutoSize(value: geometry.Size(style.dimension.LengthPercentageAuto), parent: geometry.Size(?f32)) geometry.Size(?f32) {
+inline fn resolveAutoSize(value: geometry.Size(style.dimension.LengthPercentageAuto), parent: geometry.Size(?f32)) geometry.Size(?f32) {
     if (value.width.is_auto() and value.height.is_auto()) return SIZE_NONE;
     return .{ .width = resolveLengthPercentageAuto(value.width, parent.width), .height = resolveLengthPercentageAuto(value.height, parent.height) };
 }

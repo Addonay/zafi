@@ -790,16 +790,16 @@ fn to_optional_size(value: Size(f32)) Size(?f32) {
 }
 
 /// Resolve a `Size<Dimension>` (an explicit `width`/`height`) against a definite basis.
-fn resolveDimensionSize(value: Size(dimension.Dimension), basis: Size(f32)) Size(?f32) {
+inline fn resolveDimensionSize(value: Size(dimension.Dimension), basis: Size(f32)) Size(?f32) {
     return .{ .width = value.width.resolve(basis.width), .height = value.height.resolve(basis.height) };
 }
 
 /// Resolve a `Size<LengthPercentageAuto>` (a `min-`/`max-` size) against a definite basis.
-fn resolveAutoSize(value: Size(dimension.LengthPercentageAuto), basis: Size(f32)) Size(?f32) {
+inline fn resolveAutoSize(value: Size(dimension.LengthPercentageAuto), basis: Size(f32)) Size(?f32) {
     return .{ .width = value.width.resolve_to_option(basis.width), .height = value.height.resolve_to_option(basis.height) };
 }
 
-fn resolve_margin_options(value: Rect(dimension.LengthPercentageAuto), basis: ?f32) Rect(?f32) {
+inline fn resolve_margin_options(value: Rect(dimension.LengthPercentageAuto), basis: ?f32) Rect(?f32) {
     return .{
         .left = value.left.resolve_to_option(basis),
         .right = value.right.resolve_to_option(basis),
@@ -808,7 +808,7 @@ fn resolve_margin_options(value: Rect(dimension.LengthPercentageAuto), basis: ?f
     };
 }
 
-fn resolve_length_rect_or_zero(value: Rect(dimension.LengthPercentage), basis: ?f32) Rect(f32) {
+inline fn resolve_length_rect_or_zero(value: Rect(dimension.LengthPercentage), basis: ?f32) Rect(f32) {
     return .{
         .left = value.left.resolve_to_option(basis) orelse 0,
         .right = value.right.resolve_to_option(basis) orelse 0,

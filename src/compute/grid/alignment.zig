@@ -510,7 +510,7 @@ fn relative_offset(position: style.Position, inset: geometry.Line(?f32), directi
     return relative_inset orelse 0;
 }
 
-fn resolve_length_rect_or_zero(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
+inline fn resolve_length_rect_or_zero(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
     const resolved_basis = basis orelse 0;
     return .{
         .left = value.left.resolve(resolved_basis),
@@ -520,11 +520,11 @@ fn resolve_length_rect_or_zero(value: geometry.Rect(style.dimension.LengthPercen
     };
 }
 
-fn resolve_dimension_size(value: geometry.Size(style.dimension.Dimension), basis: geometry.F32Size) geometry.Size(?f32) {
+inline fn resolve_dimension_size(value: geometry.Size(style.dimension.Dimension), basis: geometry.F32Size) geometry.Size(?f32) {
     return .{ .width = value.width.resolve(basis.width), .height = value.height.resolve(basis.height) };
 }
 
-fn resolve_lpa_size(value: geometry.Size(style.dimension.LengthPercentageAuto), basis: geometry.F32Size) geometry.Size(?f32) {
+inline fn resolve_lpa_size(value: geometry.Size(style.dimension.LengthPercentageAuto), basis: geometry.F32Size) geometry.Size(?f32) {
     return .{ .width = value.width.resolve_to_option(basis.width), .height = value.height.resolve_to_option(basis.height) };
 }
 

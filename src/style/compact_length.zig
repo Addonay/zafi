@@ -170,7 +170,66 @@ pub const CompactLength = struct {
         if (!self.has_calc()) return null;
         return @ptrFromInt(self.bits & payload_mask);
     }
-    pub fn resolved_percentage_size(self: CompactLength, parent_size: f32) ?f32 {
+    /// Taffy's `MaybeResolve<Option<f32>>`: a length resolves as-is; a percentage
+    /// or `calc()` needs a definite basis; anything else is indefinite.
+    pub inline fn maybe_resolve(self: CompactLength, basis: ?f32) ?f32 {
+        return self.maybe_resolve_with(basis, true);
+    }
+
+    /// `maybe_resolve`, specialised on whether the value can be `calc()`.
+    ///
+    /// With `with_calc == false` a calc value is treated as indefinite, so this must
+    /// only be used where the caller has checked there is no calc value (see
+    /// `GridItem.has_calc`). That variant is the plain three-way switch: even a
+    /// cold calc arm makes LLVM materialise the `?f32` result through a stack
+    /// slot (two narrow stores, one wide load: a store-forwarding stall) in the
+    /// innermost layout loops.
+    pub inline fn maybe_resolve_with(self: CompactLength, basis: ?f32, comptime with_calc: bool) ?f32 {
+        if (with_calc) {
+            if (self.tag() == .calc) return maybe_resolve_calc(self, basis);
+        }
+        // Merge on scalars and build the optional once (see `some_if`).
+        const t = self.tag();
+        const b = basis orelse 0;
+        const ok = t == .length or (t == .percent and basis != null);
+        const out = if (t == .percent) self.value() * b else self.value();
+        return some_if(ok, out);
+    }
+
+    /// `if (ok) value else null`, written so the optional never comes from a
+    /// pointer select against a `null` constant (which LLVM cannot scalarise,
+    /// leaving narrow stores followed by a wide reload in hot loops).
+    inline fn some_if(ok: bool, value_: f32) ?f32 {
+        var result: ?f32 = value_;
+        if (!ok) result = null;
+        return result;
+    }
+
+    /// Resolve against a definite `basis`: lengths, percentages and (when
+    /// `with_calc`) calc values resolve; any other tag yields `fallback`.
+    pub inline fn resolve_or_with(self: CompactLength, basis: f32, fallback: f32, comptime with_calc: bool) f32 {
+        if (with_calc) {
+            if (self.tag() == .calc) return resolve_calc(self, basis);
+        }
+        return switch (self.tag()) {
+            .length => self.value(),
+            .percent => self.value() * basis,
+            else => fallback,
+        };
+    }
+
+    fn maybe_resolve_calc(self: CompactLength, basis: ?f32) ?f32 {
+        @branchHint(.cold);
+        const b = basis orelse return null;
+        return @import("calc.zig").resolve(self.calc_value(), b);
+    }
+
+    fn resolve_calc(self: CompactLength, basis: f32) f32 {
+        @branchHint(.cold);
+        return @import("calc.zig").resolve(self.calc_value(), basis);
+    }
+
+    pub inline fn resolved_percentage_size(self: CompactLength, parent_size: f32) ?f32 {
         return switch (self.tag()) {
             .percent => self.value() * parent_size,
             .calc => @import("calc.zig").resolve(self.calc_value(), parent_size),

@@ -21,7 +21,7 @@ pub inline fn resolve_length_rect(value: geometry.Rect(dimension.LengthPercentag
 
 /// Resolve a `Rect<LengthPercentageAuto>` against an optional basis. Both
 /// percentages against an indefinite basis and `auto` resolve to zero.
-pub fn resolve_rect_or_zero(value: geometry.Rect(dimension.LengthPercentageAuto), basis: ?f32) geometry.Rect(f32) {
+pub inline fn resolve_rect_or_zero(value: geometry.Rect(dimension.LengthPercentageAuto), basis: ?f32) geometry.Rect(f32) {
     return .{
         .left = value.left.resolve_to_option(basis) orelse 0,
         .right = value.right.resolve_to_option(basis) orelse 0,

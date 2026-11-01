@@ -52,22 +52,12 @@ pub const LengthPercentage = struct {
     }
 
     pub inline fn resolve(self: LengthPercentage, basis: f32) f32 {
-        return switch (self.value.tag()) {
-            .length => self.value.value(),
-            .percent => self.value.value() * basis,
-            .calc => calc_resolver.resolve(self.value.calc_value(), basis),
-            else => 0,
-        };
+        return self.value.resolve_or_with(basis, 0, true);
     }
 
     pub inline fn resolve_to_option(self: LengthPercentage, basis: ?f32) ?f32 {
         // Like Taffy, a calc value needs a definite basis.
-        return switch (self.value.tag()) {
-            .length => self.value.value(),
-            .percent => if (basis) |b| self.value.value() * b else null,
-            .calc => if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null,
-            else => null,
-        };
+        return self.value.maybe_resolve(basis);
     }
 
     pub fn zero() LengthPercentage {
@@ -126,24 +116,13 @@ pub const LengthPercentageAuto = struct {
     }
 
     pub inline fn resolve(self: LengthPercentageAuto, basis: f32) ?f32 {
-        return switch (self.value.tag()) {
-            .auto => null,
-            .length => self.value.value(),
-            .percent => self.value.value() * basis,
-            .calc => calc_resolver.resolve(self.value.calc_value(), basis),
-            else => 0,
-        };
+        if (self.value.tag() == .auto) return null;
+        return self.value.resolve_or_with(basis, 0, true);
     }
 
     pub inline fn resolve_to_option(self: LengthPercentageAuto, basis: ?f32) ?f32 {
-        // Like Taffy, a calc value needs a definite basis.
-        return switch (self.value.tag()) {
-            .auto => null,
-            .length => self.value.value(),
-            .percent => if (basis) |b| self.value.value() * b else null,
-            .calc => if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null,
-            else => null,
-        };
+        // Like Taffy, a calc value needs a definite basis; auto is indefinite.
+        return self.value.maybe_resolve(basis);
     }
 
     pub fn zero() LengthPercentageAuto {
@@ -241,15 +220,10 @@ pub const Dimension = struct {
     }
 
     pub inline fn resolve(self: Dimension, basis: ?f32) ?f32 {
-        return switch (self.value.tag()) {
-            .length => self.value.value(),
-            .percent => if (basis) |b| self.value.value() * b else null,
-            .calc => if (basis) |b| calc_resolver.resolve(self.value.calc_value(), b) else null,
-            else => null,
-        };
+        return self.value.maybe_resolve(basis);
     }
 
-    pub fn resolve_to_option(self: Dimension, basis: ?f32) ?f32 {
+    pub inline fn resolve_to_option(self: Dimension, basis: ?f32) ?f32 {
         return self.resolve(basis);
     }
 
@@ -335,7 +309,7 @@ pub fn dimension_value(value: Dimension) compact_length.CompactLength {
     return value.value;
 }
 
-pub fn clamp_resolved_size(value: f32, minimum: LengthPercentageAuto, maximum: LengthPercentageAuto, basis: f32) f32 {
+pub inline fn clamp_resolved_size(value: f32, minimum: LengthPercentageAuto, maximum: LengthPercentageAuto, basis: f32) f32 {
     const min_value = minimum.resolve(basis) orelse 0;
     // An auto max is unbounded (infinity), never the value itself: using
     // the value here would swallow the min clamp whenever max is unset.

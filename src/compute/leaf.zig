@@ -176,24 +176,24 @@ fn mapDefinite(space: AvailableSpace, minimum: ?f32, maximum: ?f32, inset_sum: f
     };
 }
 
-fn resolveLengthEdges(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
+inline fn resolveLengthEdges(value: geometry.Rect(style.dimension.LengthPercentage), basis: ?f32) geometry.Rect(f32) {
     const resolved_basis = basis orelse 0;
     return .{ .left = value.left.resolve(resolved_basis), .right = value.right.resolve(resolved_basis), .top = value.top.resolve(resolved_basis), .bottom = value.bottom.resolve(resolved_basis) };
 }
 
-fn resolveAutoEdges(value: geometry.Rect(style.dimension.LengthPercentageAuto), basis: ?f32) geometry.Rect(?f32) {
+inline fn resolveAutoEdges(value: geometry.Rect(style.dimension.LengthPercentageAuto), basis: ?f32) geometry.Rect(?f32) {
     return .{ .left = value.left.resolve_to_option(basis), .right = value.right.resolve_to_option(basis), .top = value.top.resolve_to_option(basis), .bottom = value.bottom.resolve_to_option(basis) };
 }
 
-fn resolveDimensionSize(value: geometry.Size(style.dimension.Dimension), parent: geometry.Size(?f32)) OptionalSize {
+inline fn resolveDimensionSize(value: geometry.Size(style.dimension.Dimension), parent: geometry.Size(?f32)) OptionalSize {
     return .{ .width = value.width.resolve(parent.width), .height = value.height.resolve(parent.height) };
 }
 
-fn resolveAutoSize(value: geometry.Size(style.dimension.LengthPercentageAuto), parent: geometry.Size(?f32)) OptionalSize {
+inline fn resolveAutoSize(value: geometry.Size(style.dimension.LengthPercentageAuto), parent: geometry.Size(?f32)) OptionalSize {
     return .{ .width = value.width.resolve_to_option(parent.width), .height = value.height.resolve_to_option(parent.height) };
 }
 
-fn resolveOrZero(value: geometry.Rect(style.dimension.LengthPercentageAuto), basis: ?f32) geometry.Rect(f32) {
+inline fn resolveOrZero(value: geometry.Rect(style.dimension.LengthPercentageAuto), basis: ?f32) geometry.Rect(f32) {
     return .{
         .left = value.left.resolve_to_option(basis) orelse 0,
         .right = value.right.resolve_to_option(basis) orelse 0,
