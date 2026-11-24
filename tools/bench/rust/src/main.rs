@@ -4,8 +4,7 @@
 //!
 //! Output: `bench|<scenario>|<iters>|<ns_per_iter>|<peak_live_bytes>`.
 //! Peak live bytes come from a counting global allocator (the tree is dropped
-//! inside each iteration, so this approximates a working-set peak; the Zig
-//! side reports arena capacity instead).
+//! inside each iteration, matching the Zig harness).
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
@@ -197,6 +196,41 @@ fn block_nested() {
         .unwrap();
     tree.compute_layout(root, Size { width: AvailableSpace::Definite(500.0), height: AvailableSpace::MaxContent })
         .unwrap();
+}
+
+fn block_float_avoidance() {
+    let mut tree: TaffyTree<String> = TaffyTree::new();
+    let mut sections = Vec::with_capacity(128);
+    let mut last_content = None;
+    for _ in 0..128 {
+        let tall = tree
+            .new_leaf(Style { float: taffy::Float::Left, ..fixed(10.0, 30.0) })
+            .unwrap();
+        let flat = tree
+            .new_leaf(Style { float: taffy::Float::Left, clear: taffy::Clear::Left, ..fixed(100.0, 0.0) })
+            .unwrap();
+        let body = tree.new_leaf(fixed(350.0, 40.0)).unwrap();
+        let content = tree
+            .new_with_children(
+                Style {
+                    display: Display::FlowRoot,
+                    size: Size { width: Dimension::length(350.0), height: Dimension::auto() },
+                    ..Default::default()
+                },
+                &[body],
+            )
+            .unwrap();
+        last_content = Some(content);
+        sections.push(
+            tree.new_with_children(Style { display: Display::FlowRoot, ..Default::default() }, &[tall, flat, content])
+                .unwrap(),
+        );
+    }
+    let root = tree.new_with_children(Style { display: Display::Block, ..Default::default() }, &sections).unwrap();
+    tree.compute_layout(root, Size { width: AvailableSpace::Definite(500.0), height: AvailableSpace::MaxContent })
+        .unwrap();
+    let content = tree.layout(last_content.unwrap()).unwrap();
+    assert_eq!((content.location.x, content.location.y, content.size.height), (100.0, 0.0, 40.0));
 }
 
 fn mixed() {
@@ -412,6 +446,7 @@ fn main() {
     measure("flex_wrap_500", 20, filter, flex_wrap);
     measure("grid_50x50", 10, filter, grid);
     measure("block_nested_50", 30, filter, block_nested);
+    measure("block_float_avoidance", 30, filter, block_float_avoidance);
     measure("mixed_flex_grid_block", 10, filter, mixed);
     measure_stateful("rebuild_flex_1000", 50, filter, rebuild_setup, rebuild_step);
     measure_stateful("relayout_grid_50x50", 50, filter, relayout_setup, relayout_step);

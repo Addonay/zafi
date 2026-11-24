@@ -45,6 +45,7 @@ SCENARIOS = [
     "flex_wrap_500",
     "grid_50x50",
     "block_nested_50",
+    "block_float_avoidance",
     "mixed_flex_grid_block",
 ]
 

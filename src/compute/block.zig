@@ -231,8 +231,13 @@ pub const BlockContext = struct {
 
     /// Search a space suitable for laying out non-floated content into
     pub fn find_content_slot(self: BlockContext, min_y: f32, clear: style.float.Clear, after: ?usize) ContentSlot {
+        return self.find_content_slot_with_height(min_y, 0, clear, after);
+    }
+
+    /// Search over the full height of the content, in this block's coordinates.
+    pub fn find_content_slot_with_height(self: BlockContext, min_y: f32, height: f32, clear: style.float.Clear, after: ?usize) ContentSlot {
         var slot =
-            self.bfc.float_context.find_content_slot(min_y + self.y_offset, self.content_box_insets, clear, after);
+            self.bfc.float_context.find_content_slot_with_height(min_y + self.y_offset, height, self.content_box_insets, clear, after);
         slot.y -= self.y_offset;
         slot.x -= self.insets[0];
         return slot;
@@ -241,8 +246,14 @@ pub const BlockContext = struct {
     /// Search for a space suitable for laying out a box that establishes an independent
     /// formatting context (whose border box must not overlap floats)
     pub fn find_bfc_slot(self: BlockContext, min_y: f32, margins: [2]f32, direction: style.Direction, clear: style.float.Clear, after: ?usize) BfcSlot {
-        var slot = self.bfc.float_context.find_bfc_slot(
+        return self.find_bfc_slot_with_height(min_y, 0, margins, direction, clear, after);
+    }
+
+    /// Search over the minimum border-box height, in this block's coordinates.
+    pub fn find_bfc_slot_with_height(self: BlockContext, min_y: f32, min_height: f32, margins: [2]f32, direction: style.Direction, clear: style.float.Clear, after: ?usize) BfcSlot {
+        var slot = self.bfc.float_context.find_bfc_slot_with_height(
             min_y + self.y_offset,
+            min_height,
             self.content_box_insets,
             margins,
             direction,
@@ -319,6 +330,8 @@ const BlockItem = struct {
     /// rather than being stretch-sized
     /// <https://www.w3.org/TR/CSS22/visudet.html#block-replaced-width>
     is_compressible_replaced: bool,
+    /// Width cap from resolving a replaced child's width or max-width against zero.
+    min_content_width_cap: ?f32,
 
     /// Whether the child is a non-independent block or inline node
     is_in_same_bfc: bool,
@@ -651,10 +664,11 @@ tree_ref,
         store_layouts,
         block_ctx);
 
-    // Root BFCs contain floats
+    // The root BFC contains its floats, with its bottom padding and border
+    // below the lowest float's bottom margin edge.
     var intrinsic_outer_height = inflow_result.intrinsic_outer_height;
     if (block_ctx.is_bfc_root() or establishes_new_bfc) {
-        intrinsic_outer_height = @max(intrinsic_outer_height, block_ctx.floated_content_height_contribution());
+        intrinsic_outer_height = @max(intrinsic_outer_height, block_ctx.floated_content_height_contribution() + resolved_content_box_inset.bottom);
     }
 
     var container_outer_height = known_dimensions_final.height orelse math.f32_maybe_clamp(intrinsic_outer_height, min_size.height, max_size.height);
@@ -891,6 +905,16 @@ fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
         const is_block = child_style.is_block();
         const is_table = child_style.is_table();
         const is_compressible_replaced = child_style.is_compressible_replaced();
+        const size_style = child_style.get(.size);
+        const max_size_style = child_style.get(.max_size);
+        const min_content_width_cap = if (is_compressible_replaced) blk: {
+            // A percentage width or max-width is resolved against zero when
+            // computing the min-content contribution of a replaced element.
+            const width = size_style.width.resolve(0);
+            const max_width = max_size_style.width.resolve(0);
+            const cap = if (width) |value| math.f32_maybe_min(value, max_width) else max_width;
+            break :blk math.maybe_add(cap, box_sizing_adjustment.width);
+        } else null;
         const is_scroll_container = overflow.x.is_scroll_container() or overflow.y.is_scroll_container();
         const contain = child_style.get(.contain);
 
@@ -909,14 +933,15 @@ fn generate_item_list(comptime Tree: type, tree_ref: *Tree,
             .order = order,
             .is_table = is_table,
             .is_compressible_replaced = is_compressible_replaced,
+            .min_content_width_cap = min_content_width_cap,
             .is_in_same_bfc = is_in_same_bfc,
             .is_leaf = child_count_value == 0,
             .float = float_value,
             .clear = child_style.get(.clear),
-            .size_style = child_style.get(.size),
-            .size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveDimensionSize(child_style.get(.size), node_inner_size), aspect_ratio), box_sizing_adjustment),
+            .size_style = size_style,
+            .size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveDimensionSize(size_style, node_inner_size), aspect_ratio), box_sizing_adjustment),
             .min_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(child_style.get(.min_size), node_inner_size), aspect_ratio), box_sizing_adjustment),
-            .max_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(child_style.get(.max_size), node_inner_size), aspect_ratio), box_sizing_adjustment),
+            .max_size = maybeAddSize(geometry.optional_f32_size_maybe_apply_aspect_ratio(resolveAutoSize(max_size_style, node_inner_size), aspect_ratio), box_sizing_adjustment),
             .overflow = overflow,
             .contain = contain,
             .scrollbar_width = child_style.get(.scrollbar_width),
@@ -975,7 +1000,7 @@ fn determine_content_based_container_width(comptime Tree: type, tree_ref: *Tree,
                 .measure => |measure| measure,
                 .exact => |exact| AvailableSpace{ .definite = exact },
             } else math.available_maybe_sub(available_space.width, item_x_margin_sum);
-            break :blk try TreeApi.measure_child_size(tree_ref, 
+            const measured_width = try TreeApi.measure_child_size(tree_ref,
                 item.node_id,
                 known_dimensions,
                 SIZE_NONE,
@@ -984,6 +1009,12 @@ fn determine_content_based_container_width(comptime Tree: type, tree_ref: *Tree,
                 .horizontal,
                 // Must match the value passed when laying the item out (see `Cache.mode`).
                 .{ .start = item.is_in_same_bfc, .end = item.is_in_same_bfc });
+            const cap = item.min_content_width_cap orelse break :blk measured_width;
+            break :blk switch (item_available_width) {
+                .min_content => math.f32_maybe_max(@min(measured_width, cap), item.min_size.width),
+                .definite => |available| math.f32_maybe_max(@min(measured_width, @max(cap, available)), item.min_size.width),
+                .max_content => measured_width,
+            };
         };
 
         const width_with_margins = math.f32_max(width, item.padding_border_sum.width) + item_x_margin_sum;
@@ -1008,6 +1039,92 @@ const InFlowResult = struct {
     last_child_bottom_margin_set: layout.CollapsibleMarginSet,
     first_baseline: ?f32,
 };
+
+/// Shared child inputs for float fitting and final layout, so a successful
+/// fitting pass can be reused by the layout cache.
+const InFlowChildInputs = struct {
+    run_mode: layout.RunMode,
+    parent_width: f32,
+    parent_height: ?f32,
+    margin: geometry.Rect(f32),
+    margins_adjoin_parent: geometry.Line(bool),
+    justify_self: style.alignment.AlignItems,
+
+    fn for_width(self: InFlowChildInputs, comptime Tree: type, tree_ref: *Tree, item: *const BlockItem, stretch_width: f32) BlockError!layout.LayoutInput {
+        const TreeApi = LayoutTree(Tree);
+        const justify = self.justify_self.keyword;
+        const container_inner_width = self.parent_width;
+        const container_percentage_resolution_height = self.parent_height;
+        const parent_size = geometry.Size(?f32){ .width = self.parent_width, .height = self.parent_height };
+
+        // Unless stretched, tables and compressible replaced elements resolve their own width
+        // <https://www.w3.org/TR/CSS22/visudet.html#block-replaced-width>
+        const known_dimensions = if ((item.is_table or item.is_compressible_replaced) and justify != .stretch)
+            SIZE_NONE
+        else blk: {
+            // The automatic width of a block-level box whose `justify-self` is neither
+            // `normal` nor `stretch` is `fit-content` rather than stretch
+            const width_style = if (justify != .normal and justify != .stretch and item.size_style.width.is_auto())
+                style.dimension.Dimension.fit_content
+            else
+                item.size_style.width;
+            // Items with a sizing keyword width resolve their width either directly or by
+            // measuring the item under the corresponding available_space space constraint. `auto`
+            // (the common case) and an already-known width resolve without consulting the
+            // sizing keywords.
+            var keyword_width: ?f32 = null;
+            if (item.size.width == null and !width_style.is_auto()) {
+                if (sizing_keyword.resolve_sizing_keyword(width_style, stretch_width, container_inner_width)) |resolution| {
+                    keyword_width = switch (resolution) {
+                        .exact => |width| width,
+                        .measure => |item_available_width| try TreeApi.measure_child_size(
+                            tree_ref,
+                            item.node_id,
+                            SIZE_NONE,
+                            parent_size,
+                            .{ .width = item_available_width, .height = .max_content },
+                            .inherent_size,
+                            .horizontal,
+                            // Must match the value passed when laying the item out (see `Cache.mode`).
+                            .{ .start = item.is_in_same_bfc, .end = item.is_in_same_bfc }),
+                    };
+                }
+            }
+
+            const keyword_height = if (item.size.height == null and !item.size_style.height.is_auto())
+                resolve_stretch_height(
+                    item.size_style.height,
+                    container_percentage_resolution_height,
+                    self.margin,
+                    self.margins_adjoin_parent)
+            else
+                null;
+
+            const width = math.f32_maybe_clamp(
+                (item.size.width orelse keyword_width) orelse stretch_width,
+                item.min_size.width,
+                item.max_size.width);
+            const height = math.option_maybe_clamp(item.size.height orelse keyword_height, item.min_size.height, item.max_size.height);
+            break :blk geometry.Size(?f32){ .width = width, .height = height };
+        };
+
+        return .{
+            .run_mode = self.run_mode,
+            .sizing_mode = .inherent_size,
+            .axis = .both,
+            .known_dimensions = known_dimensions,
+            .known_dimensions_are_definite = .{ .width = true, .height = true },
+            .parent_size = parent_size,
+            .available_space = .{ .width = .{ .definite = stretch_width }, .height = .max_content },
+            .vertical_margins_are_collapsible = .{ .start = item.is_in_same_bfc, .end = item.is_in_same_bfc },
+        };
+    }
+};
+
+fn border_box_fits(item: *const BlockItem, slot: BfcSlot, stretch_width: f32) bool {
+    const width = math.f32_maybe_clamp(item.size.width orelse stretch_width, item.min_size.width, item.max_size.width);
+    return @max(width, item.padding_border_sum.width) <= slot.border_width + FIT_TOLERANCE;
+}
 
 /// Compute each child's final size and position
 fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree,
@@ -1038,9 +1155,6 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
     };
     const container_percentage_resolution_height = math.maybe_sub(container_percentage_resolution_height_in, resolved_content_box_inset.vertical_axis_sum());
     const parent_size = geometry.Size(?f32){ .width = container_inner_width, .height = container_percentage_resolution_height };
-    // Vertical available_space space in block flow is indefinite, NOT a min-content constraint:
-    // MaxContent is taffy's representation of "indefinite".
-    const available_space = geometry.Size(@import("../style/available_space.zig").AvailableSpace){ .width = .{ .definite = container_inner_width }, .height = .max_content };
 
     if (block_ctx.is_bfc_root()) {
         block_ctx.set_width(container_outer_width);
@@ -1215,6 +1329,26 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
 
         // Handle non-floated boxes
 
+        // `justify-self` on an in-flow block-level box (css-align-3 §6.1.1). `auto`
+        // takes the container's `justify-items`; `normal` lays the box out by the
+        // default block rules. `stretch` does too: those rules already stretch an
+        // auto-width box, so it only differs from `normal` for tables and replaced
+        // boxes, which would otherwise resolve their own width.
+        const justify_self = alignment.resolve_self_relative(item.justify_self orelse justify_items, item.direction, direction, true);
+        const non_stretch_justify_self: ?style.alignment.AlignItems = switch (justify_self.keyword) {
+            .normal, .stretch => null,
+            else => justify_self,
+        };
+
+        const inputs = InFlowChildInputs{
+            .run_mode = run_mode,
+            .parent_width = container_inner_width,
+            .parent_height = container_percentage_resolution_height,
+            .margin = item_non_auto_margin,
+            .margins_adjoin_parent = children_margins_adjoin_own_edges,
+            .justify_self = justify_self,
+        };
+
         var y_margin_offset: f32 = 0.0;
         var item_avoids_floats = false;
         var item_pushed_below_float = false;
@@ -1243,15 +1377,37 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                 // (so that the margin box width is non-negative, per CSS2 §10.3.3)
                 const min_auto_width = -item_non_auto_x_margin_sum;
 
-                // Find the highest slot (at or below `min_y`) with enough horizontal space
-                // for the item's border box, which must not overlap any float
+                // Start with the smallest possible border-box height.
+                const styled_height = math.option_maybe_clamp(item.size.height, item.min_size.height, item.max_size.height);
+                const min_height = @max(styled_height orelse item.min_size.height orelse 0, item.padding_border_sum.height);
+
+                // Find the highest slot that fits the full border box beside the floats.
                 var slot_segment: ?usize = null;
-                const slot = while (true) {
-                    const candidate = block_ctx.find_bfc_slot(min_y, x_margins, direction, item.clear, slot_segment);
+                const slot = search: while (true) {
+                    var candidate = block_ctx.find_bfc_slot_with_height(min_y, min_height, x_margins, direction, item.clear, slot_segment);
                     const segment_id = candidate.segment_id orelse break candidate;
-                    const raw_width = item.size.width orelse @max(@max(candidate.stretch_width, min_auto_width), 0.0);
-                    const width = math.f32_maybe_clamp(raw_width, item.min_size.width, item.max_size.width);
-                    if (width <= candidate.border_width + FIT_TOLERANCE) break candidate;
+                    var width = @max(@max(candidate.stretch_width, min_auto_width), 0.0);
+                    while (border_box_fits(item, candidate, width)) {
+                        if (candidate.height == std.math.inf(f32)) break :search candidate;
+
+                        // Probe with the final layout inputs since a narrower slot may
+                        // make the child taller. Retry only when the width decreases.
+                        const height = blk: {
+                            const mark = TreeApi.scratch_mark(tree_ref);
+                            defer TreeApi.scratch_release(tree_ref, mark);
+                            const probe_inputs = try inputs.for_width(Tree, tree_ref, item, width);
+                            break :blk (try TreeApi.compute_child_layout(tree_ref, item.node_id, probe_inputs)).size.height;
+                        };
+                        if (height <= candidate.height) break :search candidate;
+
+                        candidate = block_ctx.find_bfc_slot_with_height(min_y, @max(height, min_height), x_margins, direction, item.clear, slot_segment);
+                        const narrower_width = @max(@max(candidate.stretch_width, min_auto_width), 0.0);
+                        if (narrower_width >= width) {
+                            if (border_box_fits(item, candidate, narrower_width)) break :search candidate;
+                            break;
+                        }
+                        width = narrower_width;
+                    }
                     slot_segment = segment_id;
                 };
 
@@ -1274,78 +1430,7 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
             }
         }
 
-        // `justify-self` on an in-flow block-level box (css-align-3 §6.1.1). `auto`
-        // takes the container's `justify-items`; `normal` lays the box out by the
-        // default block rules. `stretch` does too: those rules already stretch an
-        // auto-width box, so it only differs from `normal` for tables and replaced
-        // boxes, which would otherwise resolve their own width.
-        const justify_self = alignment.resolve_self_relative(item.justify_self orelse justify_items, item.direction, direction, true);
-        const is_stretch = justify_self.keyword == .stretch;
-        const non_stretch_justify_self: ?style.alignment.AlignItems = switch (justify_self.keyword) {
-            .normal, .stretch => null,
-            else => justify_self,
-        };
-
-        // Unless stretched, tables and compressible replaced elements resolve their own width
-        // <https://www.w3.org/TR/CSS22/visudet.html#block-replaced-width>
-        const known_dimensions = if ((item.is_table or item.is_compressible_replaced) and !is_stretch)
-            SIZE_NONE
-        else blk: {
-            // The automatic width of a block-level box whose `justify-self` is neither
-            // `normal` nor `stretch` is `fit-content` rather than stretch
-            const width_style = if (non_stretch_justify_self != null and item.size_style.width.is_auto())
-                style.dimension.Dimension.fit_content
-            else
-                item.size_style.width;
-            // Items with a sizing keyword width resolve their width either directly or by
-            // measuring the item under the corresponding available_space space constraint. `auto`
-            // (the common case) and an already-known width resolve without consulting the
-            // sizing keywords.
-            var keyword_width: ?f32 = null;
-            if (item.size.width == null and !width_style.is_auto()) {
-                if (sizing_keyword.resolve_sizing_keyword(width_style, stretch_width, container_inner_width)) |resolution| {
-                    keyword_width = switch (resolution) {
-                        .exact => |width| width,
-                        .measure => |item_available_width| try TreeApi.measure_child_size(tree_ref, 
-                            item.node_id,
-                            SIZE_NONE,
-                            parent_size,
-                            geometry.Size(@import("../style/available_space.zig").AvailableSpace){ .width = item_available_width, .height = .max_content },
-                            .inherent_size,
-                            .horizontal,
-                            // Must match the value passed when laying the item out (see `Cache.mode`).
-                            .{ .start = item.is_in_same_bfc, .end = item.is_in_same_bfc }),
-                    };
-                }
-            }
-
-            const keyword_height = if (item.size.height == null and !item.size_style.height.is_auto())
-                resolve_stretch_height(
-                    item.size_style.height,
-                    container_percentage_resolution_height,
-                    item_non_auto_margin,
-                    children_margins_adjoin_own_edges)
-            else
-                null;
-
-            const width = math.f32_maybe_clamp(
-                (item.size.width orelse keyword_width) orelse stretch_width,
-                item.min_size.width,
-                item.max_size.width);
-            const height = math.option_maybe_clamp(item.size.height orelse keyword_height, item.min_size.height, item.max_size.height);
-            break :blk geometry.Size(?f32){ .width = width, .height = height };
-        };
-
-        const child_inputs = layout.LayoutInput{
-            .run_mode = run_mode,
-            .sizing_mode = .inherent_size,
-            .axis = .both,
-            .known_dimensions = known_dimensions,
-            .known_dimensions_are_definite = .{ .width = true, .height = true },
-            .parent_size = parent_size,
-            .available_space = geometry.Size(@import("../style/available_space.zig").AvailableSpace){ .width = .{ .definite = stretch_width }, .height = available_space.height },
-            .vertical_margins_are_collapsible = if (item.is_in_same_bfc) geometry.Line(bool){ .start = true, .end = true } else geometry.Line(bool){ .start = false, .end = false },
-        };
+        const child_inputs = try inputs.for_width(Tree, tree_ref, item, stretch_width);
 
         const clear_threshold = block_ctx.cleared_threshold(item.clear);
         const clear_pos = clear_threshold orelse -std.math.inf(f32);
@@ -1365,7 +1450,7 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
                 // measure function rather than stretch-sized). The width is never smaller than
                 // the item's padding and border, which the content box inset of the child is
                 // built from.
-                const width = @max(known_dimensions.width orelse stretch_width, item.padding_border_sum.width);
+                const width = @max(child_inputs.known_dimensions.width orelse stretch_width, item.padding_border_sum.width);
 
                 // TODO: account for auto margins
                 const inset_left = item_non_auto_margin.left + content_box_inset.left;
@@ -1637,7 +1722,8 @@ fn perform_final_layout_on_in_flow_children(comptime Tree: type, tree_ref: *Tree
         if (active_margin_set_has_clearance) layout.CollapsibleMarginSet.zero else active_collapsible_margin_set;
     const bottom_y_margin_offset = if (active_margin_set_has_clearance)
         active_collapsible_margin_set.resolve()
-    else if (own_margins_collapse_with_children.end)
+    else if (own_margins_collapse_with_children.end or
+        (is_collapsing_with_first_margin_set and own_margins_collapse_with_children.start))
         0.0
     else
         last_child_bottom_margin_set.resolve();

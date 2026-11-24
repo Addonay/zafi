@@ -1,6 +1,6 @@
 # zafi benchmarks: matched Taffy (Rust) vs Zig port
 
-Two harnesses run the same six scenarios with the same iteration counts, so
+Two harnesses run the same scenarios with the same iteration counts, so
 `compare.py` can print a direct ratio table:
 
 | Scenario | What it stresses |
@@ -10,10 +10,12 @@ Two harnesses run the same six scenarios with the same iteration counts, so
 | `flex_wrap_500` | multi-line flex with gaps and align-content |
 | `grid_50x50` | 2,500 items, fixed tracks, placement + occupancy |
 | `block_nested_50` | 50-deep block chain with vertical margins |
+| `block_float_avoidance` | 128 independent block contexts with auto-height content crossing zero-height floats |
 | `mixed_flex_grid_block` | nested flex > grid > block tree |
 
-Both measure **build + layout per iteration** with a fresh tree (Rust drops the
-tree at the end of each call; Zig resets a layout arena), after a warm-up call.
+For these scenarios, both measure **build + layout per iteration** with a fresh
+tree, after a warm-up call. Two additional scenarios measure rebuilding or
+relayout on a retained tree.
 
 ## Running
 
@@ -51,15 +53,7 @@ Zig side; the Rust side always uses its `release` profile (`opt-level = 3`,
 bench|<scenario>|<iters>|<ns_per_iter>|<bytes>
 ```
 
-`bytes` is a memory proxy, not an identical metric:
-
-- Rust: peak live bytes during the measured iterations, tracked by a counting
-  `GlobalAlloc`.
-- Zig: the layout arena's capacity (high-water, retained across iterations by
-  `reset(.retain_capacity)`).
-
-Use it for order-of-magnitude comparisons; the timing columns are the primary
-signal.
+Both harnesses report peak live bytes through their counting system allocator.
 
 ## Why the scripts are defensive
 

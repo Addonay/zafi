@@ -61,7 +61,7 @@ def parse(output: str, side: str) -> dict[str, Row]:
     rows: dict[str, Row] = {}
     for line in output.splitlines():
         parts = line.strip().split("|")
-        if len(parts) not in (5, 6) or parts[0] != "bench":
+        if len(parts) not in (5, 6) or parts[0] != "bench" or parts[1] == "scenario":
             continue
         name = parts[1]
         try:
@@ -138,13 +138,16 @@ def main() -> int:
 
     taffy: dict[str, Row] = {}
     port: dict[str, Row] = {}
-    for _ in range(max(1, args.repeat)):
-        if not args.zig_only:
-            merge(taffy, run_rust(args.filter, prefix))
-        if not args.rust_only:
-            if args.zig_bin is None:
-                raise SystemExit("--zig-bin is required unless --rust-only is passed")
-            merge(port, run_zig(args.zig_bin, args.filter, prefix))
+    if not args.rust_only and args.zig_bin is None:
+        raise SystemExit("--zig-bin is required unless --rust-only is passed")
+    for index in range(max(1, args.repeat)):
+        # Alternate which executable runs first to reduce order effects.
+        sides = ("taffy", "port") if index % 2 == 0 else ("port", "taffy")
+        for side in sides:
+            if side == "taffy" and not args.zig_only:
+                merge(taffy, run_rust(args.filter, prefix))
+            elif side == "port" and not args.rust_only:
+                merge(port, run_zig(args.zig_bin, args.filter, prefix))
 
     if args.rust_only:
         for name, (iters, ns, bytes_) in taffy.items():

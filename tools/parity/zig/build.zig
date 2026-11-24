@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("../../../src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "build_options", .module = build_options.createModule() }},
+        .imports = &.{.{ .name = "zafi_options", .module = build_options.createModule() }},
     });
 
     const exe = b.addExecutable(.{

@@ -50,6 +50,8 @@ pub const BfcSlot = struct {
     /// the negative-margin lower bound). This differs from `border_width` in that the
     /// trailing margin is subtracted (except for any part of it that overlaps a float).
     stretch_width: f32 = 0,
+    /// How far down from the slot's top its widths stay valid.
+    height: f32 = std.math.inf(f32),
 };
 
 /// A floated box
@@ -183,11 +185,10 @@ pub const FloatContext = struct {
     /// A closed-open range indicating which segment the last placed float
     /// was placed (on each side).
     last_placed_floats: [2]SegmentRange = .{ .{}, .{} },
-    /// The bottom (y + height) of the lowest float placed on each side, including
-    /// zero-sized floats (which occupy no segment). Left in slot 0, right in slot 1.
+    /// The bottom (y + height) of the lowest float placed on each side.
+    /// Left in slot 0, right in slot 1.
     clear_bottoms: [2]?f32 = .{ null, null },
-    /// The topmost y position allowed for a new float (CSS2 float rule 5), including
-    /// the tops of zero-sized floats (which occupy no segment)
+    /// The topmost y position allowed for a new float (CSS2 float rule 5).
     float_ceiling: ?f32 = null,
 
     /// Create a new empty `FloatContext`
@@ -308,10 +309,8 @@ pub const FloatContext = struct {
     ) PlacedFloatedBox {
         const slot = @backingInt(direction);
 
-        // Floats (including zero-sized floats) that occupy no segment still constrain the
-        // position of later boxes: rule 5 (a float may not be higher than the top of any
-        // earlier float) and `clear` (which clears past the bottom of floats on the
-        // relevant side, regardless of their width)
+        // Use the exact float edges for source order and clearance, including
+        // zero-height floats and segment boundaries shared by multiple floats.
         const effective_min_y = @max(
             @max(min_y, self.float_ceiling orelse -std.math.inf(f32)),
             self.cleared_threshold(clear) orelse -std.math.inf(f32),
@@ -419,19 +418,6 @@ pub const FloatContext = struct {
             }
         };
 
-        // Short-circuit for zero-height boxes. Zero-width boxes are still recorded in segments:
-        // their edge acts as an obstacle that boxes establishing an independent formatting
-        // context may not be placed to the outside of (e.g. via a negative margin).
-        if (floated_box.height == 0.0) {
-            return PlacedFloatedBox{
-                .id = id,
-                .width = floated_box.width,
-                .height = floated_box.height,
-                .y = start_y,
-                .x_inset = placement.placed_inset,
-            };
-        }
-
         // Handle case where floated box is placed after all existing segments
         if (placement.start == null) {
             // Before the first float, the context is float-free all the way up: the first float
@@ -479,7 +465,15 @@ pub const FloatContext = struct {
             if (placement.end != null) end_idx += 1;
         }
 
-        const end_idx_final: usize = if (placement.end == null) blk: {
+        const end_idx_final: usize = if (floated_box.height == 0.0) blk: {
+            // Only boxes that cross this y should see the new inset. Leave the
+            // segment starting at the same y available to boxes below the float.
+            var segment = self.segments.items[resolved_start_idx];
+            segment.y_end = start_y;
+            self.segments.insert(self.allocator, resolved_start_idx, segment) catch
+                @panic("Taffy float segment allocation failed");
+            break :blk resolved_start_idx;
+        } else if (placement.end == null) blk: {
             // The float extends below all existing segments: add a segment for the part of it
             // below the last segment (its insets are set along with the other segments below)
             const last_y_end = self.segments.items[self.segments.items.len - 1].y_end;
@@ -560,6 +554,18 @@ pub const FloatContext = struct {
         clear: style.float.Clear,
         after: ?usize,
     ) ContentSlot {
+        return self.find_content_slot_with_height(min_y, 0, containing_block_insets, clear, after);
+    }
+
+    /// Find a content slot that avoids floats over the requested height.
+    pub fn find_content_slot_with_height(
+        self: *const FloatContext,
+        min_y: f32,
+        height: f32,
+        containing_block_insets: [2]f32,
+        clear: style.float.Clear,
+        after: ?usize,
+    ) ContentSlot {
         if (!self.has_active_floats(min_y)) {
             return ContentSlot{
                 .segment_id = null,
@@ -570,8 +576,7 @@ pub const FloatContext = struct {
             };
         }
 
-        // Clearance clears past the bottom of floats on the relevant side, including
-        // zero-sized floats which occupy no segment
+        // Clearance clears past the bottom of floats on the relevant side.
         const clamped_min_y = @max(min_y, self.cleared_threshold(clear) orelse -std.math.inf(f32));
 
         // The min starting segment index
@@ -588,14 +593,26 @@ pub const FloatContext = struct {
 
         if (start_idx < self.segments.items.len) {
             const segment = self.segments.items[start_idx];
-            const inset_left = @max(segment.insets[0], containing_block_insets[0]);
-            const inset_right = @max(segment.insets[1], containing_block_insets[1]);
+            const y = @max(segment.y_start, clamped_min_y);
+            const end_y = y + height;
+            var inset_left = @max(segment.insets[0], containing_block_insets[0]);
+            var inset_right = @max(segment.insets[1], containing_block_insets[1]);
+            var slot_height = std.math.inf(f32);
+            for (self.segments.items[start_idx + 1 ..]) |lower| {
+                if (lower.y_start < end_y) {
+                    inset_left = @max(inset_left, lower.insets[0]);
+                    inset_right = @max(inset_right, lower.insets[1]);
+                } else if (lower.insets[0] > inset_left or lower.insets[1] > inset_right) {
+                    slot_height = lower.y_start - y;
+                    break;
+                }
+            }
             return ContentSlot{
                 .segment_id = start_idx,
                 .x = inset_left,
-                .y = @max(segment.y_start, clamped_min_y),
+                .y = y,
                 .width = self.available_width - inset_left - inset_right,
-                .height = std.math.inf(f32),
+                .height = slot_height,
             };
         }
         return ContentSlot{
@@ -620,6 +637,20 @@ pub const FloatContext = struct {
         clear: style.float.Clear,
         after: ?usize,
     ) BfcSlot {
+        return self.find_bfc_slot_with_height(min_y, 0, containing_block_insets, margins, direction, clear, after);
+    }
+
+    /// Find a slot that avoids floats beside the BFC root's minimum border-box height.
+    pub fn find_bfc_slot_with_height(
+        self: *const FloatContext,
+        min_y: f32,
+        min_height: f32,
+        containing_block_insets: [2]f32,
+        margins: [2]f32,
+        direction: style.Direction,
+        clear: style.float.Clear,
+        after: ?usize,
+    ) BfcSlot {
         const margin_insets = [2]f32{ containing_block_insets[0] + margins[0], containing_block_insets[1] + margins[1] };
         const no_float_width = self.available_width - margin_insets[0] - margin_insets[1];
         const no_float_slot = BfcSlot{
@@ -634,8 +665,7 @@ pub const FloatContext = struct {
             return no_float_slot;
         }
 
-        // Clearance clears past the bottom of floats on the relevant side, including
-        // zero-sized floats which occupy no segment
+        // Clearance clears past the bottom of floats on the relevant side.
         const clamped_min_y = @max(min_y, self.cleared_threshold(clear) orelse -std.math.inf(f32));
 
         // The min starting segment index
@@ -651,7 +681,21 @@ pub const FloatContext = struct {
         };
 
         if (start_idx < self.segments.items.len) {
-            const segment = self.segments.items[start_idx];
+            var segment = self.segments.items[start_idx];
+            const y = @max(segment.y_start, clamped_min_y);
+            const end_y = y + min_height;
+            var slot_height = std.math.inf(f32);
+            for (self.segments.items[start_idx + 1 ..]) |lower| {
+                if (lower.y_start < end_y) {
+                    segment.insets = .{ @max(segment.insets[0], lower.insets[0]), @max(segment.insets[1], lower.insets[1]) };
+                    segment.has_float = .{ segment.has_float[0] or lower.has_float[0], segment.has_float[1] or lower.has_float[1] };
+                } else if (lower.insets[0] > segment.insets[0] or lower.insets[1] > segment.insets[1] or
+                    (lower.has_float[0] and !segment.has_float[0]) or (lower.has_float[1] and !segment.has_float[1]))
+                {
+                    slot_height = lower.y_start - y;
+                    break;
+                }
+            }
             const lead: usize = switch (direction) {
                 .ltr => 0,
                 .rtl => 1,
@@ -676,9 +720,10 @@ pub const FloatContext = struct {
             return BfcSlot{
                 .segment_id = start_idx,
                 .x = fit_insets[0],
-                .y = @max(segment.y_start, clamped_min_y),
+                .y = y,
                 .border_width = self.available_width - fit_insets[0] - fit_insets[1],
                 .stretch_width = self.available_width - stretch_insets[0] - stretch_insets[1],
+                .height = slot_height,
             };
         }
         // Below all floats
@@ -766,6 +811,23 @@ test "float zero-height boxes still constrain clearance" {
     _ = context.place_floated_box(0, .{ .width = 20, .height = 0 }, 5, .{ 0, 0 }, .left, .none);
     try testing.expect(!context.has_active_floats(5));
     try testing.expectEqual(@as(?f32, 5), context.cleared_threshold(.left));
+}
+
+test "a content slot sees a zero-height float only when it crosses the float" {
+    const testing = std.testing;
+    var context = FloatContext.init(testing.allocator);
+    defer context.deinit();
+    context.set_width(100);
+    _ = context.place_floated_box(0, .{ .width = 30, .height = 0 }, 10, .{ 0, 0 }, .left, .none);
+
+    const above = context.find_content_slot_with_height(0, 10, .{ 0, 0 }, .none, null);
+    try testing.expectEqual(@as(f32, 100), above.width);
+    try testing.expectEqual(@as(f32, 10), above.height);
+    const crossing = context.find_content_slot_with_height(0, 11, .{ 0, 0 }, .none, null);
+    try testing.expectEqual(@as(f32, 30), crossing.x);
+    try testing.expectEqual(@as(f32, 70), crossing.width);
+    const below = context.find_content_slot_with_height(10, 11, .{ 0, 0 }, .none, null);
+    try testing.expectEqual(@as(f32, 100), below.width);
 }
 
 test "find_bfc_slot accounts for margins against float edges" {
