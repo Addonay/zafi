@@ -14,7 +14,7 @@ tree type.
 
 | | |
 | --- | --- |
-| Layout behavior | Passes all 6,652 Taffy fixtures at Taffy `c6421c1` (upstream `main`, after v0.15.1) |
+| Layout behavior | Passes all 6,696 generated layout fixtures at Taffy v0.16.0 (`497de49c`) |
 | Zig | 0.17.0 or newer |
 | Dependencies | none (optional `serde.zig` for Taffy-compatible JSON) |
 | CSS value parsing | Same results as Taffy's `parse` feature on a 17,126-case differential corpus |
@@ -22,28 +22,35 @@ tree type.
 
 ## Performance
 
-Measured against Taffy `c6421c1` (Rust, `opt-level=3`, LTO) with the same
-allocator (glibc `malloc`) and the same memory metric (peak live bytes) on
-both sides: interleaved runs, best of 12, one core. Ratios are zafi / Taffy;
-lower is better.
+Measured against Taffy v0.16.0 (`497de49c`) on a Ryzen 5 5625U. Zig 0.17.1
+used ReleaseFast, and Rust 1.100 used `opt-level=3` with LTO. Both targeted the
+native CPU, used the system allocator, and measured peak live bytes. Timings are
+the best of 24 interleaved runs on one logical CPU. Ratios are zafi / Taffy.
+Lower is better.
 
 | scenario | time | memory |
 | --- | --- | --- |
-| rebuild a 1000-item flex row every frame (`clear` + rebuild + layout) | **0.85x** | **0.81x** |
-| relayout a 50x50 auto grid after restyling one cell | **0.98x** | **0.76x** |
-| flex row, 1000 items | **0.85x** | **0.81x** |
-| wrapping flex, 500 items | **0.81x** | 1.00x |
-| 50-deep nested blocks | **0.52x** | **0.39x** |
-| nested flex > grid > block | **0.89x** | **0.99x** |
-| 50x50 fixed grid, fresh tree | **0.88x** | **0.76x** |
-| create a 10,000-node tree | **0.88x** | **0.46x** |
-| **geometric mean** | **0.82x** | **0.71x** |
+| rebuild a 1000-item flex row every frame | 1.07x | 0.81x |
+| relayout a 50x50 auto grid after restyling one cell | 1.24x | 0.76x |
+| flex row, 1000 items | 1.01x | 0.81x |
+| wrapping flex, 500 items | 1.04x | 1.00x |
+| 50-deep nested blocks | 1.13x | 0.38x |
+| block layout avoiding floats, 128 independent sections | 0.95x | 0.49x |
+| nested flex > grid > block | 1.05x | 0.99x |
+| 50x50 fixed grid, fresh tree | 1.05x | 0.76x |
+| create a 10,000-node tree | 0.37x | 0.46x |
+| **geometric mean** | **0.945x** | **0.682x** |
 
 A node takes 880 bytes (Taffy: about 1.3 KB): grid-only style properties
 and rarely used per-node data are stored out of line, only for the nodes
 that use them.
 
-Reproduce with the `dev` branch's `tools/` package (`zig build bench-compare`).
+From the `dev` branch, run `bash tools/fetch-reference.sh`, then run the
+comparison from `tools/`. Choose a CPU number available on your machine.
+
+```sh
+RUSTFLAGS='-C target-cpu=native' zig build bench-compare -- --repeat 24 --cpu 8
+```
 
 ## Install
 

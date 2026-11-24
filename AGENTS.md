@@ -64,13 +64,13 @@ git clone https://github.com/Addonay/zafi && cd zafi
 git checkout feat/style-view        # the in-flight work (or dev)
 bash tools/fetch-reference.sh       # clones Taffy at the pin into .references/taffy
 zig build test && zig build test -Dserde=true
-cd tools && zig build fixtures      # full Taffy XML corpus; expect 6652/6652
+cd tools && zig build fixtures      # full Taffy XML corpus; expect 6696/6696
 ```
 
 - The Taffy reference **must** live at `.references/taffy` (gitignored). The
   fixture runner has that path baked in (`tools/build.zig`). It must be a real
   clone of upstream `https://github.com/DioxusLabs/taffy` at
-  `c6421c1cb20df5845e83285d3ce63c716f52186c`. **No symlinks to other local
+  `497de49c200daee81a18ce627bec98d5340ae57a` (v0.16.0). **No symlinks to other local
   projects**: the owner was explicit about this.
 - Tools are a separate Zig package in `tools/` that depends on `..` by path:
   `cd tools && zig build fixtures | fixtures-bin | bench-bin | bench-compare | audit | parity`.
@@ -82,7 +82,7 @@ cd tools && zig build fixtures      # full Taffy XML corpus; expect 6652/6652
 
 1. `zig build test`
 2. `zig build test -Dserde=true`
-3. `cd tools && zig build fixtures` → **6652/6652** at `c6421c1`
+3. `cd tools && zig build fixtures` → **6696/6696** at `497de49c`
 4. `cd tools && zig build parse-parity` → **0 mismatches, 0 memory failures**
    (CSS parsers vs Taffy; see below).
 5. `zig build test -Doptimize=ReleaseSafe` is a good extra check.

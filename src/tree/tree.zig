@@ -2288,3 +2288,24 @@ test "triage 1296b: a fit-content row narrower than its space keeps its max-cont
     try std.testing.expectEqual(@as(f32, 150), (try t.layout_of(row)).size.width);
     try std.testing.expectEqual(@as(f32, 16), (try t.layout_of(row)).size.height);
 }
+
+test "percentage widths let replaced block children shrink below their intrinsic width" {
+    const T = @import("../test.zig");
+    for ([_]style.Style{
+        .{ .display = .block, .item_is_replaced = true, .size = .{ .width = .percent(1), .height = .auto } },
+        .{ .display = .block, .item_is_replaced = true, .max_size = .{ .width = .percent(1), .height = .auto() } },
+    }) |image_style| {
+        var t = Tree.init(std.testing.allocator);
+        defer t.deinit();
+        var square = T.TestNodeContext.aspect_ratio(8, 1);
+        const image = try t.new_leaf_with_context(image_style, &square);
+        const wrapper = try t.new_with_children(.{ .display = .block, .float = .left }, &.{image});
+        const root = try t.new_with_children(.{
+            .display = .block,
+            .size = .{ .width = .length(4), .height = .auto },
+        }, &.{wrapper});
+        try t.compute_layout_with_measure(root, t_max, T.fixture_measure_function);
+        try std.testing.expectEqual(@as(f32, 4), (try t.layout_of(wrapper)).size.width);
+        try std.testing.expectEqual(@as(f32, 4), (try t.layout_of(image)).size.width);
+    }
+}

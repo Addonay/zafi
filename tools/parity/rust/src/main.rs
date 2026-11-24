@@ -34,7 +34,7 @@ fn main() {
                 Style {
                     display: Display::Flex,
                     size: Size { width: Dimension::length(100.0), height: Dimension::length(100.0) },
-                    align_items: Some(AlignItems::CENTER),
+                    align_items: AlignItems::CENTER,
                     ..Default::default()
                 },
                 &[child],
@@ -194,7 +194,7 @@ fn main() {
                 Style {
                     display: Display::Flex,
                     size: Size { width: Dimension::length(100.0), height: Dimension::length(100.0) },
-                    align_items: Some(AlignItems::FLEX_START),
+                    align_items: AlignItems::FLEX_START,
                     ..Default::default()
                 },
                 &[child],
@@ -559,7 +559,7 @@ fn main() {
                 Style {
                     display: Display::Flex,
                     flex_wrap: FlexWrap::Wrap,
-                    align_content: Some(AlignContent::CENTER),
+                    align_content: AlignContent::CENTER,
                     size: Size { width: Dimension::length(100.0), height: Dimension::length(100.0) },
                     ..Default::default()
                 },
@@ -583,7 +583,7 @@ fn main() {
             .new_with_children(
                 Style {
                     display: Display::Flex,
-                    justify_content: Some(JustifyContent::CENTER),
+                    justify_content: JustifyContent::CENTER,
                     size: Size { width: Dimension::length(100.0), height: Dimension::length(20.0) },
                     ..Default::default()
                 },

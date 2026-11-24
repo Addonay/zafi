@@ -26,6 +26,7 @@ const scenarios = [_]Scenario{
     .{ .name = "flex_wrap_500", .iters = 20, .run = benchFlexWrap },
     .{ .name = "grid_50x50", .iters = 10, .run = benchGrid },
     .{ .name = "block_nested_50", .iters = 30, .run = benchBlockNested },
+    .{ .name = "block_float_avoidance", .iters = 30, .run = benchBlockFloatAvoidance },
     .{ .name = "mixed_flex_grid_block", .iters = 10, .run = benchMixed },
 };
 
@@ -315,6 +316,36 @@ fn benchBlockNested(allocator: std.mem.Allocator) !void {
         .size = .{ .width = zafi.Dimension.length(500), .height = zafi.Dimension.auto },
     }, &[_]zafi.NodeId{top});
     try tree.compute_layout(root, .{ .width = .{ .definite = 500 }, .height = .max_content });
+}
+
+fn benchBlockFloatAvoidance(allocator: std.mem.Allocator) !void {
+    var tree = zafi.Tree.init(allocator);
+    defer tree.deinit();
+    const sections = try allocator.alloc(zafi.NodeId, 128);
+    defer allocator.free(sections);
+    var last_content: zafi.NodeId = undefined;
+    for (sections) |*section| {
+        var tall_style = fixedSize(10, 30);
+        tall_style.float = .left;
+        const tall = try tree.new_leaf(tall_style);
+
+        var flat_style = fixedSize(100, 0);
+        flat_style.float = .left;
+        flat_style.clear = .left;
+        const flat = try tree.new_leaf(flat_style);
+
+        const body = try tree.new_leaf(fixedSize(350, 40));
+        last_content = try tree.new_with_children(.{
+            .display = .flow_root,
+            .size = .{ .width = .length(350), .height = .auto },
+        }, &.{body});
+        section.* = try tree.new_with_children(.{ .display = .flow_root }, &.{ tall, flat, last_content });
+    }
+    const root = try tree.new_with_children(.{ .display = .block }, sections);
+    try tree.compute_layout(root, .{ .width = .{ .definite = 500 }, .height = .max_content });
+    const content = try tree.layout_of(last_content);
+    if (content.location.x != 100 or content.location.y != 0 or content.size.height != 40)
+        return error.UnexpectedFloatLayout;
 }
 
 fn benchMixed(allocator: std.mem.Allocator) !void {
